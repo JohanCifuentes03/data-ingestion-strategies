@@ -50,24 +50,45 @@ tesis-ingestion-benchmark/
 
 - Docker Desktop (WSL2 en Windows) con **≥4 GB** asignados.
 - Docker Compose v2.
-- Java 17 + Maven 3.9 para construir los jars.
+- Java 21 + Maven 3.9 para construir los jars.
 - Bash (para los scripts en `scripts/`). En Windows usar WSL2.
 
 ## 🚀 Puesta en marcha
 
-1. Clonar el repositorio y copiar `.env.example` → `.env` para personalizar credenciales/recursos.
-2. Compilar los jobs Java:
+Sigue estos pasos en orden para dejar todo operativo:
+
+1. **Clona y configura**
+   ```bash
+   git clone https://github.com/JohanCifuentes03/data-ingestion-strategies.git
+   cd data-ingestion-strategies
+   cp .env.example .env  # Ajusta credenciales, tasas y memoria
+   ```
+2. **Prepara Java/Maven**: verifica que `java -version` muestre 21 y que Maven use ese runtime.
+3. **Compila los jobs** (genera los JAR sombreados montados en los contenedores):
    ```bash
    mvn -pl common,batch,microbatch,streaming clean package
    ```
-3. Levantar la infraestructura:
+4. **Construye imágenes auxiliares y levanta la infraestructura**:
    ```bash
    docker compose up -d --build
    ```
-4. Crear/limpiar el entorno antes de cada corrida:
+   Espera a que Kafka, Spark, Flink, PostgreSQL, Prometheus y Grafana estén `healthy` (`docker compose ps`).
+5. **Inicializa entorno experimental** (topics limpios + tabla truncada):
    ```bash
    ./scripts/clean.sh
    ```
+6. **Corre la estrategia deseada** usando los scripts:
+   ```bash
+   ./scripts/run_batch.sh low-load
+   ./scripts/run_microbatch.sh medium-load "5 seconds"
+   ./scripts/run_streaming.sh burst
+   ```
+   Ajusta escenario, offsets, triggers o paralelismo según tus pruebas.
+7. **Monitorea y valida**:
+   - Prometheus: http://localhost:9090
+   - Grafana (admin/admin): http://localhost:3000 (dashboard "Latency Overview").
+   - Logs: `docker compose logs -f <servicio>`.
+8. **Repite escenarios** siguiendo el protocolo (`clean → warmup → run → cooldown`) y exporta resultados desde `results/`.
 
 Los jars sombreados quedan en `batch/target/batch-job.jar`, `microbatch/target/microbatch-job.jar` y `streaming/target/streaming-job.jar`, montados automáticamente en los contenedores correspondientes.
 
