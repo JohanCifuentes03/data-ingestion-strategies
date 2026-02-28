@@ -14,6 +14,7 @@ import org.tesis.common.ConfigLoader;
 
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeoutException;
 
 public final class SparkStructuredJob {
     private SparkStructuredJob() {
@@ -27,7 +28,7 @@ public final class SparkStructuredJob {
         });
     }
 
-    public static void main(String[] args) throws StreamingQueryException {
+    public static void main(String[] args) throws StreamingQueryException, TimeoutException {
         Map<String, String> config = ConfigLoader.parseArgs(args);
         String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
         String topic = config.getOrDefault("kafka.topic", "events");
@@ -61,10 +62,11 @@ public final class SparkStructuredJob {
                 .outputMode("append")
                 .option("checkpointLocation", checkpointLocation)
                 .trigger(Trigger.ProcessingTime(triggerInterval))
-                .foreachBatch((batchDataset, batchId) -> batchDataset
-                        .write()
-                        .mode("append")
-                        .jdbc(jdbcUrl, "events", properties))
+                .foreachBatch((batchDataset, batchId) -> {
+                    batchDataset.write()
+                            .mode("append")
+                            .jdbc(jdbcUrl, "events", properties);
+                })
                 .start();
 
         query.awaitTermination();

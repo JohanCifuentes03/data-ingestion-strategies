@@ -8,8 +8,8 @@ dependencies {
     compileOnly "org.apache.flink:flink-java:${flinkVersion}"
     compileOnly "org.apache.flink:flink-streaming-java:${flinkVersion}"
     compileOnly "org.apache.flink:flink-clients:${flinkVersion}"
-    implementation "org.apache.flink:flink-connector-kafka:${flinkVersion}"
-    implementation "org.apache.flink:flink-connector-jdbc:${flinkVersion}"
+    implementation "org.apache.flink:flink-connector-kafka:${flinkConnectorVersion}"
+    implementation "org.apache.flink:flink-connector-jdbc:${flinkConnectorVersion}"
     implementation "org.postgresql:postgresql:${postgresVersion}"
 }
 

@@ -1,6 +1,4 @@
 plugins {
-    id 'java-library' apply false
-    id 'application' apply false
     id 'com.github.johnrengelman.shadow' version '8.1.1' apply false
 }
 
@@ -8,6 +6,7 @@ ext {
     sparkVersion = '3.5.0'
     scalaBinaryVersion = '2.12'
     flinkVersion = '1.18.1'
+    flinkConnectorVersion = '3.2.0-1.18'
     jacksonVersion = '2.15.3'
     kafkaVersion = '3.6.1'
     postgresVersion = '42.7.0'
