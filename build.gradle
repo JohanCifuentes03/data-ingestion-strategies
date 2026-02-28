@@ -1,0 +1,40 @@
+plugins {
+    id 'java-library' apply false
+    id 'application' apply false
+    id 'com.github.johnrengelman.shadow' version '8.1.1' apply false
+}
+
+ext {
+    sparkVersion = '3.5.0'
+    scalaBinaryVersion = '2.12'
+    flinkVersion = '1.18.1'
+    jacksonVersion = '2.15.3'
+    kafkaVersion = '3.6.1'
+    postgresVersion = '42.7.0'
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    group = 'org.tesis'
+    version = '0.1.0-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = 21
+    }
+}
+
+tasks.register('buildJobs') {
+    dependsOn ':batch:shadowJar', ':microbatch:shadowJar', ':streaming:shadowJar'
+}

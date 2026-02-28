@@ -50,7 +50,7 @@ tesis-ingestion-benchmark/
 
 - Docker Desktop (WSL2 en Windows) con **≥4 GB** asignados.
 - Docker Compose v2.
-- Java 21 + Maven 3.9 para construir los jars.
+- Java 21 (el wrapper Gradle ya está incluido, no necesitas Maven instalado).
 - Bash (para los scripts en `scripts/`). En Windows usar WSL2.
 
 ## 🚀 Puesta en marcha
@@ -64,9 +64,9 @@ Sigue estos pasos en orden para dejar todo operativo:
    cp .env.example .env  # Ajusta credenciales, tasas y memoria
    ```
 2. **Prepara Java/Maven**: verifica que `java -version` muestre 21 y que Maven use ese runtime.
-3. **Compila los jobs** (genera los JAR sombreados montados en los contenedores):
+3. **Compila los jobs** (Gradle wrapper genera los JAR sombreados montados en los contenedores):
    ```bash
-   mvn -pl common,batch,microbatch,streaming clean package
+   ./gradlew clean buildJobs
    ```
 4. **Construye imágenes auxiliares y levanta la infraestructura**:
    ```bash
@@ -90,7 +90,7 @@ Sigue estos pasos en orden para dejar todo operativo:
    - Logs: `docker compose logs -f <servicio>`.
 8. **Repite escenarios** siguiendo el protocolo (`clean → warmup → run → cooldown`) y exporta resultados desde `results/`.
 
-Los jars sombreados quedan en `batch/target/batch-job.jar`, `microbatch/target/microbatch-job.jar` y `streaming/target/streaming-job.jar`, montados automáticamente en los contenedores correspondientes.
+Los jars sombreados quedan en `batch/build/libs/batch-job.jar`, `microbatch/build/libs/microbatch-job.jar` y `streaming/build/libs/streaming-job.jar`, montados automáticamente en los contenedores correspondientes.
 
 ## 🔁 Ejecución de escenarios
 

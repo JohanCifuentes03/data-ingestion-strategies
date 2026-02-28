@@ -1,0 +1,6 @@
+rootProject.name = "data-ingestion-strategies"
+
+include("common")
+include("batch")
+include("microbatch")
+include("streaming")

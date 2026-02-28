@@ -52,8 +52,8 @@ services:
       - "${SPARK_MASTER_WEBUI_PORT}:${SPARK_MASTER_WEBUI_PORT}"
       - "4040:4040"
     volumes:
-      - ./batch/target:/opt/bitnami/spark/jobs/batch:ro
-      - ./microbatch/target:/opt/bitnami/spark/jobs/microbatch:ro
+      - ./batch/build/libs:/opt/bitnami/spark/jobs/batch:ro
+      - ./microbatch/build/libs:/opt/bitnami/spark/jobs/microbatch:ro
       - spark-checkpoints:/opt/bitnami/spark/checkpoints
 
   spark-worker:
@@ -76,7 +76,7 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ./streaming/target:/opt/flink/jobs:ro
+      - ./streaming/build/libs:/opt/flink/jobs:ro
 
   flink-taskmanager:
     image: bitnami/flink:1.18
@@ -87,7 +87,7 @@ services:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
       - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=${FLINK_PARALLELISM}
     volumes:
-      - ./streaming/target:/opt/flink/jobs:ro
+      - ./streaming/build/libs:/opt/flink/jobs:ro
 
   postgres:
     image: postgres:15
