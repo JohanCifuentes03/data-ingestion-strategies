@@ -1,35 +1,38 @@
-version: "3.9"
-
 services:
   zookeeper:
-    image: bitnami/zookeeper:3.9
+    image: confluentinc/cp-zookeeper:7.5.3
     restart: unless-stopped
     environment:
-      - ALLOW_ANONYMOUS_LOGIN=yes
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
     volumes:
-      - zookeeper-data:/bitnami
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
 
   kafka:
-    image: bitnami/kafka:3.6
+    image: confluentinc/cp-kafka:7.5.3
     restart: unless-stopped
     depends_on:
       - zookeeper
     environment:
-      - KAFKA_BROKER_ID=${KAFKA_BROKER_ID}
-      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
-      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
-      - KAFKA_CFG_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS}
-      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
-      - KAFKA_CFG_NUM_PARTITIONS=${KAFKA_NUM_PARTITIONS}
-      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=${KAFKA_REPLICATION_FACTOR}
-      - ALLOW_PLAINTEXT_LISTENER=yes
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: ${KAFKA_ADVERTISED_LISTENERS}
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     ports:
       - "${KAFKA_PORT}:9092"
     volumes:
-      - kafka-data:/bitnami/kafka
-      - ./infrastructure/kafka-config:/opt/kafka/config/custom
+      - kafka-data:/var/lib/kafka/data
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
@@ -40,62 +43,81 @@ services:
       - "9308:9308"
 
   spark-master:
-    image: bitnami/spark:3.5
-    depends_on:
-      - kafka
+    image: apache/spark:3.5.8-java17
+    restart: unless-stopped
     environment:
-      - SPARK_MODE=master
-      - SPARK_MASTER_PORT=${SPARK_MASTER_PORT}
-      - SPARK_MASTER_WEBUI_PORT=${SPARK_MASTER_WEBUI_PORT}
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master
+      --port ${SPARK_MASTER_PORT}
+      --webui-port ${SPARK_MASTER_WEBUI_PORT}
     ports:
       - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
       - "${SPARK_MASTER_WEBUI_PORT}:${SPARK_MASTER_WEBUI_PORT}"
-      - "4040:4040"
     volumes:
-      - ./batch/build/libs:/opt/bitnami/spark/jobs/batch:ro
-      - ./microbatch/build/libs:/opt/bitnami/spark/jobs/microbatch:ro
-      - spark-checkpoints:/opt/bitnami/spark/checkpoints
+      - ./batch/build/libs:/opt/spark/jobs/batch:ro
+      - ./microbatch/build/libs:/opt/spark/jobs/microbatch:ro
+      - spark-checkpoints:/opt/spark/checkpoints
 
   spark-worker:
-    image: bitnami/spark:3.5
+    image: apache/spark:3.5.8-java17
+    restart: unless-stopped
     depends_on:
       - spark-master
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:${SPARK_MASTER_PORT}
-      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
-      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:${SPARK_MASTER_PORT}
+      --cores ${SPARK_WORKER_CORES}
+      --memory ${SPARK_WORKER_MEMORY}
+      --work-dir /opt/spark/work-dir
     volumes:
-      - spark-checkpoints:/opt/bitnami/spark/checkpoints
+      - spark-checkpoints:/opt/spark/checkpoints
 
   flink-jobmanager:
-    image: bitnami/flink:1.18
+    image: flink:1.18.1-scala_2.12-java11
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    command: jobmanager
     environment:
-      - FLINK_MODE=jobmanager
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - |
+        FLINK_PROPERTIES=
+          jobmanager.rpc.address: flink-jobmanager
+          jobmanager.heap.size: 1024m
+          rest.port: 8081
+          parallelism.default: ${FLINK_PARALLELISM}
     ports:
       - "8081:8081"
     volumes:
-      - ./streaming/build/libs:/opt/flink/jobs:ro
+      - ./streaming/build/libs:/opt/flink/usrlib:ro
 
   flink-taskmanager:
-    image: bitnami/flink:1.18
+    image: flink:1.18.1-scala_2.12-java11
+    restart: unless-stopped
     depends_on:
       - flink-jobmanager
+    command: taskmanager
     environment:
-      - FLINK_MODE=taskmanager
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
-      - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=${FLINK_PARALLELISM}
+      - |
+        FLINK_PROPERTIES=
+          jobmanager.rpc.address: flink-jobmanager
+          taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM}
+          taskmanager.heap.size: ${FLINK_TASKMANAGER_MEMORY}
     volumes:
-      - ./streaming/build/libs:/opt/flink/jobs:ro
+      - ./streaming/build/libs:/opt/flink/usrlib:ro
 
   postgres:
     image: postgres:15
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "${POSTGRES_PORT}:5432"
     volumes:
@@ -107,9 +129,9 @@ services:
     depends_on:
       - postgres
     environment:
-      - DATA_SOURCE_URI=postgres:5432/${POSTGRES_DB}?sslmode=disable
-      - DATA_SOURCE_USER=${POSTGRES_USER}
-      - DATA_SOURCE_PASS=${POSTGRES_PASSWORD}
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
     ports:
       - "9187:9187"
 
@@ -133,8 +155,8 @@ services:
     depends_on:
       - prometheus
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
     ports:
       - "3000:3000"
     volumes:
@@ -145,13 +167,15 @@ services:
   generator:
     build:
       context: ./generator
+    depends_on:
+      - kafka
     environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - TOPIC_NAME=events
-      - EVENT_RATE=${GENERATOR_EVENT_RATE}
-      - PAYLOAD_SIZE=${GENERATOR_PAYLOAD_BYTES}
-      - SCENARIO=${GENERATOR_SCENARIO}
-      - PROMETHEUS_PORT=8000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TOPIC_NAME: events
+      EVENT_RATE: ${GENERATOR_EVENT_RATE}
+      PAYLOAD_SIZE: ${GENERATOR_PAYLOAD_BYTES}
+      SCENARIO: ${GENERATOR_SCENARIO}
+      PROMETHEUS_PORT: 8000
     ports:
       - "8000:8000"
     volumes:
@@ -163,14 +187,14 @@ services:
     depends_on:
       - postgres
     environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - PROBE_POLL_INTERVAL_MS=${PROBE_POLL_INTERVAL_MS}
-      - RESULTS_PATH=/results
-      - PROMETHEUS_PORT=8001
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PROBE_POLL_INTERVAL_MS: ${PROBE_POLL_INTERVAL_MS}
+      RESULTS_PATH: /results
+      PROMETHEUS_PORT: 8001
     ports:
       - "8001:8001"
     volumes:
@@ -178,6 +202,7 @@ services:
 
 volumes:
   zookeeper-data:
+  zookeeper-log:
   kafka-data:
   postgres-data:
   spark-checkpoints:

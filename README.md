@@ -66,14 +66,18 @@ Sigue estos pasos en orden para dejar todo operativo:
 2. **Prepara Java/Maven**: verifica que `java -version` muestre 21 y que Maven use ese runtime.
 3. **Compila los jobs** (Gradle wrapper genera los JAR sombreados montados en los contenedores):
    ```bash
-   ./gradlew clean buildJobs
+   ./gradlew buildJobs
    ```
-4. **Construye imágenes auxiliares y levanta la infraestructura**:
+4. **Construye las imágenes Python (generador/probe) una vez**:
    ```bash
-   docker compose up -d --build
+   docker compose build generator probe
    ```
-   Espera a que Kafka, Spark, Flink, PostgreSQL, Prometheus y Grafana estén `healthy` (`docker compose ps`).
-5. **Inicializa entorno experimental** (topics limpios + tabla truncada):
+5. **Levanta la infraestructura** (sin reconstruir mientras no cambie el código):
+   ```bash
+   docker compose up -d --no-build
+   docker compose ps  # verifica que todo esté "Up"
+   ```
+6. **Inicializa entorno experimental** (topics limpios + tabla truncada):
    ```bash
    ./scripts/clean.sh
    ```
@@ -90,7 +94,7 @@ Sigue estos pasos en orden para dejar todo operativo:
    - Logs: `docker compose logs -f <servicio>`.
 8. **Repite escenarios** siguiendo el protocolo (`clean → warmup → run → cooldown`) y exporta resultados desde `results/`.
 
-Los jars sombreados quedan en `batch/build/libs/batch-job.jar`, `microbatch/build/libs/microbatch-job.jar` y `streaming/build/libs/streaming-job.jar`, montados automáticamente en los contenedores correspondientes.
+Los jars sombreados quedan en `batch/build/libs/batch-job.jar`, `microbatch/build/libs/microbatch-job.jar` y `streaming/build/libs/streaming-job.jar`, montados automáticamente en los contenedores correspondientes. Si cambias el código de Python (generator/probe) vuelve a ejecutar `docker compose build generator probe` antes del próximo `up`.
 
 ## 🔁 Ejecución de escenarios
 
