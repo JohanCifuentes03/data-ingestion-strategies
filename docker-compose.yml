@@ -1,0 +1,185 @@
+version: "3.9"
+
+services:
+  zookeeper:
+    image: bitnami/zookeeper:3.9
+    restart: unless-stopped
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/bitnami
+
+  kafka:
+    image: bitnami/kafka:3.6
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      - KAFKA_BROKER_ID=${KAFKA_BROKER_ID}
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=${KAFKA_ADVERTISED_LISTENERS}
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
+      - KAFKA_CFG_NUM_PARTITIONS=${KAFKA_NUM_PARTITIONS}
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=${KAFKA_REPLICATION_FACTOR}
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    ports:
+      - "${KAFKA_PORT}:9092"
+    volumes:
+      - kafka-data:/bitnami/kafka
+      - ./infrastructure/kafka-config:/opt/kafka/config/custom
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    depends_on:
+      - kafka
+    command: ["--kafka.server=kafka:9092"]
+    ports:
+      - "9308:9308"
+
+  spark-master:
+    image: bitnami/spark:3.5
+    depends_on:
+      - kafka
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_PORT=${SPARK_MASTER_PORT}
+      - SPARK_MASTER_WEBUI_PORT=${SPARK_MASTER_WEBUI_PORT}
+    ports:
+      - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
+      - "${SPARK_MASTER_WEBUI_PORT}:${SPARK_MASTER_WEBUI_PORT}"
+      - "4040:4040"
+    volumes:
+      - ./batch/target:/opt/bitnami/spark/jobs/batch:ro
+      - ./microbatch/target:/opt/bitnami/spark/jobs/microbatch:ro
+      - spark-checkpoints:/opt/bitnami/spark/checkpoints
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:${SPARK_MASTER_PORT}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES}
+    volumes:
+      - spark-checkpoints:/opt/bitnami/spark/checkpoints
+
+  flink-jobmanager:
+    image: bitnami/flink:1.18
+    environment:
+      - FLINK_MODE=jobmanager
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./streaming/target:/opt/flink/jobs:ro
+
+  flink-taskmanager:
+    image: bitnami/flink:1.18
+    depends_on:
+      - flink-jobmanager
+    environment:
+      - FLINK_MODE=taskmanager
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=${FLINK_PARALLELISM}
+    volumes:
+      - ./streaming/target:/opt/flink/jobs:ro
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/sql:/docker-entrypoint-initdb.d:ro
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    depends_on:
+      - postgres
+    environment:
+      - DATA_SOURCE_URI=postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - DATA_SOURCE_USER=${POSTGRES_USER}
+      - DATA_SOURCE_PASS=${POSTGRES_PASSWORD}
+    ports:
+      - "9187:9187"
+
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    restart: unless-stopped
+    depends_on:
+      - kafka-exporter
+      - postgres-exporter
+      - generator
+      - probe
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  generator:
+    build:
+      context: ./generator
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - TOPIC_NAME=events
+      - EVENT_RATE=${GENERATOR_EVENT_RATE}
+      - PAYLOAD_SIZE=${GENERATOR_PAYLOAD_BYTES}
+      - SCENARIO=${GENERATOR_SCENARIO}
+      - PROMETHEUS_PORT=8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./generator:/app
+
+  probe:
+    build:
+      context: ./probe
+    depends_on:
+      - postgres
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - PROBE_POLL_INTERVAL_MS=${PROBE_POLL_INTERVAL_MS}
+      - RESULTS_PATH=/results
+      - PROMETHEUS_PORT=8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./results:/results
+
+volumes:
+  zookeeper-data:
+  kafka-data:
+  postgres-data:
+  spark-checkpoints:
+  prometheus-data:
+  grafana-data:
