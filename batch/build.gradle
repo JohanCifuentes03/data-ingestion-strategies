@@ -5,11 +5,13 @@ plugins {
 
 dependencies {
     implementation project(':common')
-    compileOnly "org.apache.spark:spark-core_${scalaBinaryVersion}:${sparkVersion}"
-    compileOnly "org.apache.spark:spark-sql_${scalaBinaryVersion}:${sparkVersion}"
+    implementation "org.apache.spark:spark-core_${scalaBinaryVersion}:${sparkVersion}"
+    implementation "org.apache.spark:spark-sql_${scalaBinaryVersion}:${sparkVersion}"
     implementation "org.postgresql:postgresql:${postgresVersion}"
 }
 
 shadowJar {
     archiveFileName = 'batch-job.jar'
+    mergeServiceFiles()
+    zip64 true
 }

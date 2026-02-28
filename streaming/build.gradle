@@ -5,9 +5,9 @@ plugins {
 
 dependencies {
     implementation project(':common')
-    compileOnly "org.apache.flink:flink-java:${flinkVersion}"
-    compileOnly "org.apache.flink:flink-streaming-java:${flinkVersion}"
-    compileOnly "org.apache.flink:flink-clients:${flinkVersion}"
+    implementation "org.apache.flink:flink-java:${flinkVersion}"
+    implementation "org.apache.flink:flink-streaming-java:${flinkVersion}"
+    implementation "org.apache.flink:flink-clients:${flinkVersion}"
     implementation "org.apache.flink:flink-connector-kafka:${flinkConnectorVersion}"
     implementation "org.apache.flink:flink-connector-jdbc:${flinkConnectorVersion}"
     implementation "org.postgresql:postgresql:${postgresVersion}"
@@ -15,4 +15,6 @@ dependencies {
 
 shadowJar {
     archiveFileName = 'streaming-job.jar'
+    mergeServiceFiles()
+    zip64 true
 }
