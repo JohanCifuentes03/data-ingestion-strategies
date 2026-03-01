@@ -206,3 +206,16 @@ pyrightconfig.json
 !/results/.gitkeep
 /.gradle/
 **/build/
+**/out/
+
+# Eclipse / VSCode Java metadata
+.classpath
+.project
+.settings/
+**/.classpath
+**/.project
+**/.settings/
+/batch/.gitignore
+/common/.gitignore
+/microbatch/.gitignore
+/streaming/.gitignore
