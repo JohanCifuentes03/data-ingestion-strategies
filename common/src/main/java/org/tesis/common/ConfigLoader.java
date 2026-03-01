@@ -25,6 +25,7 @@ public final class ConfigLoader {
         Properties properties = new Properties();
         properties.setProperty("user", user);
         properties.setProperty("password", password);
+        properties.setProperty("driver", "org.postgresql.Driver");
         properties.setProperty("stringtype", "unspecified");
         return properties;
     }

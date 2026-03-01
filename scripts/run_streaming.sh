@@ -12,7 +12,7 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 bash "$ROOT_DIR/scripts/clean.sh" "$SCENARIO"
 
 echo "[run_streaming] Deploying Flink job for $SCENARIO"
-docker compose exec flink-jobmanager /opt/flink/bin/flink run \
+MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
   -p ${FLINK_PARALLELISM_VALUE} \
   /opt/flink/jobs/streaming-job.jar \
     --scenario "$SCENARIO" \

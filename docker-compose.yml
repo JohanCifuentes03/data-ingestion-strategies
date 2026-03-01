@@ -56,8 +56,8 @@ services:
       - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
       - "${SPARK_MASTER_WEBUI_PORT}:${SPARK_MASTER_WEBUI_PORT}"
     volumes:
-      - ./batch/build/libs:/opt/spark/jobs/batch:ro
-      - ./microbatch/build/libs:/opt/spark/jobs/microbatch:ro
+      - ./batch/out/libs:/opt/spark/jobs/batch:ro
+      - ./microbatch/out/libs:/opt/spark/jobs/microbatch:ro
       - spark-checkpoints:/opt/spark/checkpoints
 
   spark-worker:
@@ -77,7 +77,7 @@ services:
       - spark-checkpoints:/opt/spark/checkpoints
 
   flink-jobmanager:
-    image: flink:1.18.1-scala_2.12-java11
+    image: flink:1.18.1-scala_2.12-java17
     restart: unless-stopped
     depends_on:
       - kafka
@@ -93,10 +93,10 @@ services:
     ports:
       - "8081:8081"
     volumes:
-      - ./streaming/build/libs:/opt/flink/usrlib:ro
+      - ./streaming/out/libs:/opt/flink/usrlib:ro
 
   flink-taskmanager:
-    image: flink:1.18.1-scala_2.12-java11
+    image: flink:1.18.1-scala_2.12-java17
     restart: unless-stopped
     depends_on:
       - flink-jobmanager
@@ -109,7 +109,7 @@ services:
           taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM}
           taskmanager.heap.size: ${FLINK_TASKMANAGER_MEMORY}
     volumes:
-      - ./streaming/build/libs:/opt/flink/usrlib:ro
+      - ./streaming/out/libs:/opt/flink/usrlib:ro
 
   postgres:
     image: postgres:15

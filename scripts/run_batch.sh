@@ -14,10 +14,10 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 bash "$ROOT_DIR/scripts/clean.sh" "$SCENARIO"
 
 echo "[run_batch] Submitting Spark batch job for scenario $SCENARIO"
-docker compose exec spark-master /opt/bitnami/spark/bin/spark-submit \
+MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
   --class org.tesis.batch.SparkBatchJob \
   --master spark://spark-master:${MASTER_PORT} \
-  /opt/bitnami/spark/jobs/batch/batch-job.jar \
+  /opt/spark/jobs/batch/batch-job.jar \
     --scenario="$SCENARIO" \
     --kafka.bootstrap.servers=kafka:9092 \
     --kafka.topic=events \
