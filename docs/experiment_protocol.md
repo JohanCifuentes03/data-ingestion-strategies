@@ -17,7 +17,6 @@ pruebas de la tesis. Cada corrida sigue un protocolo riguroso para garantizar
 ## 2. Preparación (una sola vez)
 
 ```bash
-```bash
 # 1. Compilar los JARs de los tres jobs
 
 # Linux / macOS / WSL2:
@@ -40,11 +39,12 @@ docker compose ps
 
 Cada corrida experimental consta de 5 fases:
 
-```
-┌──────────┐   ┌─────────┐   ┌──────┐   ┌──────────┐   ┌─────────┐
-│  CLEAN   │──▶│ WARMUP  │──▶│ RUN  │──▶│ COOLDOWN │──▶│ EXPORT  │
-│          │   │  30 s   │   │ 20 m │   │   10 s   │   │         │
-└──────────┘   └─────────┘   └──────┘   └──────────┘   └─────────┘
+```mermaid
+graph LR
+    A[CLEAN] --> B[WARMUP<br/>30 s]
+    B --> C[RUN<br/>20 m]
+    C --> D[COOLDOWN<br/>10 s]
+    D --> E[EXPORT]
 ```
 
 ### 3.1 CLEAN
