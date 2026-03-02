@@ -13,52 +13,63 @@ import org.tesis.common.ConfigLoader;
 import java.util.Map;
 import java.util.Properties;
 
+/**
+ * Spark Batch job — reads all available events from Kafka and writes
+ * them to PostgreSQL in a single batch execution.
+ * <p>
+ * {@code visible_at} is <b>not</b> set by this job; PostgreSQL fills it
+ * via its column DEFAULT at INSERT time.
+ */
 public final class SparkBatchJob {
-    private SparkBatchJob() {
-    }
+        private SparkBatchJob() {
+        }
 
-    private static StructType eventSchema() {
-        return new StructType(new StructField[]{
-                DataTypes.createStructField("event_id", DataTypes.StringType, false),
-                DataTypes.createStructField("produced_at", DataTypes.LongType, false),
-                DataTypes.createStructField("payload", DataTypes.StringType, false)
-        });
-    }
+        private static StructType eventSchema() {
+                return new StructType(new StructField[] {
+                                DataTypes.createStructField("event_id", DataTypes.StringType, false),
+                                DataTypes.createStructField("produced_at", DataTypes.LongType, false),
+                                DataTypes.createStructField("payload", DataTypes.StringType, false)
+                });
+        }
 
-    public static void main(String[] args) {
-        Map<String, String> config = ConfigLoader.parseArgs(args);
-        String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
-        String topic = config.getOrDefault("kafka.topic", "events");
-        String startingOffsets = config.getOrDefault("kafka.startingOffsets", "earliest");
-        String endingOffsets = config.getOrDefault("kafka.endingOffsets", "latest");
-        String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
-        String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
-        String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
+        public static void main(String[] args) {
+                Map<String, String> config = ConfigLoader.parseArgs(args);
+                String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
+                String topic = config.getOrDefault("kafka.topic", "events");
+                String startingOffsets = config.getOrDefault("kafka.startingOffsets", "earliest");
+                String endingOffsets = config.getOrDefault("kafka.endingOffsets", "latest");
+                String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
+                String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
+                String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
+                String scenario = config.getOrDefault("scenario", "low-load");
+                String runId = config.getOrDefault("run.id", "run_1");
 
-        SparkSession spark = SparkSession.builder()
-                .appName("SparkBatchJob")
-                .getOrCreate();
+                SparkSession spark = SparkSession.builder()
+                                .appName("SparkBatchJob-" + scenario)
+                                .getOrCreate();
 
-        Dataset<Row> kafkaDataset = spark.read()
-                .format("kafka")
-                .option("kafka.bootstrap.servers", kafkaBootstrap)
-                .option("subscribe", topic)
-                .option("startingOffsets", startingOffsets)
-                .option("endingOffsets", endingOffsets)
-                .load();
+                Dataset<Row> kafkaDataset = spark.read()
+                                .format("kafka")
+                                .option("kafka.bootstrap.servers", kafkaBootstrap)
+                                .option("subscribe", topic)
+                                .option("startingOffsets", startingOffsets)
+                                .option("endingOffsets", endingOffsets)
+                                .load();
 
-        StructType schema = eventSchema();
-        Dataset<Row> parsed = kafkaDataset
-                .selectExpr("CAST(value AS STRING) AS json")
-                .select(functions.from_json(functions.col("json"), schema).alias("event"))
-                .select("event.*")
-                .withColumn("visible_at", functions.expr("(unix_timestamp(current_timestamp()) * 1000)"));
+                StructType schema = eventSchema();
+                Dataset<Row> parsed = kafkaDataset
+                                .selectExpr("CAST(value AS STRING) AS json")
+                                .select(functions.from_json(functions.col("json"), schema).alias("event"))
+                                .select("event.*")
+                                .withColumn("strategy", functions.lit("batch"))
+                                .withColumn("scenario", functions.lit(scenario))
+                                .withColumn("run_id", functions.lit(runId));
 
-        Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
-        parsed.write()
-                .mode(SaveMode.Append)
-                .jdbc(jdbcUrl, "events", properties);
+                Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
+                parsed.write()
+                                .mode(SaveMode.Append)
+                                .jdbc(jdbcUrl, "events", properties);
 
-        spark.close();
-    }
+                spark.close();
+        }
 }

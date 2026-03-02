@@ -16,59 +16,71 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeoutException;
 
+/**
+ * Spark Structured Streaming job — consumes events from Kafka using
+ * micro-batch semantics with a configurable trigger interval.
+ * <p>
+ * {@code visible_at} is <b>not</b> set by this job; PostgreSQL fills it
+ * via its column DEFAULT at INSERT time.
+ */
 public final class SparkStructuredJob {
-    private SparkStructuredJob() {
-    }
+        private SparkStructuredJob() {
+        }
 
-    private static StructType eventSchema() {
-        return new StructType(new StructField[]{
-                DataTypes.createStructField("event_id", DataTypes.StringType, false),
-                DataTypes.createStructField("produced_at", DataTypes.LongType, false),
-                DataTypes.createStructField("payload", DataTypes.StringType, false)
-        });
-    }
+        private static StructType eventSchema() {
+                return new StructType(new StructField[] {
+                                DataTypes.createStructField("event_id", DataTypes.StringType, false),
+                                DataTypes.createStructField("produced_at", DataTypes.LongType, false),
+                                DataTypes.createStructField("payload", DataTypes.StringType, false)
+                });
+        }
 
-    public static void main(String[] args) throws StreamingQueryException, TimeoutException {
-        Map<String, String> config = ConfigLoader.parseArgs(args);
-        String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
-        String topic = config.getOrDefault("kafka.topic", "events");
-        String checkpointLocation = config.getOrDefault("checkpoint.location", "/opt/bitnami/spark/checkpoints/microbatch");
-        String triggerInterval = config.getOrDefault("trigger.interval", "5 seconds");
-        String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
-        String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
-        String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
+        public static void main(String[] args) throws StreamingQueryException, TimeoutException {
+                Map<String, String> config = ConfigLoader.parseArgs(args);
+                String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
+                String topic = config.getOrDefault("kafka.topic", "events");
+                String checkpointLocation = config.getOrDefault("checkpoint.location",
+                                "/opt/spark/checkpoints/microbatch");
+                String triggerInterval = config.getOrDefault("trigger.interval", "5 seconds");
+                String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
+                String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
+                String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
+                String scenario = config.getOrDefault("scenario", "low-load");
+                String runId = config.getOrDefault("run.id", "run_1");
 
-        SparkSession spark = SparkSession.builder()
-                .appName("SparkStructuredStreaming")
-                .getOrCreate();
+                SparkSession spark = SparkSession.builder()
+                                .appName("SparkStructuredStreaming-" + scenario)
+                                .getOrCreate();
 
-        Dataset<Row> streamingDataset = spark.readStream()
-                .format("kafka")
-                .option("kafka.bootstrap.servers", kafkaBootstrap)
-                .option("subscribe", topic)
-                .option("startingOffsets", "earliest")
-                .load();
+                Dataset<Row> streamingDataset = spark.readStream()
+                                .format("kafka")
+                                .option("kafka.bootstrap.servers", kafkaBootstrap)
+                                .option("subscribe", topic)
+                                .option("startingOffsets", "earliest")
+                                .load();
 
-        StructType schema = eventSchema();
-        Dataset<Row> events = streamingDataset
-                .selectExpr("CAST(value AS STRING) AS json")
-                .select(functions.from_json(functions.col("json"), schema).alias("event"))
-                .select("event.*")
-                .withColumn("visible_at", functions.expr("(unix_timestamp(current_timestamp()) * 1000)"));
+                StructType schema = eventSchema();
+                Dataset<Row> events = streamingDataset
+                                .selectExpr("CAST(value AS STRING) AS json")
+                                .select(functions.from_json(functions.col("json"), schema).alias("event"))
+                                .select("event.*")
+                                .withColumn("strategy", functions.lit("microbatch"))
+                                .withColumn("scenario", functions.lit(scenario))
+                                .withColumn("run_id", functions.lit(runId));
 
-        Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
+                Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
 
-        StreamingQuery query = events.writeStream()
-                .outputMode("append")
-                .option("checkpointLocation", checkpointLocation)
-                .trigger(Trigger.ProcessingTime(triggerInterval))
-                .foreachBatch((batchDataset, batchId) -> {
-                    batchDataset.write()
-                            .mode("append")
-                            .jdbc(jdbcUrl, "events", properties);
-                })
-                .start();
+                StreamingQuery query = events.writeStream()
+                                .outputMode("append")
+                                .option("checkpointLocation", checkpointLocation)
+                                .trigger(Trigger.ProcessingTime(triggerInterval))
+                                .foreachBatch((batchDataset, batchId) -> {
+                                        batchDataset.write()
+                                                        .mode("append")
+                                                        .jdbc(jdbcUrl, "events", properties);
+                                })
+                                .start();
 
-        query.awaitTermination();
-    }
+                query.awaitTermination();
+        }
 }

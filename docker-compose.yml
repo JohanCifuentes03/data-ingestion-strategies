@@ -1,4 +1,5 @@
 services:
+  # ── Message Broker ─────────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.3
     restart: unless-stopped
@@ -33,15 +34,23 @@ services:
       - "${KAFKA_PORT}:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     command: ["--kafka.server=kafka:9092"]
     ports:
       - "9308:9308"
 
+  # ── Compute: Spark ─────────────────────────────────────────────────
   spark-master:
     image: apache/spark:3.5.8-java17
     restart: unless-stopped
@@ -76,11 +85,13 @@ services:
     volumes:
       - spark-checkpoints:/opt/spark/checkpoints
 
+  # ── Compute: Flink ─────────────────────────────────────────────────
   flink-jobmanager:
     image: flink:1.18.1-scala_2.12-java17
     restart: unless-stopped
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     command: jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
@@ -90,8 +101,11 @@ services:
           jobmanager.heap.size: 1024m
           rest.port: 8081
           parallelism.default: ${FLINK_PARALLELISM}
+          metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.port: 9249
     ports:
       - "8081:8081"
+      - "9249:9249"
     volumes:
       - ./streaming/out/libs:/opt/flink/usrlib:ro
 
@@ -108,9 +122,14 @@ services:
           jobmanager.rpc.address: flink-jobmanager
           taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM}
           taskmanager.heap.size: ${FLINK_TASKMANAGER_MEMORY}
+          metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.port: 9249
+    ports:
+      - "9250:9249"
     volumes:
       - ./streaming/out/libs:/opt/flink/usrlib:ro
 
+  # ── Sink ───────────────────────────────────────────────────────────
   postgres:
     image: postgres:15
     restart: unless-stopped
@@ -123,17 +142,37 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infrastructure/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   postgres-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
       DATA_SOURCE_USER: ${POSTGRES_USER}
       DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
     ports:
       - "9187:9187"
+
+  # ── Observability ──────────────────────────────────────────────────
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8888:8080"
 
   prometheus:
     image: prom/prometheus:v2.49.1
@@ -164,28 +203,31 @@ services:
       - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
 
+  # ── Workload ───────────────────────────────────────────────────────
   generator:
     build:
       context: ./generator
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       TOPIC_NAME: events
       EVENT_RATE: ${GENERATOR_EVENT_RATE}
       PAYLOAD_SIZE: ${GENERATOR_PAYLOAD_BYTES}
       SCENARIO: ${GENERATOR_SCENARIO}
+      RUN_DURATION_SECONDS: ${GENERATOR_RUN_DURATION_SECONDS:-0}
+      WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
       PROMETHEUS_PORT: 8000
     ports:
       - "8000:8000"
-    volumes:
-      - ./generator:/app
 
   probe:
     build:
       context: ./probe
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432

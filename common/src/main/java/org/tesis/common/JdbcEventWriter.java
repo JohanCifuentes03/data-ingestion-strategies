@@ -7,27 +7,37 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Properties;
 
+/**
+ * Utility for writing events to PostgreSQL via JDBC batch insert.
+ * <p>
+ * {@code visible_at} is <b>not</b> included in the INSERT statement;
+ * PostgreSQL fills it automatically via its column DEFAULT, ensuring
+ * a consistent measurement point across all ingestion strategies.
+ */
 public final class JdbcEventWriter {
     private JdbcEventWriter() {
     }
 
     private static final String INSERT_SQL = """
-            INSERT INTO events(event_id, produced_at, visible_at, payload)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO events(event_id, produced_at, payload, strategy, scenario, run_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (event_id) DO NOTHING
             """;
 
-    public static void writeBatch(String url, Properties properties, List<Event> events) {
+    public static void writeBatch(String url, Properties properties, List<Event> events,
+            String strategy, String scenario, String runId) {
         if (events.isEmpty()) {
             return;
         }
         try (Connection connection = DriverManager.getConnection(url, properties);
-             PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+                PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
             for (Event event : events) {
                 statement.setObject(1, event.getEventId());
                 statement.setLong(2, event.getProducedAt());
-                statement.setLong(3, event.getVisibleAt());
-                statement.setString(4, event.getPayload());
+                statement.setString(3, event.getPayload());
+                statement.setString(4, strategy);
+                statement.setString(5, scenario);
+                statement.setString(6, runId);
                 statement.addBatch();
             }
             statement.executeBatch();

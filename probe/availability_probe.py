@@ -1,4 +1,11 @@
+"""
+Availability probe — polls PostgreSQL for newly visible events, records
+latency samples to CSV and exposes Prometheus metrics with per-strategy
+and per-scenario labels.
+"""
+
 import csv
+import logging
 import os
 import signal
 import sys
@@ -8,24 +15,54 @@ from pathlib import Path
 import psycopg2
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [probe] %(levelname)s %(message)s",
+)
+log = logging.getLogger("probe")
+
+# ── Prometheus metrics ─────────────────────────────────────────────
 LATENCY_HISTOGRAM = Histogram(
     "probe_latency",
-    "Latency between production and visibility",
-    buckets=(5, 10, 25, 50, 75, 100, 250, 500, 1000, 2000, 5000, 10000),
+    "Latency between production and visibility (ms)",
+    ["strategy", "scenario"],
+    buckets=(5, 10, 25, 50, 75, 100, 250, 500, 1000, 2000, 5000,
+             10000, 30000, 60000),
 )
-VISIBLE_EVENTS = Counter("probe_visible_events_total", "Events observed in sink")
+VISIBLE_EVENTS = Counter(
+    "probe_visible_events_total",
+    "Events observed in sink",
+    ["strategy", "scenario"],
+)
 ERROR_COUNTER = Counter("probe_errors_total", "Errors while probing")
-LAST_VISIBLE_GAUGE = Gauge("probe_last_visible_at_ms", "Latest visible timestamp seen")
+LAST_VISIBLE_GAUGE = Gauge("probe_last_visible_at_ms", "Latest visible_at seen")
+THROUGHPUT_GAUGE = Gauge(
+    "probe_throughput_events_per_sec",
+    "Observed throughput",
+    ["strategy", "scenario"],
+)
 
 
-def pg_connection():
-    return psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "postgres"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-        user=os.getenv("POSTGRES_USER", "benchmark"),
-        password=os.getenv("POSTGRES_PASSWORD", "benchmark"),
-        dbname=os.getenv("POSTGRES_DB", "benchmark"),
-    )
+# ── Helpers ────────────────────────────────────────────────────────
+def pg_connection(max_retries: int = 60, retry_interval: float = 2.0):
+    """Create a PostgreSQL connection with retry logic."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv("POSTGRES_HOST", "postgres"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                user=os.getenv("POSTGRES_USER", "benchmark"),
+                password=os.getenv("POSTGRES_PASSWORD", "benchmark"),
+                dbname=os.getenv("POSTGRES_DB", "benchmark"),
+            )
+            log.info("Connected to PostgreSQL (attempt %d)", attempt)
+            return conn
+        except psycopg2.OperationalError as exc:
+            log.warning("PostgreSQL not ready (attempt %d/%d): %s", attempt, max_retries, exc)
+            if attempt == max_retries:
+                raise
+            time.sleep(retry_interval)
+    raise RuntimeError("Unreachable")
 
 
 def ensure_results_file(path: Path) -> Path:
@@ -33,7 +70,10 @@ def ensure_results_file(path: Path) -> Path:
     if not path.exists():
         with open(path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["event_id", "produced_at", "visible_at", "latency_ms"])
+            writer.writerow([
+                "event_id", "produced_at", "visible_at", "latency_ms",
+                "strategy", "scenario", "run_id",
+            ])
     return path
 
 
@@ -41,10 +81,11 @@ RUNNING = True
 
 
 def handle_signal(signum, frame):  # pylint: disable=unused-argument
-    global RUNNING
+    global RUNNING  # noqa: PLW0603
     RUNNING = False
 
 
+# ── Main loop ──────────────────────────────────────────────────────
 def main():
     prometheus_port = int(os.getenv("PROMETHEUS_PORT", "8001"))
     start_http_server(prometheus_port)
@@ -57,46 +98,86 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
 
     last_visible_at = 0
+    throughput_window_start = time.time()
+    throughput_window_count = 0
+    last_strategy = "unknown"
+    last_scenario = "unknown"
 
-    with pg_connection() as conn:
-        conn.autocommit = True
-        while RUNNING:
+    conn = pg_connection()
+    conn.autocommit = True
+
+    log.info("Probe started — polling every %dms", int(poll_interval * 1000))
+
+    while RUNNING:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT event_id, produced_at, visible_at,
+                           strategy, scenario, run_id
+                    FROM events
+                    WHERE visible_at > %s
+                    ORDER BY visible_at ASC
+                    LIMIT 1000
+                    """,
+                    (last_visible_at,),
+                )
+                rows = cur.fetchall()
+
+            if rows:
+                with open(results_path, "a", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    for event_id, produced_at, visible_at, strategy, scenario, run_id in rows:
+                        latency = visible_at - produced_at
+                        strategy = strategy or "unknown"
+                        scenario = scenario or "unknown"
+                        run_id = run_id or "unset"
+
+                        LATENCY_HISTOGRAM.labels(strategy, scenario).observe(latency)
+                        VISIBLE_EVENTS.labels(strategy, scenario).inc()
+                        LAST_VISIBLE_GAUGE.set(visible_at)
+                        writer.writerow([
+                            event_id, produced_at, visible_at, latency,
+                            strategy, scenario, run_id,
+                        ])
+
+                        last_visible_at = max(last_visible_at, visible_at)
+                        throughput_window_count += 1
+                        last_strategy = strategy
+                        last_scenario = scenario
+
+            # ── Throughput gauge (once per second) ─────────────────
+            now = time.time()
+            window = now - throughput_window_start
+            if window >= 1.0:
+                tp = throughput_window_count / window
+                THROUGHPUT_GAUGE.labels(last_strategy, last_scenario).set(tp)
+                throughput_window_start = now
+                throughput_window_count = 0
+
+            time.sleep(poll_interval)
+
+        except psycopg2.OperationalError as exc:
+            ERROR_COUNTER.inc()
+            log.error("Connection lost, reconnecting: %s", exc)
             try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT event_id, produced_at, visible_at
-                        FROM events
-                        WHERE visible_at > %s
-                        ORDER BY visible_at ASC
-                        LIMIT 1000
-                        """,
-                        (last_visible_at,),
-                    )
-                    rows = cur.fetchall()
+                conn.close()
+            except Exception:
+                pass
+            conn = pg_connection()
+            conn.autocommit = True
+        except Exception as exc:  # pylint: disable=broad-except
+            ERROR_COUNTER.inc()
+            log.error("Error while sampling: %s", exc)
+            time.sleep(2)
 
-                if rows:
-                    with open(results_path, "a", newline="", encoding="utf-8") as handle:
-                        writer = csv.writer(handle)
-                        for event_id, produced_at, visible_at in rows:
-                            latency = visible_at - produced_at
-                            LATENCY_HISTOGRAM.observe(latency)
-                            VISIBLE_EVENTS.inc()
-                            LAST_VISIBLE_GAUGE.set(visible_at)
-                            writer.writerow([event_id, produced_at, visible_at, latency])
-                            last_visible_at = max(last_visible_at, visible_at)
-                time.sleep(poll_interval)
-            except Exception as exc:  # pylint: disable=broad-except
-                ERROR_COUNTER.inc()
-                print(f"[probe] Error while sampling: {exc}")
-                time.sleep(2)
-
-    print("[probe] Shutting down")
+    log.info("Shutting down")
+    conn.close()
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as err:  # pylint: disable=broad-except
-        print(f"Probe failed: {err}")
+        log.critical("Probe failed: %s", err)
         sys.exit(1)

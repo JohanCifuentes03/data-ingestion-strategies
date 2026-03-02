@@ -7,27 +7,26 @@ scrape_configs:
     static_configs:
       - targets: ['prometheus:9090']
 
+  # ── Kafka ──────────────────────────────────────────────────────────
   - job_name: kafka
     static_configs:
       - targets: ['kafka-exporter:9308']
 
+  # ── PostgreSQL ─────────────────────────────────────────────────────
   - job_name: postgres
     static_configs:
       - targets: ['postgres-exporter:9187']
 
-  - job_name: spark-master
-    metrics_path: /metrics/executors
+  # ── Flink (Prometheus Reporter) ────────────────────────────────────
+  - job_name: flink-jobmanager
     static_configs:
-      - targets: ['spark-master:4040']
+      - targets: ['flink-jobmanager:9249']
 
-  - job_name: flink
-    metrics_path: /jobmanager/metrics
-    params:
-      get:
-        - true
+  - job_name: flink-taskmanager
     static_configs:
-      - targets: ['flink-jobmanager:8081']
+      - targets: ['flink-taskmanager:9249']
 
+  # ── Workload components ────────────────────────────────────────────
   - job_name: generator
     static_configs:
       - targets: ['generator:8000']
@@ -35,3 +34,8 @@ scrape_configs:
   - job_name: probe
     static_configs:
       - targets: ['probe:8001']
+
+  # ── Container metrics (cAdvisor) ───────────────────────────────────
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
