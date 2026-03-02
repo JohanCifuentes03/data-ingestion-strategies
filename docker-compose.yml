@@ -54,13 +54,15 @@ services:
   spark-master:
     image: apache/spark:3.5.8-java17
     restart: unless-stopped
+    user: root
     environment:
       SPARK_NO_DAEMONIZE: "true"
     command: >-
-      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
       --host spark-master
       --port ${SPARK_MASTER_PORT}
-      --webui-port ${SPARK_MASTER_WEBUI_PORT}
+      --webui-port ${SPARK_MASTER_WEBUI_PORT}"
     ports:
       - "${SPARK_MASTER_PORT}:${SPARK_MASTER_PORT}"
       - "${SPARK_MASTER_WEBUI_PORT}:${SPARK_MASTER_WEBUI_PORT}"
@@ -72,16 +74,18 @@ services:
   spark-worker:
     image: apache/spark:3.5.8-java17
     restart: unless-stopped
+    user: root
     depends_on:
       - spark-master
     environment:
       SPARK_NO_DAEMONIZE: "true"
     command: >-
-      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
       spark://spark-master:${SPARK_MASTER_PORT}
       --cores ${SPARK_WORKER_CORES}
       --memory ${SPARK_WORKER_MEMORY}
-      --work-dir /opt/spark/work-dir
+      --work-dir /opt/spark/work-dir"
     volumes:
       - spark-checkpoints:/opt/spark/checkpoints
 
