@@ -46,22 +46,22 @@ flowchart LR
         CAD["cAdvisor"]
     end
 
-    GEN -->|produce JSON events| K
+    GEN -->|"produce JSON events"| K
     K --> SB
     K --> SM
     K --> FL
 
-    SB -->|JDBC batch append| PG
-    SM -->|JDBC foreachBatch| PG
-    FL -->|JDBC Sink (batch 500)| PG
+    SB -->|"JDBC batch append"| PG
+    SM -->|"JDBC foreachBatch"| PG
+    FL -->|"JDBC Sink (batch 500)"| PG
 
     PG --> PROBE
-    PROBE -->|probe_latency, probe_visible_events_total| PROM
-    GEN -->|generator_events_total, generator_errors_total| PROM
-    K -.->|kafka-exporter| PROM
-    PG -.->|postgres-exporter| PROM
-    FL -.->|Prometheus Reporter :9249| PROM
-    CAD -.->|container CPU/mem/net| PROM
+    PROBE -->|"probe_latency, probe_visible_events_total"| PROM
+    GEN -->|"generator_events_total, generator_errors_total"| PROM
+    K -.->|"kafka-exporter"| PROM
+    PG -.->|"postgres-exporter"| PROM
+    FL -.->|"Prometheus Reporter :9249"| PROM
+    CAD -.->|"container CPU/mem/net"| PROM
     PROM --> GRAF
 ```
 
