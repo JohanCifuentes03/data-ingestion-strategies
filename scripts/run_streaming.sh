@@ -4,6 +4,8 @@ set -euo pipefail
 SCENARIO=${1:-low-load}
 RUN_ID=${2:-run_1}
 FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-1}
+FLINK_MAIN_CLASS=${FLINK_MAIN_CLASS:-org.tesis.streaming.FlinkStreamingJob}
+FLINK_DETACHED=${FLINK_DETACHED:-false}
 POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
@@ -16,7 +18,14 @@ echo "────────────────────────�
 echo "[run_streaming] strategy=streaming  scenario=$SCENARIO  run_id=$RUN_ID"
 echo "────────────────────────────────────────────────────────────"
 
+FLINK_DETACH_FLAG=""
+if [ "$FLINK_DETACHED" = "true" ]; then
+  FLINK_DETACH_FLAG="-d"
+fi
+
 MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
+  ${FLINK_DETACH_FLAG} \
+  -c ${FLINK_MAIN_CLASS} \
   -p ${FLINK_PARALLELISM_VALUE} \
   /opt/flink/usrlib/streaming-job.jar \
     --scenario "$SCENARIO" \

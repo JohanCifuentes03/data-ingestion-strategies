@@ -1,217 +1,133 @@
 # Data Ingestion Strategies Benchmark
 
-Repositorio de tesis para comparar el desempeño de estrategias de ingestión **Batch**, **Micro-batch** y **Streaming** usando un banco de pruebas reproducible basado en Docker Compose.
+Banco de pruebas reproducible para comparar tres estrategias de ingestion sobre la misma infraestructura:
 
-> **Tesis:** _Evaluación de desempeño en estrategias de ingestión y disponibilización de datos a gran escala_  
-> Universidad Católica de Colombia — Ingeniería de Sistemas y Computación
+- `batch` (Spark one-shot)
+- `microbatch` (Spark Structured Streaming)
+- `streaming` (Flink continuo)
 
----
+Todas consumen de Kafka y escriben en PostgreSQL, con metricas en Prometheus y paneles en Grafana.
 
-## Objetivo
+## Que incluye
 
-Medir la **latencia de disponibilidad** (`visible_at - produced_at`) y el **throughput de ingesta** para tres pipelines sobre la misma infraestructura:
+- Stack completo en Docker Compose (Kafka, Spark, Flink, Postgres, Prometheus, Grafana, generator, probe).
+- Jobs Java compilados con Gradle wrapper.
+- Scripts de operacion para setup, limpieza, ejecucion y validacion.
+- Resultados en CSV dentro de `results/`.
 
-1. **Spark Batch** — ejecución one-shot sobre eventos acumulados en Kafka.
-2. **Spark Structured Streaming** — micro-batch con trigger configurable (1/5/10 s).
-3. **Flink Streaming** — flujo continuo con exactly-once checkpointing.
+## Requisitos
 
-Todo el ecosistema comparte una única fuente (Kafka), un único sink (PostgreSQL) y observabilidad centralizada (Prometheus + Grafana + cAdvisor).
+- Docker Desktop + Docker Compose v2.
+- Java 21 instalado localmente (compilacion via Gradle wrapper).
+- Bash (WSL o Git Bash en Windows).
 
-## Arquitectura
+## Levantar todo en un comando
 
-El diseño completo con diagramas Mermaid se documenta en [`docs/architecture.md`](docs/architecture.md).  
-El protocolo experimental detallado se describe en [`docs/experiment_protocol.md`](docs/experiment_protocol.md).
-
-### Servicios principales (Docker Compose)
-
-| Categoría | Servicios |
-|-----------|----------|
-| **Broker** | Kafka + ZooKeeper |
-| **Compute** | Spark Master + Worker, Flink JobManager + TaskManager |
-| **Sink** | PostgreSQL 15 |
-| **Workload** | Generator (Python), Availability Probe (Python) |
-| **Observabilidad** | Prometheus, Grafana, cAdvisor, kafka-exporter, postgres-exporter |
-
-### Uniformidad de medición
-
-> `visible_at` se registra **exclusivamente** como `DEFAULT` en PostgreSQL (`EXTRACT(EPOCH FROM NOW()) * 1000`), eliminando cualquier bias entre estrategias. Ningún job establece este campo manualmente.
-
-## Estructura
-
-```
-data-ingestion-strategies/
-├── batch/                 # Spark batch job (Java)
-├── microbatch/            # Spark Structured Streaming (Java)
-├── streaming/             # Flink streaming job (Java)
-├── common/                # Clases compartidas (Event, ConfigLoader, JdbcEventWriter)
-├── generator/             # Productor de eventos + métricas Prometheus
-├── probe/                 # Sonda de latencia, exportación CSV + Prometheus
-├── infrastructure/
-│   ├── kafka-config/      # Scripts de tópicos
-│   ├── prometheus/        # Scrape config (Kafka, PG, Flink, cAdvisor, Generator, Probe)
-│   ├── grafana/           # Datasource + dashboards auto-provisionados
-│   └── sql/               # Migración initial (CREATE TABLE events)
-├── scripts/
-│   ├── clean.sh           # Reset Kafka + PostgreSQL + checkpoints
-│   ├── run_batch.sh       # Ejecutar estrategia Batch
-│   ├── run_microbatch.sh  # Ejecutar estrategia Micro-batch
-│   ├── run_streaming.sh   # Ejecutar estrategia Streaming
-│   ├── run_experiment.sh  # Runner automatizado (estrategias × escenarios × repeticiones)
-│   └── export_metrics.py  # Exportar métricas Prometheus → CSV
-├── results/               # Salidas de experimentos (gitignored)
-├── docs/
-│   ├── architecture.md    # Arquitectura detallada + diagramas Mermaid
-│   └── experiment_protocol.md  # Protocolo experimental paso a paso
-├── docker-compose.yml
-├── build.gradle           # Multi-proyecto Gradle (batch, microbatch, streaming, common)
-└── .env.example           # Variables de entorno configurables
-```
-
-## Requisitos previos
-
-- Docker Desktop (WSL2 en Windows) con **≥ 6 GB** de RAM asignados.
-- Docker Compose v2.
-- Java 21 (el Gradle wrapper está incluido).
-- Bash (para los scripts). En Windows usar WSL2.
-
-## Puesta en marcha
+Desde la raiz del repo:
 
 ```bash
-# 1. Clonar y configurar
-git clone https://github.com/JohanCifuentes03/data-ingestion-strategies.git
-cd data-ingestion-strategies
-cp .env.example .env          # Ajustar credenciales, tasas y duración
-
-### 2. Compilar los JARs
-
-**Linux / macOS / WSL2:**
-```bash
-./gradlew buildJobs
+bash ./scripts/setup.sh
 ```
 
-**Windows (PowerShell):**
-```powershell
-.\gradlew.bat buildJobs
+El script hace esto automaticamente:
+
+1. Verifica prerequisitos (`docker`, `java`, `bash`, daemon Docker).
+2. Crea `.env` desde `.env.example` si no existe.
+3. Compila jobs (`buildJobs`).
+4. Construye imagenes `generator` y `probe`.
+5. Levanta infraestructura.
+6. Ejecuta limpieza inicial (`scripts/clean.sh`).
+
+## Flujo rapido de uso
+
+### 1) Validar estado
+
+```bash
+bash ./scripts/doctor.sh
 ```
 
-### 3. Construir imágenes Python
-```bash
-docker compose build generator probe
-```
+### 2) Ejecutar una estrategia
 
-### 4. Levantar infraestructura
 ```bash
-docker compose up -d --no-build
-docker compose ps
-```
-
-### 5. Ejecutar una estrategia individual
-
-**Linux / macOS / WSL2:**
-```bash
-./scripts/run_batch.sh low-load run_1
-./scripts/run_microbatch.sh medium-load run_1 "5 seconds"
-./scripts/run_streaming.sh burst run_1
-```
-
-**Windows (PowerShell/CMD):**
-*Nota: Se requiere una terminal compatible con Bash (Git Bash, WSL2 o similar).*
-```bash
+# Batch
 bash ./scripts/run_batch.sh low-load run_1
+
+# Micro-batch (trigger configurable)
 bash ./scripts/run_microbatch.sh medium-load run_1 "5 seconds"
-bash ./scripts/run_streaming.sh burst run_1
+
+# Flink streaming (recomendado detached)
+FLINK_DETACHED=true bash ./scripts/run_streaming.sh burst run_1
 ```
 
-## Ejecución de experimentos
-
-### Corrida individual
+### 3) Prueba intensa (stress)
 
 ```bash
-# Batch con offsets controlados
-./scripts/run_batch.sh low-load run_1 earliest latest
+# default: microbatch + burst + rate alta
+bash ./scripts/run_stress.sh
 
-# Structured Streaming con trigger de 5 s
-./scripts/run_microbatch.sh medium-load run_1 "5 seconds"
-
-# Flink Streaming
-./scripts/run_streaming.sh high-load run_1
+# variante: streaming
+bash ./scripts/run_stress.sh streaming burst run_stress_1
 ```
 
-### Experimento completo automatizado
+## URLs utiles
 
-```bash
-# Todas las estrategias × todos los escenarios × 5 repeticiones = 60 corridas
-./scripts/run_experiment.sh
+- Grafana: `http://localhost:3000` (admin/admin)
+- Prometheus: `http://localhost:9090`
+- Spark UI: `http://localhost:8080`
+- Flink UI: `http://localhost:8081`
+- Generator metrics: `http://localhost:8000/metrics`
+- Probe metrics: `http://localhost:8001/metrics`
 
-# Solo streaming, solo high-load, 3 repeticiones
-./scripts/run_experiment.sh --strategies streaming --scenarios high-load --reps 3
+## Variables de entorno clave
 
-# Con trigger personalizado para micro-batch
-./scripts/run_experiment.sh --trigger "10 seconds"
+Configuralas en `.env`:
+
+- `GENERATOR_SCENARIO`: `low-load|medium-load|high-load|burst`
+- `GENERATOR_EVENT_RATE`: tasa base de eventos/seg.
+- `GENERATOR_PAYLOAD_BYTES`: tamano payload.
+- `PROBE_POLL_INTERVAL_MS`: frecuencia de sondeo del probe.
+- `FLINK_PARALLELISM`: paralelismo default Flink.
+- `SPARK_WORKER_CORES`, `SPARK_WORKER_MEMORY`: capacidad Spark.
+
+## Scripts principales
+
+- `scripts/setup.sh`: setup completo de cero a listo.
+- `scripts/doctor.sh`: chequeo rapido de salud (servicios, endpoints, targets, DB).
+- `scripts/clean.sh`: resetea topic `events`, tabla `events` y checkpoints.
+- `scripts/run_batch.sh`: corrida batch.
+- `scripts/run_microbatch.sh`: corrida micro-batch.
+- `scripts/run_streaming.sh`: corrida Flink (soporta `FLINK_DETACHED=true`).
+- `scripts/run_stress.sh`: perfil de carga intensa para validacion visual y de estabilidad.
+- `scripts/run_experiment.sh`: orquestacion por estrategias/escenarios/repeticiones.
+- `scripts/export_metrics.py`: snapshot de metricas Prometheus a CSV.
+
+## Estructura del repositorio
+
+```text
+batch/        Spark Batch job (Java)
+microbatch/   Spark Structured Streaming job (Java)
+streaming/    Flink Streaming job (Java)
+common/       Clases compartidas
+generator/    Productor Kafka + metricas
+probe/        Muestreo de latencia + CSV + metricas
+infrastructure/
+scripts/
+results/
 ```
 
-### Protocolo por corrida
+## Notas operativas importantes
 
-Cada corrida sigue 5 fases: **clean → warmup → run → cooldown → export**.
+- Este repo compila jobs para Java 17 en runtime (compatible con imagenes Spark/Flink usadas).
+- `visible_at` lo asigna PostgreSQL por `DEFAULT`, igual para todas las estrategias.
+- Si corres desde Git Bash en Windows, los scripts ya manejan conversion de paths para `docker compose exec`.
 
-- **Clean**: borra tópico Kafka, trunca tabla PostgreSQL, limpia checkpoints.
-- **Warmup** (configurable, default 30 s): estabiliza JVMs, caches y conexiones.
-- **Run**: producción sostenida a la tasa del escenario.
-- **Cooldown** (10 s): drena buffers pendientes.
-- **Export**: copia CSV y snapshot de Prometheus al directorio de resultados.
+## Troubleshooting rapido
 
-## Métricas
+- Si Docker no responde: inicia Docker Desktop y reintenta `bash ./scripts/setup.sh`.
+- Si no ves graficas: revisa `bash ./scripts/doctor.sh` y confirma targets `generator` y `probe` en Prometheus.
+- Si `clean.sh` se bloquea: el script ya pausa `generator` y `probe` durante el reset para evitar locks.
 
-| Métrica | Prometheus Key | Fuente |
-|---------|---------------|--------|
-| Latencia p50/p95/p99 | `probe_latency` | Probe |
-| Throughput observado | `probe_throughput_events_per_sec` | Probe |
-| Eventos visibles | `probe_visible_events_total` | Probe |
-| Eventos emitidos | `generator_events_total` | Generator |
-| Errores de generación | `generator_errors_total` | Generator |
-| CPU/Memoria/Red contenedor | `container_*` | cAdvisor |
-| Consumer lag Kafka | `kafka_consumergroup_*` | kafka-exporter |
-| Conexiones PostgreSQL | `pg_stat_*` | postgres-exporter |
+## Referencias
 
-Cada corrida genera:
-- `results/<strategy>/<scenario>/run_<n>/latency_samples.csv`
-- `results/<strategy>/<scenario>/run_<n>/prometheus_snapshot.csv`
-
-## Escenarios oficiales
-
-| Escenario | Rate base | Payload | Pico | Duración |
-|-----------|-----------|---------|------|----------|
-| `low-load` | 2.000/s | 512 B | — | 20 min |
-| `medium-load` | 10.000/s | 512 B | — | 20 min |
-| `high-load` | 30.000/s | 512 B | — | 20 min |
-| `burst` | 10.000/s | 512 B | 50.000/s por 60s cada 5 min | 20 min |
-
-Cada escenario se repite **5 veces** para obtener distribución robusta.
-
-## Utilidades
-
-| Script | Descripción |
-|--------|-------------|
-| `scripts/clean.sh` | Borra tópico `events`, trunca tabla, limpia checkpoints |
-| `scripts/run_experiment.sh` | Runner completo con loop de repeticiones |
-| `scripts/export_metrics.py` | Exporta métricas Prometheus a CSV |
-| `infrastructure/kafka-config/create-topics.sh` | Crear tópicos adicionales |
-
-## Buenas prácticas
-
-- Mantener RAM disponible **≥ 6 GB** (8 GB para `high-load` y `burst`).
-- Usar `docker compose logs -f <servicio>` para depurar.
-- El generador y la sonda exponen Prometheus en `:8000` y `:8001`.
-- **Monitoreo en vivo**: Grafana http://localhost:3000 (admin/admin), Prometheus http://localhost:9090.
-- Los resultados se organizan automáticamente en `results/<strategy>/<scenario>/run_<n>/`.
-
-## Próximos pasos sugeridos
-
-1. Crear notebook Jupyter para análisis estadístico de los CSV consolidados.
-2. Añadir más workers Spark/Flink para estudiar escalamiento horizontal.
-3. Incluir workloads sintéticos adicionales (payload variable, transformaciones neutrales).
-4. Automatizar la generación de tablas y gráficas para la tesis.
-
----
-
-Con esta base puedes ejecutar el banco de pruebas completo, versionar las configuraciones y respaldar los resultados de la tesis con rigurosidad.
+- Arquitectura: `docs/architecture.md`
+- Protocolo experimental: `docs/experiment_protocol.md`
