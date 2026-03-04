@@ -20,6 +20,35 @@ echo "────────────────────────�
 echo "[run_streaming] strategy=streaming  scenario=$SCENARIO  run_id=$RUN_ID"
 echo "────────────────────────────────────────────────────────────"
 
+# ── Ensure Flink containers are running before submitting ──────────
+# After heavy or failed runs the jobmanager/taskmanager may be exited.
+# Restart them unconditionally so each streaming run starts clean.
+echo "[run_streaming] Restarting Flink (ensures clean JVM state)..."
+docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1
+
+# Wait until the flink-jobmanager REST port (8081) is bound.
+# Uses /proc/net/tcp6 (always present in Linux containers; no nc/curl needed).
+# Port 8081 in hex = 1F91. We grep for ":1F91 " in the listening sockets.
+echo "[run_streaming] Waiting for Flink REST port 8081..."
+for i in $(seq 1 45); do
+  JM_STATE=$(docker inspect tesis-ingestion-flink-jobmanager-1 \
+               --format '{{.State.Status}}' 2>/dev/null || echo "missing")
+  if [ "$JM_STATE" = "running" ]; then
+    # Check if port 8081 (0x1F91) is listening inside container
+    if docker compose exec -T flink-jobmanager \
+        sh -c "grep -qi ':1F91 ' /proc/net/tcp6 2>/dev/null || grep -qi ':1F91 ' /proc/net/tcp 2>/dev/null"; then
+      echo "[run_streaming] Flink is ready (attempt $i)."
+      break
+    fi
+  fi
+  if [ "$i" -eq 45 ]; then
+    echo "[run_streaming] ERROR: Flink not ready after 90s. Logs:"
+    docker compose logs --tail=15 flink-jobmanager 2>&1 | tail -15
+    exit 1
+  fi
+  sleep 2
+done
+
 FLINK_DETACH_FLAG=""
 if [ "$FLINK_DETACHED" = "true" ]; then
   FLINK_DETACH_FLAG="-d"

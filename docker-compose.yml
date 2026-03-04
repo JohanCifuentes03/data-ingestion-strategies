@@ -99,10 +99,12 @@ services:
     command: jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      # Explicit JVM heap for the jobmanager process (avoids FLINK_PROPERTIES parsing issues)
+      - FLINK_ENV_JAVA_OPTS_JM=-Xms512m -Xmx512m -XX:+ExitOnOutOfMemoryError
       - |
         FLINK_PROPERTIES=
           jobmanager.rpc.address: flink-jobmanager
-          jobmanager.heap.size: 2048m
+          jobmanager.heap.size: 512m
           rest.port: 8081
           parallelism.default: ${FLINK_PARALLELISM}
           metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
@@ -121,6 +123,8 @@ services:
     command: taskmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      # Explicit JVM opts for taskmanager (guarantees heap regardless of FLINK_PROPERTIES parsing)
+      - FLINK_ENV_JAVA_OPTS_TM=-Xms1024m -Xmx${FLINK_TASKMANAGER_MEMORY:-2048}m -XX:+ExitOnOutOfMemoryError
       - |
         FLINK_PROPERTIES=
           jobmanager.rpc.address: flink-jobmanager
