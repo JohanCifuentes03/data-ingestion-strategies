@@ -9,6 +9,8 @@ FLINK_DETACHED=${FLINK_DETACHED:-false}
 POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
+# How long the Flink job runs before auto-stopping (seconds). Default 20 min.
+RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-1200}
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -34,4 +36,7 @@ MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run
     --kafka.topic events \
     --postgres.url jdbc:postgresql://postgres:5432/${POSTGRES_DB_NAME} \
     --postgres.user ${POSTGRES_USER_NAME} \
-    --postgres.password ${POSTGRES_PASSWORD_VALUE}
+    --postgres.password ${POSTGRES_PASSWORD_VALUE} \
+    --run.duration.seconds ${RUN_DURATION_SECONDS}
+
+echo "[run_streaming] Completed — scenario=$SCENARIO run_id=$RUN_ID"

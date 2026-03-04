@@ -8,6 +8,7 @@
 # Usage:
 #   ./scripts/run_experiment.sh                   # all defaults
 #   ./scripts/run_experiment.sh --reps 3          # 3 repetitions
+#   ./scripts/run_experiment.sh --duration 240    # 4 minutes per run
 #   ./scripts/run_experiment.sh --strategies batch # single strategy
 # ───────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -22,16 +23,22 @@ REPETITIONS=${REPETITIONS:-5}
 TRIGGER_INTERVAL=${TRIGGER_INTERVAL:-"5 seconds"}
 COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-10}
 EXPORT_METRICS=${EXPORT_METRICS:-true}
+EXPORT_WINDOW=${EXPORT_WINDOW:-"5m"}    # Prometheus lookback window for metric export
+EVENT_SCHEMA=${EVENT_SCHEMA:-""}        # leave empty to use scenario default
+export RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-1200} # Default 20 mins per run
 
 # ── Parse CLI flags ────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --strategies) STRATEGIES="$2";        shift 2 ;;
-        --scenarios)  SCENARIOS="$2";         shift 2 ;;
-        --reps)       REPETITIONS="$2";       shift 2 ;;
-        --trigger)    TRIGGER_INTERVAL="$2";  shift 2 ;;
-        --cooldown)   COOLDOWN_SECONDS="$2";  shift 2 ;;
-        --no-export)  EXPORT_METRICS=false;   shift   ;;
+        --strategies)  STRATEGIES="$2";       shift 2 ;;
+        --scenarios)   SCENARIOS="$2";        shift 2 ;;
+        --reps)        REPETITIONS="$2";      shift 2 ;;
+        --trigger)     TRIGGER_INTERVAL="$2"; shift 2 ;;
+        --cooldown)    COOLDOWN_SECONDS="$2"; shift 2 ;;
+        --no-export)   EXPORT_METRICS=false;  shift   ;;
+        --window)      EXPORT_WINDOW="$2";    shift 2 ;;
+        --schema)      EVENT_SCHEMA="$2";     shift 2 ;;
+        --duration)    export RUN_DURATION_SECONDS="$2"; shift 2 ;;
         *) echo "[experiment] Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -43,10 +50,13 @@ CURRENT_RUN=0
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║              EXPERIMENT RUNNER — TESIS BENCHMARK            ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Strategies : $STRATEGIES"
-echo "║  Scenarios  : $SCENARIOS"
-echo "║  Repetitions: $REPETITIONS"
-echo "║  Total runs : $TOTAL_RUNS"
+echo "║  Strategies  : $STRATEGIES"
+echo "║  Scenarios   : $SCENARIOS"
+echo "║  Repetitions : $REPETITIONS"
+echo "║  Duration    : ${RUN_DURATION_SECONDS}s per run"
+echo "║  Total runs  : $TOTAL_RUNS"
+echo "║  Export win. : $EXPORT_WINDOW"
+echo "║  Schema      : ${EVENT_SCHEMA:-<scenario default>}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -62,6 +72,11 @@ for STRATEGY in $STRATEGIES; do
             echo "┌──────────────────────────────────────────────────────────┐"
             echo "│  [$CURRENT_RUN/$TOTAL_RUNS]  $STRATEGY / $SCENARIO / $RUN_ID"
             echo "└──────────────────────────────────────────────────────────┘"
+
+            # ── Reset probe CSV before each run ───────────────────
+            echo "[experiment] Truncating probe CSV for fresh run..."
+            docker compose exec -T probe sh -c \
+                "echo 'event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id' > /results/latency_samples.csv"
 
             # ── Run the strategy ───────────────────────────────────
             case "$STRATEGY" in
@@ -86,7 +101,15 @@ for STRATEGY in $STRATEGIES; do
             # ── Copy results ───────────────────────────────────────
             if [ -f "$RESULTS_BASE/latency_samples.csv" ]; then
                 cp "$RESULTS_BASE/latency_samples.csv" "$RUN_DIR/latency_samples.csv"
-                echo "[experiment] Results saved to $RUN_DIR/"
+                # Validate that the run produced enough data (more than just the header)
+                SAMPLE_LINES=$(wc -l < "$RUN_DIR/latency_samples.csv" 2>/dev/null || echo 0)
+                if [ "$SAMPLE_LINES" -lt 10 ]; then
+                    echo "[experiment] WARNING: run $STRATEGY/$SCENARIO/$RUN_ID produced only $SAMPLE_LINES sample lines — possible silent failure"
+                else
+                    echo "[experiment] Results saved to $RUN_DIR/ ($SAMPLE_LINES lines)"
+                fi
+            else
+                echo "[experiment] WARNING: no results CSV found for $STRATEGY/$SCENARIO/$RUN_ID"
             fi
 
             # ── Export Prometheus metrics ───────────────────────────
@@ -95,6 +118,7 @@ for STRATEGY in $STRATEGIES; do
                     --strategy "$STRATEGY" \
                     --scenario "$SCENARIO" \
                     --run-id "$RUN_ID" \
+                    --window "$EXPORT_WINDOW" \
                     --output "$RUN_DIR/prometheus_snapshot.csv" 2>/dev/null || \
                     echo "[experiment] Warning: Prometheus export failed (non-fatal)"
             fi

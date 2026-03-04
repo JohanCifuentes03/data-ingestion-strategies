@@ -5,4 +5,7 @@ plugins {
 dependencies {
     api "org.apache.kafka:kafka-clients:${kafkaVersion}"
     implementation "org.postgresql:postgresql:${postgresVersion}"
+    // Jackson is bundled by both Spark and Flink at runtime;
+    // declared here only so the common module compiles standalone.
+    compileOnly "com.fasterxml.jackson.core:jackson-databind:2.16.1"
 }

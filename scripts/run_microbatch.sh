@@ -8,6 +8,8 @@ MASTER_PORT=${SPARK_MASTER_PORT:-7077}
 POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
+# How long the streaming query runs before auto-stopping (seconds). Default 20 min.
+RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-1200}
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -29,4 +31,7 @@ MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit 
     --checkpoint.location=/opt/spark/checkpoints/microbatch \
     --postgres.url=jdbc:postgresql://postgres:5432/${POSTGRES_DB_NAME} \
     --postgres.user=${POSTGRES_USER_NAME} \
-    --postgres.password=${POSTGRES_PASSWORD_VALUE}
+    --postgres.password=${POSTGRES_PASSWORD_VALUE} \
+    --run.duration.seconds=${RUN_DURATION_SECONDS}
+
+echo "[run_microbatch] Completed — scenario=$SCENARIO run_id=$RUN_ID"

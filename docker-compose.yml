@@ -102,7 +102,7 @@ services:
       - |
         FLINK_PROPERTIES=
           jobmanager.rpc.address: flink-jobmanager
-          jobmanager.heap.size: 1024m
+          jobmanager.heap.size: 2048m
           rest.port: 8081
           parallelism.default: ${FLINK_PARALLELISM}
           metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
@@ -220,6 +220,7 @@ services:
       EVENT_RATE: ${GENERATOR_EVENT_RATE}
       PAYLOAD_SIZE: ${GENERATOR_PAYLOAD_BYTES}
       SCENARIO: ${GENERATOR_SCENARIO}
+      EVENT_SCHEMA: ${GENERATOR_EVENT_SCHEMA:-}
       RUN_DURATION_SECONDS: ${GENERATOR_RUN_DURATION_SECONDS:-0}
       WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
       PROMETHEUS_PORT: 8000

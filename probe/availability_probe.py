@@ -26,8 +26,16 @@ LATENCY_HISTOGRAM = Histogram(
     "probe_latency",
     "Latency between production and visibility (ms)",
     ["strategy", "scenario"],
-    buckets=(5, 10, 25, 50, 75, 100, 250, 500, 1000, 2000, 5000,
-             10000, 30000, 60000),
+    buckets=(
+        # Sub-second (streaming / realtime)
+        50, 100, 250, 500, 750, 1000,
+        # 1-10s (microbatch)
+        1500, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
+        # 10-60s (batch)
+        15000, 20000, 25000, 30000, 45000, 60000,
+        # > 60s
+        120000,
+    ),
 )
 VISIBLE_EVENTS = Counter(
     "probe_visible_events_total",

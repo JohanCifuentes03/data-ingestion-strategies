@@ -10,13 +10,35 @@ POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
 
+# ── How long to let the generator accumulate events before the batch runs ──
+# This must equal run.duration.seconds used by microbatch and streaming,
+# so all three strategies process the same observation window of data.
+RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-1200}
+
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 bash "$ROOT_DIR/scripts/clean.sh" "$SCENARIO"
 
 echo "────────────────────────────────────────────────────────────"
 echo "[run_batch] strategy=batch  scenario=$SCENARIO  run_id=$RUN_ID"
+echo "[run_batch] Accumulation phase: generator runs for ${RUN_DURATION_SECONDS}s before batch job executes"
 echo "────────────────────────────────────────────────────────────"
+
+# ── Wait for the generator to accumulate events ────────────────────────────
+# This mirrors the observation window of microbatch/streaming.
+# Batch simulates a periodic bulk-load pattern: data accumulates in Kafka,
+# then a single job reads and writes all of it to PostgreSQL.
+ELAPSED=0
+REPORT_INTERVAL=60
+while [ "$ELAPSED" -lt "$RUN_DURATION_SECONDS" ]; do
+    REMAINING=$((RUN_DURATION_SECONDS - ELAPSED))
+    echo "[run_batch] Accumulating... ${ELAPSED}s elapsed, ${REMAINING}s remaining"
+    SLEEP_FOR=$((REMAINING < REPORT_INTERVAL ? REMAINING : REPORT_INTERVAL))
+    sleep "$SLEEP_FOR"
+    ELAPSED=$((ELAPSED + SLEEP_FOR))
+done
+
+echo "[run_batch] Accumulation complete — launching Spark Batch job now"
 
 MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
   --class org.tesis.batch.SparkBatchJob \

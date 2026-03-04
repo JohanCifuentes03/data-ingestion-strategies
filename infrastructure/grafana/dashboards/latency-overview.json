@@ -1,12 +1,12 @@
 {
   "title": "Data Ingestion Benchmark",
   "uid": "latency-benchmark",
-  "version": 2,
+  "version": 3,
   "schemaVersion": 39,
   "editable": true,
-  "refresh": "5s",
+  "refresh": "10s",
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "templating": {
@@ -80,7 +80,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Resumen en Tiempo Real",
+      "title": "Indicadores en Tiempo Real",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -90,8 +90,10 @@
       "collapsed": false
     },
     {
+      "id": 1,
       "type": "stat",
-      "title": "Latencia p50 (actual)",
+      "title": "Latencia p50",
+      "description": "Percentil 50 de latencia de disponibilidad",
       "gridPos": {
         "x": 0,
         "y": 1,
@@ -101,6 +103,9 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -113,19 +118,19 @@
                 "value": 1000
               },
               {
+                "color": "orange",
+                "value": 5000
+              },
+              {
                 "color": "red",
-                "value": 10000
+                "value": 15000
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         }
       },
       "options": {
         "graphMode": "area",
-        "textMode": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -134,14 +139,16 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum(rate(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.5, sum by(le) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[10m])))",
           "legendFormat": "p50"
         }
       ]
     },
     {
+      "id": 2,
       "type": "stat",
-      "title": "Latencia p95 (actual)",
+      "title": "Latencia p95",
+      "description": "Percentil 95 de latencia de disponibilidad",
       "gridPos": {
         "x": 6,
         "y": 1,
@@ -151,6 +158,9 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -163,19 +173,19 @@
                 "value": 5000
               },
               {
+                "color": "orange",
+                "value": 15000
+              },
+              {
                 "color": "red",
-                "value": 30000
+                "value": 40000
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         }
       },
       "options": {
         "graphMode": "area",
-        "textMode": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -184,14 +194,16 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by(le) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[10m])))",
           "legendFormat": "p95"
         }
       ]
     },
     {
+      "id": 3,
       "type": "stat",
-      "title": "Throughput (ev/s)",
+      "title": "Latencia p99",
+      "description": "Percentil 99 de latencia de disponibilidad",
       "gridPos": {
         "x": 12,
         "y": 1,
@@ -200,7 +212,205 @@
       },
       "fieldConfig": {
         "defaults": {
+          "unit": "ms",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10000
+              },
+              {
+                "color": "orange",
+                "value": 20000
+              },
+              {
+                "color": "red",
+                "value": 40000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by(le) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[10m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Eventos Visibles (total)",
+      "description": "Total de eventos observados en PostgreSQL",
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(probe_visible_events_total{strategy=~\"$strategy\",scenario=~\"$scenario\"})",
+          "legendFormat": "eventos"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Series Temporales — Latencia y Throughput",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Latencia de Disponibilidad (p50 / p95 / p99)",
+      "description": "Calculado con increase sobre ventana de 2 minutos para adaptarse a estrategias de baja frecuencia (batch)",
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 16,
+        "h": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": true
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by(le,strategy,scenario) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[2m])))",
+          "legendFormat": "p50 {{strategy}}/{{scenario}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by(le,strategy,scenario) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[2m])))",
+          "legendFormat": "p95 {{strategy}}/{{scenario}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by(le,strategy,scenario) (increase(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[2m])))",
+          "legendFormat": "p99 {{strategy}}/{{scenario}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Warmup Activo",
+      "description": "1 = en warmup (no se miden latencias), 0 = corrida valida",
+      "gridPos": {
+        "x": 16,
+        "y": 6,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 40
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "generator_warmup_active",
+          "legendFormat": "warmup"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Throughput Observado (ev/s)",
+      "gridPos": {
+        "x": 16,
+        "y": 11,
+        "w": 8,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
           "unit": "ops",
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -217,15 +427,11 @@
                 "value": 1000
               }
             ]
-          },
-          "color": {
-            "mode": "thresholds"
           }
         }
       },
       "options": {
         "graphMode": "area",
-        "textMode": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -234,206 +440,30 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(probe_visible_events_total{strategy=~\"$strategy\",scenario=~\"$scenario\"}[1m]))",
-          "legendFormat": "visible ev/s"
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Errores Generador",
-      "gridPos": {
-        "x": 18,
-        "y": 1,
-        "w": 6,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 10
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        }
-      },
-      "options": {
-        "graphMode": "area",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(generator_errors_total[1m]))",
-          "legendFormat": "errors/s"
+          "expr": "sum(probe_throughput_events_per_sec{strategy=~\"$strategy\",scenario=~\"$scenario\"})",
+          "legendFormat": "ev/s"
         }
       ]
     },
     {
       "type": "row",
-      "title": "Series Temporales",
-      "gridPos": {
-        "x": 0,
-        "y": 5,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false
-    },
-    {
-      "type": "timeseries",
-      "title": "Latencia de Disponibilidad (p50 / p95 / p99)",
-      "gridPos": {
-        "x": 0,
-        "y": 6,
-        "w": 16,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "pointSize": 3
-          }
-        }
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum(rate(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[5m])) by (le))",
-          "legendFormat": "p50"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[5m])) by (le))",
-          "legendFormat": "p95"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(probe_latency_bucket{strategy=~\"$strategy\",scenario=~\"$scenario\"}[5m])) by (le))",
-          "legendFormat": "p99"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Warmup Activo",
-      "gridPos": {
-        "x": 16,
-        "y": 6,
-        "w": 8,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bool",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 30
-          },
-          "color": {
-            "fixedColor": "orange",
-            "mode": "fixed"
-          }
-        }
-      },
-      "targets": [
-        {
-          "expr": "generator_warmup_active",
-          "legendFormat": "warmup"
-        }
-      ]
-    },
-    {
-      "type": "gauge",
-      "title": "Throughput Probe (ev/s)",
-      "gridPos": {
-        "x": 16,
-        "y": 10,
-        "w": 8,
-        "h": 5
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 500
-              },
-              {
-                "color": "green",
-                "value": 2000
-              }
-            ]
-          },
-          "min": 0,
-          "max": 15000
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "probe_throughput_events_per_sec{strategy=~\"$strategy\",scenario=~\"$scenario\"}",
-          "legendFormat": "{{strategy}}"
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "title": "Throughput y Recursos",
-      "gridPos": {
-        "x": 0,
-        "y": 15,
-        "w": 24,
-        "h": 1
-      },
-      "collapsed": false
-    },
-    {
-      "type": "timeseries",
-      "title": "Producer vs Consumer Throughput",
+      "title": "Throughput y Recursos del Sistema",
       "gridPos": {
         "x": 0,
         "y": 16,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Producer vs Consumer Throughput",
+      "description": "Tasa de produccion del generador vs tasa de visibilidad en PostgreSQL",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
         "w": 12,
         "h": 8
       },
@@ -443,7 +473,8 @@
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
-            "fillOpacity": 15
+            "fillOpacity": 15,
+            "spanNulls": true
           }
         }
       },
@@ -464,11 +495,12 @@
       ]
     },
     {
+      "id": 9,
       "type": "timeseries",
       "title": "CPU por Contenedor",
       "gridPos": {
         "x": 12,
-        "y": 16,
+        "y": 17,
         "w": 12,
         "h": 8
       },
@@ -478,7 +510,8 @@
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,
-            "fillOpacity": 10
+            "fillOpacity": 10,
+            "spanNulls": true
           }
         }
       },
@@ -489,17 +522,18 @@
       },
       "targets": [
         {
-          "expr": "rate(container_cpu_usage_seconds_total{name=~\"tesis-ingestion.*\"}[1m])",
+          "expr": "rate(container_cpu_usage_seconds_total{name!=\"\"}[1m])",
           "legendFormat": "{{name}}"
         }
       ]
     },
     {
+      "id": 10,
       "type": "timeseries",
       "title": "Memoria por Contenedor",
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 25,
         "w": 12,
         "h": 8
       },
@@ -509,7 +543,8 @@
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,
-            "fillOpacity": 10
+            "fillOpacity": 10,
+            "spanNulls": true
           }
         }
       },
@@ -520,17 +555,19 @@
       },
       "targets": [
         {
-          "expr": "container_memory_usage_bytes{name=~\"tesis-ingestion.*\"}",
+          "expr": "container_memory_usage_bytes{name!=\"\"}",
           "legendFormat": "{{name}}"
         }
       ]
     },
     {
+      "id": 11,
       "type": "timeseries",
       "title": "Kafka Consumer Lag",
+      "description": "Mensajes pendientes de consumir por consumer group",
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 25,
         "w": 12,
         "h": 8
       },
@@ -540,7 +577,8 @@
           "custom": {
             "drawStyle": "bars",
             "lineWidth": 1,
-            "fillOpacity": 30
+            "fillOpacity": 30,
+            "spanNulls": true
           }
         }
       },
@@ -551,7 +589,7 @@
       },
       "targets": [
         {
-          "expr": "sum(kafka_consumergroup_lag) by (consumergroup, topic)",
+          "expr": "sum by(consumergroup,topic) (kafka_consumergroup_lag)",
           "legendFormat": "{{consumergroup}} / {{topic}}"
         }
       ]

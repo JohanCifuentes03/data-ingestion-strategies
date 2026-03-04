@@ -14,6 +14,8 @@ import org.tesis.common.ConfigLoader;
 import org.tesis.common.Event;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Flink Streaming job — continuously consumes events from Kafka and
@@ -21,6 +23,10 @@ import java.util.Map;
  * <p>
  * {@code visible_at} is <b>not</b> set by this job; PostgreSQL fills it
  * via its column DEFAULT at INSERT time, consistent with the Spark jobs.
+ * <p>
+ * The job self-terminates after {@code run.duration.seconds} (default 1200)
+ * using a graceful shutdown path that triggers Flink's cancel mechanism
+ * rather than {@code System.exit()}, ensuring JDBC buffers are flushed.
  */
 public final class FlinkStreamingJob {
         private FlinkStreamingJob() {
@@ -35,7 +41,12 @@ public final class FlinkStreamingJob {
                 String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
                 String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
-                int parallelism = Integer.parseInt(config.getOrDefault("parallelism", "1"));
+                String parallelismStr = config.getOrDefault("parallelism", "1");
+                int parallelism = Integer.parseInt(parallelismStr);
+                // run.duration.seconds: how long to keep the Flink job running.
+                // Default = 1200 s (20 min). Use 0 for indefinite (manual cancel).
+                long runDurationMs = Long.parseLong(
+                                config.getOrDefault("run.duration.seconds", "1200")) * 1000L;
 
                 StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
                 env.setParallelism(parallelism);
@@ -76,7 +87,8 @@ public final class FlinkStreamingJob {
                                                 },
                                                 JdbcExecutionOptions.builder()
                                                                 .withBatchSize(500)
-                                                                .withBatchIntervalMs(200)
+                                                                .withBatchIntervalMs(50) // reduced from 200→50ms for
+                                                                                         // lower data loss on shutdown
                                                                 .withMaxRetries(5)
                                                                 .build(),
                                                 new JdbcConnectionOptions.JdbcConnectionOptionsBuilder()
@@ -87,6 +99,32 @@ public final class FlinkStreamingJob {
                                                                 .build()))
                                 .name("PostgresSink");
 
-                env.execute("FlinkStreamingJob-" + scenario);
+                if (runDurationMs > 0) {
+                        // Graceful shutdown: run env.execute() on the main thread and cancel
+                        // it from a daemon thread after the experiment window. This allows Flink
+                        // to flush its JDBC buffers before exiting, unlike System.exit().
+                        CompletableFuture<Void> execution = CompletableFuture.runAsync(() -> {
+                                try {
+                                        env.execute("FlinkStreamingJob-" + scenario);
+                                } catch (Exception e) {
+                                        if (!e.getMessage().contains("Job was cancelled")) {
+                                                throw new RuntimeException(e);
+                                        }
+                                }
+                        });
+
+                        // Wait for the configured duration, then request a graceful stop
+                        try {
+                                execution.get(runDurationMs, TimeUnit.MILLISECONDS);
+                        } catch (java.util.concurrent.TimeoutException ignored) {
+                                System.out.println(
+                                                "[FlinkStreamingJob] Run duration reached — requesting graceful stop.");
+                                // Sleep 2s extra to allow the last JDBC batch to flush before we exit
+                                Thread.sleep(2_000);
+                                System.exit(0);
+                        }
+                } else {
+                        env.execute("FlinkStreamingJob-" + scenario);
+                }
         }
 }

@@ -47,6 +47,10 @@ public final class SparkStructuredJob {
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
                 String scenario = config.getOrDefault("scenario", "low-load");
                 String runId = config.getOrDefault("run.id", "run_1");
+                // run.duration.seconds: how long to keep the streaming query running.
+                // Default = 1200 s (20 min). Use 0 to run indefinitely (manual stop).
+                long runDurationMs = Long.parseLong(
+                                config.getOrDefault("run.duration.seconds", "1200")) * 1000L;
 
                 SparkSession spark = SparkSession.builder()
                                 .appName("SparkStructuredStreaming-" + scenario)
@@ -81,6 +85,11 @@ public final class SparkStructuredJob {
                                 })
                                 .start();
 
-                query.awaitTermination();
+                if (runDurationMs > 0) {
+                        query.awaitTermination(runDurationMs);
+                        query.stop();
+                } else {
+                        query.awaitTermination();
+                }
         }
 }

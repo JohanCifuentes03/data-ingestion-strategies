@@ -2,20 +2,26 @@ package org.tesis.batch;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.tesis.common.ConfigLoader;
+import org.tesis.common.JdbcEventWriter;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
 /**
- * Spark Batch job — reads all available events from Kafka and writes
- * them to PostgreSQL in a single batch execution.
+ * Spark Batch job — reads all available events from Kafka that were
+ * accumulated during the observation window and writes them to PostgreSQL
+ * in a single batch execution.
+ * <p>
+ * Uses {@code ON CONFLICT (event_id) DO NOTHING} to safely handle retries
+ * without failing on duplicate key violations.
  * <p>
  * {@code visible_at} is <b>not</b> set by this job; PostgreSQL fills it
  * via its column DEFAULT at INSERT time.
@@ -65,10 +71,27 @@ public final class SparkBatchJob {
                                 .withColumn("scenario", functions.lit(scenario))
                                 .withColumn("run_id", functions.lit(runId));
 
-                Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
-                parsed.write()
-                                .mode(SaveMode.Append)
-                                .jdbc(jdbcUrl, "events", properties);
+                // Use foreachPartition + JdbcEventWriter so we get ON CONFLICT DO NOTHING,
+                // which makes the job safely re-runnable without duplicate key failures.
+                Properties jdbcProps = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
+                final String jdbcUrlFinal = jdbcUrl;
+                final String scenarioFinal = scenario;
+                final String runIdFinal = runId;
+
+                parsed.foreachPartition(rows -> {
+                        List<org.tesis.common.Event> batch = new ArrayList<>();
+                        rows.forEachRemaining(row -> {
+                                try {
+                                        java.util.UUID eventId = java.util.UUID.fromString(row.getString(0));
+                                        long producedAt = row.getLong(1);
+                                        String payload = row.isNullAt(2) ? "" : row.getString(2);
+                                        batch.add(new org.tesis.common.Event(eventId, producedAt, payload));
+                                } catch (Exception ignored) {
+                                        // skip malformed rows
+                                }
+                        });
+                        JdbcEventWriter.writeBatch(jdbcUrlFinal, jdbcProps, batch, "batch", scenarioFinal, runIdFinal);
+                });
 
                 spark.close();
         }
