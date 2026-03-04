@@ -87,9 +87,9 @@ sequenceDiagram
     P->>PG: SELECT WHERE visible_at > last_seen LIMIT 1000
     PG-->>P: rows (event_id, produced_at, visible_at, ...)
     Note over P: latency = visible_at − produced_at → CSV + Prometheus
+```
 
 *Nota: Para garantizar una comparación justa, el script `run_batch.sh` incluye una fase de **acumulación** previa de `RUN_DURATION_SECONDS` antes de lanzar el job de Spark, asegurando que el lote procese el mismo volumen de datos que las estrategias de streaming.*
-```
 
 ### 3.2 Spark Structured Streaming (Micro-batch)
 
@@ -128,6 +128,7 @@ sequenceDiagram
     Note over PG: visible_at = DEFAULT NOW()
     P->>PG: SELECT WHERE visible_at > last_seen
     PG-->>P: rows → CSV + Prometheus
+```
 
 ---
 
