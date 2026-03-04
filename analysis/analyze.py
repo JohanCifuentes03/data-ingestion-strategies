@@ -183,10 +183,11 @@ def chart_boxplot(df: pd.DataFrame, out: Path):
         sns.boxplot(
             data=sub, x="strategy", y="latency_ms", order=order,
             palette=PALETTE, ax=axes[i], showfliers=False, width=0.55,
-            linewidth=1.2,
+            linewidth=1.2, hue="strategy", legend=False
         )
         axes[i].set_title(scenario, fontsize=11, pad=8)
         axes[i].set_xlabel("")
+        axes[i].set_xticks(range(len(order)))
         axes[i].set_xticklabels(
             [STRATEGY_LABELS.get(s, s) for s in order], fontsize=9
         )
@@ -757,7 +758,7 @@ def chart_radar(df: pd.DataFrame, res_df: pd.DataFrame, out: Path):
     kpi_labels = ["Latencia p50\n(menor=mejor)", "Latencia p99\n(menor=mejor)",
                   "Throughput\n(mayor=mejor)", "CPU uso\n(menor=mejor)",
                   "Tasa error\n(menor=mejor)", "Kafka lag\n(menor=mejor)"]
-    inverted = {True, True, False, True, True, True}  # True means lower is better
+    inverted = [True, True, False, True, True, True]  # True means lower is better
 
     # Build matrix with fillna
     mat = pd.DataFrame(records).T[kpis]
@@ -773,7 +774,7 @@ def chart_radar(df: pd.DataFrame, res_df: pd.DataFrame, out: Path):
         else:
             scaled = (col - mn) / (mx - mn)
             # For "smaller is better", invert so that best = 1.0
-            if list(inverted)[j]:
+            if inverted[j]:
                 scaled = 1 - scaled
             norm[kpi] = scaled
 
