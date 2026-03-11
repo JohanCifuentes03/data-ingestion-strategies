@@ -44,38 +44,38 @@ public final class SparkStructuredJob {
                 });
         }
 
-        private static void writeBatchWithRetry(Dataset<Row> batch, String jdbcUrl, Properties props, int attempt) {
-                int maxAttempts = MAX_RETRIES;
-                long backoffMs = RETRY_BACKOFF_MS;
-
-                for (int i = 1; i <= maxAttempts; i++) {
-                        try {
-                                long rowCount = batch.count();
-                                System.out.println("[microbatch] Batch " + batch.hashCode() + " writing " + rowCount + " rows (attempt " + i + "/" + maxAttempts + ")");
-
-                                batch.write()
-                                        .mode("append")
-                                        .option("batchsize", 1000)
-                                        .option("numPartitions", 4)
-                                        .jdbc(jdbcUrl, "events", props);
-
-                                System.out.println("[microbatch] Batch write successful: " + rowCount + " rows");
+        private static void writeBatchWithRetry(Dataset<Row> batch, String jdbcUrl, Properties props, int batchId) {
+                // We cache the dataset to prevent Spark from re-evaluating the entire 
+                // lineage (reading from Kafka and parsing JSON) multiple times per microbatch.
+                batch.persist();
+                try {
+                        long rowCount = batch.count();
+                        if (rowCount == 0) {
+                                System.out.println("[microbatch] Batch " + batchId + " is empty, skipping.");
                                 return;
-                        } catch (Exception e) {
-                                System.err.println("[microbatch] Write attempt " + i + " failed: " + e.getMessage());
-                                if (i < maxAttempts) {
-                                        try {
-                                                Thread.sleep(backoffMs);
-                                                backoffMs *= 2;
-                                        } catch (InterruptedException ie) {
-                                                Thread.currentThread().interrupt();
-                                                throw new RuntimeException("Interrupted during retry", ie);
-                                        }
-                                } else {
-                                        System.err.println("[microbatch] All retries exhausted. Batch lost: " + batch.count() + " rows");
-                                        throw new RuntimeException("Failed to write batch after " + maxAttempts + " attempts", e);
-                                }
                         }
+
+                        System.out.println("[microbatch] Batch " + batchId + " writing " + rowCount + " rows...");
+
+                        // We rely entirely on Spark's built-in task retry mechanism.
+                        // Spark commits each JDBC partition in an independent PostgreSQL transaction.
+                        // If a partition fails, Spark safely retries ONLY that partition, maintaining 
+                        // idempotency. A manual whole-batch retry would cause massive data duplication 
+                        // for partitions that succeeded.
+                        batch.write()
+                                .mode("append")
+                                .option("batchsize", 1000)
+                                .option("numPartitions", 4)
+                                // We use default isolation level (READ_UNCOMMITTED inside Spark Postgres dialect)
+                                // to ensure the partition correctly rolls back on task failure.
+                                .jdbc(jdbcUrl, "events", props);
+
+                        System.out.println("[microbatch] Batch " + batchId + " write successful: " + rowCount + " rows");
+                } catch (Exception e) {
+                        System.err.println("[microbatch] Batch " + batchId + " failed fatally: " + e.getMessage());
+                        throw e; // Fail the microbatch so the streaming query engine can handle it or crash safely
+                } finally {
+                        batch.unpersist();
                 }
         }
 
@@ -135,13 +135,7 @@ public final class SparkStructuredJob {
                                 .option("checkpointLocation", checkpointLocation)
                                 .trigger(Trigger.ProcessingTime(triggerInterval))
                                 .foreachBatch((batchDataset, batchId) -> {
-                                        long count = batchDataset.count();
-                                        if (count > 0) {
-                                                System.out.println("[microbatch] Processing batch " + batchId + " with " + count + " rows");
-                                                writeBatchWithRetry(batchDataset, finalJdbcUrl, finalProps, batchId.intValue());
-                                        } else {
-                                                System.out.println("[microbatch] Batch " + batchId + " empty, skipping");
-                                        }
+                                        writeBatchWithRetry(batchDataset, finalJdbcUrl, finalProps, batchId.intValue());
                                 })
                                 .start();
 

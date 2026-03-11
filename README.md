@@ -169,16 +169,23 @@ FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 
 ### 4) Generar gráficas y análisis estadístico
 
-La forma recomendada es usar `manage.sh analyze`, que **crea el venv automáticamente** si no existe,
-instala las dependencias y ejecuta el análisis:
+Debes crear un entorno virtual de Python, instalar las dependencias y correr el script de análisis.
 
 ```bash
-# Recomendado — gestiona el venv automáticamente
-./scripts/manage.sh analyze
+# 1. Crear entorno virtual
+python -m venv analysis/.venv
 
-# O manualmente, si ya tienes el venv:
-analysis/.venv/Scripts/python.exe analysis/analyze.py   # Windows
-analysis/.venv/bin/python analysis/analyze.py            # Linux/macOS
+# 2. Instalar dependencias
+# En Windows:
+analysis\.venv\Scripts\pip install -r analysis\requirements.txt
+# En Linux/macOS:
+analysis/.venv/bin/pip install -r analysis/requirements.txt
+
+# 3. Ejecutar análisis
+# En Windows:
+analysis\.venv\Scripts\python.exe analysis\analyze.py
+# En Linux/macOS:
+analysis/.venv/bin/python analysis/analyze.py
 ```
 
 Genera **14 gráficas** en `results/figures/` incluyendo:
@@ -253,7 +260,7 @@ Genera **14 gráficas** en `results/figures/` incluyendo:
 
 | Script | Descripción |
 |--------|-------------|
-| `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset`, **`analyze`** |
+| `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset` |
 | `scripts/run.sh` | Ejecuta una estrategia: `batch`, `microbatch`, `streaming` |
 | `scripts/experiment.sh` | Experimento automatizado: `--smoke`, `--quick`, `--standard`, `--full` |
 | `scripts/export_metrics.py` | Snapshot de 36+ métricas Prometheus a CSV por corrida |
@@ -283,7 +290,6 @@ results/        CSV de latencias + snapshots Prometheus + figuras
 
 - **Docker no responde**: inicia Docker Desktop y reintenta `./scripts/manage.sh up`.
 - **Generator arranca pero 0 eventos**: revisa que Kafka tenga el tópico `events` creado (`./scripts/manage.sh clean`).
-- **Sin gráficas / error Python**: ejecuta `./scripts/manage.sh analyze` en lugar de invocar el script directamente — gestiona el venv automáticamente.
 - **Flink job no aparece en UI**: usa `FLINK_DETACHED=true` o revisa logs con `docker compose logs flink-jobmanager`.
 - **Throughput menor al esperado**: el generador escala threads automáticamente; verifica `docker compose logs generator` para ver la configuración de threads activa.
 - **p99 anormalmente alto en primer run**: es normal — el filtro de warmup en `analyze.py` excluye los primeros 30 s automáticamente.

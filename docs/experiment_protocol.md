@@ -27,10 +27,14 @@ pruebas de la tesis. Cada corrida sigue un protocolo riguroso para garantizar
 
 # 3. Verificar que todos los servicios estén saludables
 ./scripts/manage.sh status
-```
 
-> El entorno Python de análisis **se crea automáticamente** al ejecutar
-> `./scripts/manage.sh analyze`. No es necesario crearlo manualmente.
+# 4. Crear entorno virtual Python e instalar dependencias
+python -m venv analysis/.venv
+# En Windows:
+analysis\.venv\Scripts\pip install -r analysis\requirements.txt
+# En Linux/macOS:
+analysis/.venv/bin/pip install -r analysis/requirements.txt
+```
 
 ## 3. Protocolo por corrida
 
@@ -151,14 +155,7 @@ FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 
 Una vez completadas las corridas, se consolidan y generan las gráficas estadísticas.
 
-### 7.1 Generación de gráficas y estadísticas (recomendado)
-
-```bash
-# Crea el venv Python automáticamente, instala dependencias y ejecuta el análisis
-./scripts/manage.sh analyze
-```
-
-### 7.2 Ejecución manual del análisis
+### 7.1 Generación de gráficas y estadísticas
 
 ```bash
 # Windows
@@ -174,7 +171,7 @@ analysis/.venv/bin/python analysis/analyze.py \
     --warmup-ms 30000
 ```
 
-### 7.3 Gráficas generadas (`results/figures/`)
+### 7.2 Gráficas generadas (`results/figures/`)
 
 | # | Archivo | Tipo de análisis | Novedad |
 |---|---------|-----------------|---------|
@@ -194,14 +191,14 @@ analysis/.venv/bin/python analysis/analyze.py \
 | 13 | `13_heatmap_escalabilidad.png` | Heatmap latencia p95: degradación con la carga | ✦ Nuevo |
 | 14 | `14_ranking_table.csv/.png` | Ranking objetivo por KPI (sin normalización arbitraria) | ✦ Nuevo |
 
-### 7.4 Interpretación de la tabla de significancia
+### 7.3 Interpretación de la tabla de significancia
 
 - **H (KW)**: estadístico de Kruskal-Wallis. Valores altos indican diferencias mayores.
 - **p-valor**: < 0.05 indica diferencias estadísticamente significativas entre las 3 estrategias.
 - **p-valor (Bonf.)**: p-valor ajustado por corrección Bonferroni para comparaciones pairwise.
 - Las diferencias encontradas tienen alta significancia (p → 0) dada la magnitud de las muestras.
 
-### 7.5 Filtro de warmup (metodología)
+### 7.4 Filtro de warmup (metodología)
 
 El script excluye automáticamente los primeros **30 segundos** de cada run para estrategias
 streaming y microbatch, basado en el timestamp `produced_at` de cada evento:
