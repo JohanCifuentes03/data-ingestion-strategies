@@ -16,8 +16,11 @@ con observabilidad completa en Prometheus y Grafana.
 
 ## ¿Qué es un evento?
 
-Un **evento** es un registro JSON que representa un dato del mundo real (IoT, financiero, salud)
-que el generador produce y las estrategias de ingestión procesan.
+> **Aclaración conceptual:** En algunas disciplinas (como la electrónica o el control automático), un "evento" suele referirse a un cambio de estado físico, un flanco de voltaje o un trigger instantáneo. 
+> 
+> Sin embargo, en la arquitectura de datos y procesamiento de flujos (Stream Processing), **un "evento" es equivalente a un "registro de datos" (data record) invariable**. Es una estructura de datos digital (en este caso, un documento JSON) que contiene la **fotografía de un estado** o una medición en un instante de tiempo específico.
+
+Para este benchmark, cada evento generado sintéticamente representa el registro digital de un dato del mundo real (como una lectura de temperatura IoT, un tick financiero o un monitor de salud) que viaja por la red y requiere ser procesado y almacenado.
 
 ### Ejemplo de evento (IoT Sensor)
 
@@ -36,9 +39,9 @@ que el generador produce y las estrategias de ingestión procesan.
 }
 ```
 
-### Tamaño de los eventos
+### Volumen Decimal y Huella en Disco (El impacto real)
 
-| Campo | Tamaño aproximado |
+| Campo | Tamaño aproximado crudo |
 |-------|------------------|
 | event_id (UUID) | 36 bytes |
 | produced_at (timestamp) | 13 bytes |
@@ -47,8 +50,15 @@ que el generador produce y las estrategias de ingestión procesan.
 | payload (random) | ~200-300 bytes |
 | **Total** | **~350-500 bytes** |
 
-El tamaño **real** del evento es dinámico. El generador añade un campo `payload` con caracteres
-aleatorios hasta alcanzar el tamaño objetivo del escenario (512 bytes, 4KB, o 64KB).
+Aunque el significado semántico del evento es "sintético" (valores aleatorios fingiendo ser sensores reales para no usar datos privados), **su impacto computacional y peso físico es 100% real**. 
+
+El tamaño de un evento es dinámico. El generador rellena el campo `payload` con caracteres aleatorios hasta alcanzar el tamaño objetivo de bytes (512 bytes, 4 KB, o 64 KB). Este impacto de red y almacenamiento se materializa durante cada simulación:
+
+*   **Escenario Base (`low-load`):** 2,000 ev/s por 5 min = 600,000 eventos. Genera un tráfico real en Kafka y una base de datos PostgreSQL de **~100 MB** por corrida.
+*   **Escenario de alta exigencia (`extreme-load`):** 100,000 ev/s en 5 minutos = 30,000,000 de eventos. En este escenario, la base de datos de PostgreSQL termina ingiriendo y pesando **entre 10 GB y 12 GB físicos en disco** tras una sola ejecución de 5 minutos (incluyendo índices obligatorios).
+*   **Escenario pesado mixto (`mixed-payload`):** Inyecta payloads gigantes de hasta 64 KB, llegando a forzar volcados a disco y bases de datos transitorias de entre **15 GB a 25 GB** por simulación.
+
+> **Importante Methodology:** Debido a estos volúmenes físicos masivos de I/O, el pipeline del experimento ejecuta un `TRUNCATE TABLE` borrando los GBs de datos antes de cada corrida. Esto previene que el disco duro colapse y asegura una línea base neutral y justa para todos los motores analíticos evaluados.
 
 ---
 
