@@ -49,10 +49,6 @@ que el generador produce y las estrategias de ingestión procesan.
 
 El tamaño **real** del evento es dinámico. El generador añade un campo `payload` con caracteres
 aleatorios hasta alcanzar el tamaño objetivo del escenario (512 bytes, 4KB, o 64KB).
-Esto simula payloads reales de telemetría IoT/Financiera que pueden variar en tamaño.
-
-**Nota:** El payload de 512B es un objetivo, no exacto. El tamaño real JSON típico es ~350-400 bytes
-para el schema base, más el padding aleatorio.
 
 ---
 
@@ -61,10 +57,10 @@ para el schema base, más el padding aleatorio.
 - **Generador multi-thread** en Python: schemas realistas IoT/Financiero/Salud, LZ4 compression, hasta 100k+ ev/s.
 - **Sonda de disponibilidad** en Python: polling a PostgreSQL, mide latencia = `visible_at − produced_at`.
 - **Stack completo en Docker Compose**: Kafka, Spark, Flink, Postgres, Prometheus, Grafana, cAdvisor, exporters.
-- **Jobs Java** compilados con Gradle wrapper (Spark Batch, Spark SS, Flink Streaming). Ahora con parseo robusto JSON via **Jackson Databind**.
+- **Jobs Java** compilados con Gradle wrapper (Spark Batch, Spark SS, Flink Streaming). Parseo robusto JSON via **Jackson Databind**.
 - **Scripts de orquestación**: setup, run, clean, teardown, export de métricas.
-- **Análisis estadístico** (`analyze.py`): 12 gráficas de publicación + Kruskal-Wallis + Bonferroni.
-- **36+ métricas** capturadas: latencia (p50/p75/p95/p99), throughput, CPU, memoria, red, disco, Kafka lag, Flink checkpoints, errores, PostgreSQL transactions.
+- **Análisis estadístico** (`analyze.py`): **14 gráficas** de calidad de publicación + filtro de warmup + Kruskal-Wallis + Bonferroni.
+- **36+ métricas** capturadas: latencia (p50/p75/p95/p99), IQR, CV%, throughput E2E y de escritura, CPU, memoria, red, disco, Kafka lag, Flink checkpoints, errores, PostgreSQL transactions.
 
 ---
 
@@ -93,7 +89,7 @@ para el schema base, más el padding aleatorio.
 # Gestión del entorno
 ./scripts/manage.sh up        # Levantar infraestructura
 ./scripts/manage.sh status    # Ver estado
-./scripts/manage.sh clean     # Limpiar
+./scripts/manage.sh clean     # Limpiar Kafka, PostgreSQL y checkpoints
 ./scripts/manage.sh down      # Bajar contenedores
 ```
 
@@ -108,8 +104,6 @@ para el schema base, más el padding aleatorio.
 ./scripts/manage.sh clean
 ```
 
-El script verifica prerrequisitos, crea `.env`, compila jobs, construye imágenes y levanta la infraestructura.
-
 ---
 
 ## Experimentos: Rápido vs Completo
@@ -117,8 +111,8 @@ El script verifica prerrequisitos, crea `.env`, compila jobs, construye imágene
 | Comando | Duración | Uso |
 |---------|----------|-----|
 | `bash ./scripts/experiment.sh --smoke` | ~5 min | Validar que todo funciona |
-| `bash ./scripts/experiment.sh --quick` | ~30 min | Prueba rápida de 3 estrategias |
-| `bash ./scripts/experiment.sh` | ~1-2 horas | Experimento estándar (5 min/run) |
+| `bash ./scripts/experiment.sh --quick` | ~30 min | Prueba rápida de 3 estrategias × 2 escenarios |
+| `bash ./scripts/experiment.sh` | ~2-3 horas | Experimento estándar (5 min/run, 30 s warmup) |
 
 ---
 
@@ -127,10 +121,10 @@ El script verifica prerrequisitos, crea `.env`, compila jobs, construye imágene
 ### 1) Validar estado
 
 ```bash
-bash ./scripts/doctor.sh
+./scripts/manage.sh status
 ```
 
-### 2) Ejecutar una estrategia
+### 2) Ejecutar una estrategia individual
 
 ```bash
 # Batch
@@ -146,7 +140,7 @@ FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 ### 3) Experimento completo automatizado (60+ corridas)
 
 ```bash
-# Estándar: 3 estrategias × 4 escenarios × 5 repeticiones (ventana 5m)
+# Estándar: 3 estrategias × 4 escenarios × 5 repeticiones
 ./scripts/experiment.sh
 
 # Experimento rápido: 3 estrategias × 2 escenarios × 1 repetición (~30 min)
@@ -165,15 +159,30 @@ FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 
 ### 4) Generar gráficas y análisis estadístico
 
-```bash
-# Windows
-analysis\.venv\Scripts\python.exe analysis\analyze.py
+La forma recomendada es usar `manage.sh analyze`, que **crea el venv automáticamente** si no existe,
+instala las dependencias y ejecuta el análisis:
 
-# Linux / macOS / WSL2
-analysis/.venv/bin/python analysis/analyze.py
+```bash
+# Recomendado — gestiona el venv automáticamente
+./scripts/manage.sh analyze
+
+# O manualmente, si ya tienes el venv:
+analysis/.venv/Scripts/python.exe analysis/analyze.py   # Windows
+analysis/.venv/bin/python analysis/analyze.py            # Linux/macOS
 ```
 
-Genera **12 gráficas** en `results/figures/` incluyendo radar multi-KPI, tests de significancia estadística, y serie temporal de latencia.
+Genera **14 gráficas** en `results/figures/` incluyendo:
+- Violin + boxplot (distribución real con densidad)
+- CDF en escala logarítmica (3 estrategias visibles simultáneamente)
+- Throughput E2E vs escritura al sink diferenciados
+- Tabla resumen con IQR, CV%, Min, Max
+- Heatmap de escalabilidad por escenario
+- Ranking table objetivo (sin normalización arbitraria)
+- Tests de significancia estadística (Kruskal-Wallis + Bonferroni)
+
+> **Nota:** El filtro de warmup (`--warmup-ms`, default 30 000 ms) excluye automáticamente
+> los primeros 30 s de cada run en estrategias streaming y microbatch, permitiendo
+> que la JVM (JIT) se estabilice antes de medir.
 
 ### 5) Bajar y limpiar
 
@@ -197,7 +206,7 @@ Genera **12 gráficas** en `results/figures/` incluyendo radar multi-KPI, tests 
 | `extreme-load` | 100.000 ev/s | ~350-500 B | iot_sensor | 5 min |
 | `mixed-payload` | 10.000 ev/s | 512B/4KB/64KB rotativo | iot_sensor | 5 min |
 
-**Nota:** Duración default es 5 minutos (reducida de 20 min). Usa `--duration` para cambiar.
+**Nota:** Usa `--duration <segundos>` para cambiar la duración por corrida.
 
 ---
 
@@ -234,12 +243,11 @@ Genera **12 gráficas** en `results/figures/` incluyendo radar multi-KPI, tests 
 
 | Script | Descripción |
 |--------|-------------|
-| `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset` |
+| `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset`, **`analyze`** |
 | `scripts/run.sh` | Ejecuta una estrategia: `batch`, `microbatch`, `streaming` |
 | `scripts/experiment.sh` | Experimento automatizado: `--smoke`, `--quick`, `--standard`, `--full` |
-| `scripts/stress.sh` | Perfil de carga intensa para validación |
 | `scripts/export_metrics.py` | Snapshot de 36+ métricas Prometheus a CSV por corrida |
-| `analysis/analyze.py` | 12 gráficas + tests estadísticos (Kruskal-Wallis + Bonferroni) |
+| `analysis/analyze.py` | **14 gráficas** + filtro warmup + tests estadísticos (Kruskal-Wallis + Bonferroni) |
 
 ---
 
@@ -252,7 +260,7 @@ streaming/      Flink Streaming job (Java)
 common/         Clases compartidas
 generator/      Productor Kafka multi-thread + schemas IoT/Financial/Health
 probe/          Sonda de disponibilidad + CSV + métricas Prometheus
-analysis/       analyze.py + requirements.txt
+analysis/       analyze.py + requirements.txt + .venv/ (auto-creado)
 infrastructure/ SQL, Prometheus, Grafana, Kafka config
 scripts/        Orquestación (bash) + export_metrics.py
 docs/           Arquitectura + protocolo experimental
@@ -265,14 +273,14 @@ results/        CSV de latencias + snapshots Prometheus + figuras
 
 - **Docker no responde**: inicia Docker Desktop y reintenta `./scripts/manage.sh up`.
 - **Generator arranca pero 0 eventos**: revisa que Kafka tenga el tópico `events` creado (`./scripts/manage.sh clean`).
-- **Sin gráficas**: ejecuta `./scripts/manage.sh status` y confirma targets en Prometheus.
+- **Sin gráficas / error Python**: ejecuta `./scripts/manage.sh analyze` en lugar de invocar el script directamente — gestiona el venv automáticamente.
 - **Flink job no aparece en UI**: usa `FLINK_DETACHED=true` o revisa logs con `docker compose logs flink-jobmanager`.
 - **Throughput menor al esperado**: el generador escala threads automáticamente; verifica `docker compose logs generator` para ver la configuración de threads activa.
+- **p99 anormalmente alto en primer run**: es normal — el filtro de warmup en `analyze.py` excluye los primeros 30 s automáticamente.
 
 ---
 
 ## Referencias
 
-- **Guía de instalación detallada**: [`INSTALL.md`](INSTALL.md) — Para nuevos equipos
 - **Arquitectura detallada**: [`docs/architecture.md`](docs/architecture.md)
 - **Protocolo experimental completo**: [`docs/experiment_protocol.md`](docs/experiment_protocol.md)

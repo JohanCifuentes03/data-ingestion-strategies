@@ -193,6 +193,33 @@ cmd_reset() {
     log "Reset completo"
 }
 
+cmd_analyze() {
+    log "Configurando entorno Python para análisis..."
+    VENV="$ROOT_DIR/analysis/.venv"
+    PYTHON="$VENV/bin/python"
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || -n "${WINDIR:-}" ]]; then
+        PYTHON="$VENV/Scripts/python.exe"
+    fi
+
+    if [ ! -f "$PYTHON" ]; then
+        log "Creando venv en analysis/.venv ..."
+        python3 -m venv "$VENV" 2>/dev/null || python -m venv "$VENV"
+    fi
+
+    log "Instalando/actualizando dependencias Python..."
+    "$PYTHON" -m pip install -q -r "$ROOT_DIR/analysis/requirements.txt"
+
+    RESULTS_DIR="${1:-$ROOT_DIR/results}"
+    OUTPUT_DIR="${2:-$ROOT_DIR/results/figures}"
+
+    log "Ejecutando análisis: results=$RESULTS_DIR  output=$OUTPUT_DIR"
+    "$PYTHON" "$ROOT_DIR/analysis/analyze.py" \
+        --results-dir "$RESULTS_DIR" \
+        --output "$OUTPUT_DIR"
+
+    log "Análisis completo. Gráficas en: $OUTPUT_DIR"
+}
+
 # ═══════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════
@@ -200,6 +227,9 @@ cmd_reset() {
 COMMAND=${1:-help}
 
 case "$COMMAND" in
+    analyze)
+        cmd_analyze "${2:-}" "${3:-}"
+        ;;
     up)
         cmd_up
         ;;
@@ -226,17 +256,19 @@ case "$COMMAND" in
         echo "Uso: ./scripts/manage.sh <comando> [opciones]"
         echo ""
         echo "Comandos:"
-        echo "  up        Levantar infraestructura completa"
-        echo "  build     Compilar jobs Java (requiere Java + Gradle)"
-        echo "  status    Ver estado de servicios"
-        echo "  clean     Limpiar Kafka, PostgreSQL y checkpoints"
-        echo "  down      Bajar contenedores"
-        echo "  reset     Reset completo (borra TODO)"
+        echo "  up          Levantar infraestructura completa"
+        echo "  build       Compilar jobs Java (requiere Java + Gradle)"
+        echo "  status      Ver estado de servicios"
+        echo "  clean       Limpiar Kafka, PostgreSQL y checkpoints"
+        echo "  down        Bajar contenedores"
+        echo "  reset       Reset completo (borra TODO)"
+        echo "  analyze     Crear venv Python + ejecutar análisis de resultados"
         echo ""
         echo "Ejemplos:"
         echo "  ./scripts/manage.sh up"
         echo "  ./scripts/manage.sh status"
         echo "  ./scripts/manage.sh clean low-load"
+        echo "  ./scripts/manage.sh analyze"
         echo "  ./scripts/manage.sh reset"
         ;;
     *)
