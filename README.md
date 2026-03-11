@@ -14,6 +14,48 @@ con observabilidad completa en Prometheus y Grafana.
 
 ---
 
+## ¿Qué es un evento?
+
+Un **evento** es un registro JSON que representa un dato del mundo real (IoT, financiero, salud)
+que el generador produce y las estrategias de ingestión procesan.
+
+### Ejemplo de evento (IoT Sensor)
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "produced_at": 1709500000000,
+  "schema": "iot_sensor",
+  "device_id": "sensor-0042",
+  "temperature_c": 22.4,
+  "humidity_pct": 58.1,
+  "pressure_hpa": 1013.5,
+  "battery_v": 3.72,
+  "status": "ok",
+  "payload": "a7K9mNpQrS2tUvWxYz..."
+}
+```
+
+### Tamaño de los eventos
+
+| Campo | Tamaño aproximado |
+|-------|------------------|
+| event_id (UUID) | 36 bytes |
+| produced_at (timestamp) | 13 bytes |
+| schema | 10-14 bytes |
+| Campos específicos | 80-200 bytes |
+| payload (random) | ~200-300 bytes |
+| **Total** | **~350-500 bytes** |
+
+El tamaño **real** del evento es dinámico. El generador añade un campo `payload` con caracteres
+aleatorios hasta alcanzar el tamaño objetivo del escenario (512 bytes, 4KB, o 64KB).
+Esto simula payloads reales de telemetría IoT/Financiera que pueden variar en tamaño.
+
+**Nota:** El payload de 512B es un objetivo, no exacto. El tamaño real JSON típico es ~350-400 bytes
+para el schema base, más el padding aleatorio.
+
+---
+
 ## Qué incluye
 
 - **Generador multi-thread** en Python: schemas realistas IoT/Financiero/Salud, LZ4 compression, hasta 100k+ ev/s.
@@ -38,15 +80,45 @@ con observabilidad completa en Prometheus y Grafana.
 
 ## Inicio rápido
 
+### Opción 1: Windows (más fácil)
+
+```powershell
+# Doble clic en quick-start.bat o ejecutar en PowerShell:
+.\quick-start.bat
+```
+
+### Opción 2: Linux/macOS/WSL2
+
 ```bash
-# 1. Setup inicial
-bash ./scripts/setup.sh
+# Gestión del entorno
+./scripts/manage.sh up        # Levantar infraestructura
+./scripts/manage.sh status    # Ver estado
+./scripts/manage.sh clean     # Limpiar
+./scripts/manage.sh down      # Bajar contenedores
+```
+
+### Opción 3: Setup completo (requiere Java + Gradle)
+
+```bash
+# 1. Compilar jobs y levantar infraestructura
+./scripts/manage.sh build
+./scripts/manage.sh up
 
 # 2. Limpiar todo antes de empezar (opcional pero recomendado)
-bash ./scripts/clean.sh --all
+./scripts/manage.sh clean
 ```
 
 El script verifica prerrequisitos, crea `.env`, compila jobs, construye imágenes y levanta la infraestructura.
+
+---
+
+## Experimentos: Rápido vs Completo
+
+| Comando | Duración | Uso |
+|---------|----------|-----|
+| `bash ./scripts/experiment.sh --smoke` | ~5 min | Validar que todo funciona |
+| `bash ./scripts/experiment.sh --quick` | ~30 min | Prueba rápida de 3 estrategias |
+| `bash ./scripts/experiment.sh` | ~1-2 horas | Experimento estándar (5 min/run) |
 
 ---
 
@@ -62,33 +134,33 @@ bash ./scripts/doctor.sh
 
 ```bash
 # Batch
-bash ./scripts/run_batch.sh low-load run_1
+./scripts/run.sh batch low-load run_1
 
-# Micro-batch (trigger configurable)
-bash ./scripts/run_microbatch.sh medium-load run_1 "5 seconds"
+# Microbatch (trigger configurable)
+./scripts/run.sh microbatch medium-load run_1 "5 seconds"
 
 # Flink streaming
-FLINK_DETACHED=true bash ./scripts/run_streaming.sh burst run_1
+FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 ```
 
 ### 3) Experimento completo automatizado (60+ corridas)
 
 ```bash
-# Estándar: 3 estrategias × 4 escenarios × 5 repeticiones (ventana 20m)
-bash ./scripts/run_experiment.sh
+# Estándar: 3 estrategias × 4 escenarios × 5 repeticiones (ventana 5m)
+./scripts/experiment.sh
 
-# Experimento rápido (Light): 1 repetición, 4 min por corrida (~1h total)
-bash ./scripts/run_experiment.sh --reps 1 --duration 240
+# Experimento rápido: 3 estrategias × 2 escenarios × 1 repetición (~30 min)
+./scripts/experiment.sh --quick
 
 # Con escenarios extremos incluidos
-bash ./scripts/run_experiment.sh \
+./scripts/experiment.sh \
   --scenarios "low-load medium-load high-load burst extreme-load mixed-payload"
 
 # Override de schema
-bash ./scripts/run_experiment.sh --schema financial_tick
+./scripts/experiment.sh --schema financial_tick
 
 # Ventana de export de métricas de 10 minutos
-bash ./scripts/run_experiment.sh --window 10m
+./scripts/experiment.sh --window 10m
 ```
 
 ### 4) Generar gráficas y análisis estadístico
@@ -106,24 +178,26 @@ Genera **12 gráficas** en `results/figures/` incluyendo radar multi-KPI, tests 
 ### 5) Bajar y limpiar
 
 ```bash
-bash ./scripts/teardown.sh
+./scripts/manage.sh down
 
-# Conservar volúmenes
-REMOVE_VOLUMES=false bash ./scripts/teardown.sh
+# Reset completo (borra todo)
+./scripts/manage.sh reset
 ```
 
 ---
 
 ## Escenarios disponibles
 
-| Escenario | Tasa | Payload | Schema | Duración |
+| Escenario | Tasa | Payload | Schema | Duración default |
 |---|---|---|---|---|
-| `low-load` | 2.000 ev/s | 512 B | iot_sensor | 20 min |
-| `medium-load` | 10.000 ev/s | 512 B | financial_tick | 20 min |
-| `high-load` | 30.000 ev/s | 512 B | health_monitor | 20 min |
-| `burst` | 10k / pico 50k ev/s | 512 B | financial_tick | 20 min |
-| `extreme-load` | 100.000 ev/s | 512 B | iot_sensor | 30 min |
-| `mixed-payload` | 10.000 ev/s | 512B/4KB/64KB rotativo | iot_sensor | 20 min |
+| `low-load` | 2.000 ev/s | ~350-500 B | iot_sensor | 5 min |
+| `medium-load` | 10.000 ev/s | ~350-500 B | financial_tick | 5 min |
+| `high-load` | 30.000 ev/s | ~350-500 B | health_monitor | 5 min |
+| `burst` | 10k / pico 50k ev/s | ~350-500 B | financial_tick | 5 min |
+| `extreme-load` | 100.000 ev/s | ~350-500 B | iot_sensor | 5 min |
+| `mixed-payload` | 10.000 ev/s | 512B/4KB/64KB rotativo | iot_sensor | 5 min |
+
+**Nota:** Duración default es 5 minutos (reducida de 20 min). Usa `--duration` para cambiar.
 
 ---
 
@@ -159,17 +233,12 @@ REMOVE_VOLUMES=false bash ./scripts/teardown.sh
 ## Scripts principales
 
 | Script | Descripción |
-|---|---|
-| `scripts/setup.sh` | Setup completo de cero a listo |
-| `scripts/doctor.sh` | Chequeo rápido de salud (servicios, endpoints, DB) |
-| `scripts/clean.sh` | Resetea tópico, tabla y checkpoints. Usa `--all` para borrar `results/`. |
-| `scripts/run_batch.sh` | Corrida Spark Batch |
-| `scripts/run_microbatch.sh` | Corrida Spark Structured Streaming |
-| `scripts/run_streaming.sh` | Corrida Flink (soporta `FLINK_DETACHED=true`) |
-| `scripts/run_experiment.sh` | Orquestación completa. Flags: `--reps`, `--duration`, `--strategies`, `--scenarios`. |
+|--------|-------------|
+| `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset` |
+| `scripts/run.sh` | Ejecuta una estrategia: `batch`, `microbatch`, `streaming` |
+| `scripts/experiment.sh` | Experimento automatizado: `--smoke`, `--quick`, `--standard`, `--full` |
+| `scripts/stress.sh` | Perfil de carga intensa para validación |
 | `scripts/export_metrics.py` | Snapshot de 36+ métricas Prometheus a CSV por corrida |
-| `scripts/run_stress.sh` | Perfil de carga intensa para validación |
-| `scripts/teardown.sh` | Baja stack y limpia recursos Docker |
 | `analysis/analyze.py` | 12 gráficas + tests estadísticos (Kruskal-Wallis + Bonferroni) |
 
 ---
@@ -194,9 +263,9 @@ results/        CSV de latencias + snapshots Prometheus + figuras
 
 ## Troubleshooting rápido
 
-- **Docker no responde**: inicia Docker Desktop y reintenta `bash ./scripts/setup.sh`.
-- **Generator arranca pero 0 eventos**: revisa que Kafka tenga el tópico `events` creado (`bash ./scripts/clean.sh`).
-- **Sin gráficas**: ejecuta `bash ./scripts/doctor.sh` y confirma targets en Prometheus.
+- **Docker no responde**: inicia Docker Desktop y reintenta `./scripts/manage.sh up`.
+- **Generator arranca pero 0 eventos**: revisa que Kafka tenga el tópico `events` creado (`./scripts/manage.sh clean`).
+- **Sin gráficas**: ejecuta `./scripts/manage.sh status` y confirma targets en Prometheus.
 - **Flink job no aparece en UI**: usa `FLINK_DETACHED=true` o revisa logs con `docker compose logs flink-jobmanager`.
 - **Throughput menor al esperado**: el generador escala threads automáticamente; verifica `docker compose logs generator` para ver la configuración de threads activa.
 
@@ -204,5 +273,6 @@ results/        CSV de latencias + snapshots Prometheus + figuras
 
 ## Referencias
 
+- **Guía de instalación detallada**: [`INSTALL.md`](INSTALL.md) — Para nuevos equipos
 - **Arquitectura detallada**: [`docs/architecture.md`](docs/architecture.md)
 - **Protocolo experimental completo**: [`docs/experiment_protocol.md`](docs/experiment_protocol.md)

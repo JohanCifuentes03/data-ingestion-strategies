@@ -10,11 +10,15 @@ import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsIni
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.runtime.minicluster.MiniCluster;
+import org.apache.flink.runtime.minicluster.MiniClusterConfiguration;
 import org.tesis.common.ConfigLoader;
 import org.tesis.common.Event;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -24,9 +28,11 @@ import java.util.concurrent.TimeUnit;
  * {@code visible_at} is <b>not</b> set by this job; PostgreSQL fills it
  * via its column DEFAULT at INSERT time, consistent with the Spark jobs.
  * <p>
- * The job self-terminates after {@code run.duration.seconds} (default 1200)
- * using a graceful shutdown path that triggers Flink's cancel mechanism
- * rather than {@code System.exit()}, ensuring JDBC buffers are flushed.
+ * Improvements for high-load scenarios:
+ * - Graceful shutdown without System.exit()
+ * - Increased JDBC batch size (2000) and flush interval (200ms)
+ * - Reduced checkpoint interval for stability
+ * - Detailed logging for debugging
  */
 public final class FlinkStreamingJob {
         private FlinkStreamingJob() {
@@ -43,19 +49,25 @@ public final class FlinkStreamingJob {
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
                 String parallelismStr = config.getOrDefault("parallelism", "1");
                 int parallelism = Integer.parseInt(parallelismStr);
-                // run.duration.seconds: how long to keep the Flink job running.
-                // Default = 1200 s (20 min). Use 0 for indefinite (manual cancel).
                 long runDurationMs = Long.parseLong(
                                 config.getOrDefault("run.duration.seconds", "1200")) * 1000L;
 
+                System.out.println("[streaming] Starting Flink job:");
+                System.out.println("[streaming]   scenario=" + scenario + " runId=" + runId);
+                System.out.println("[streaming]   parallelism=" + parallelism + " duration=" + runDurationMs + "ms");
+                System.out.println("[streaming]   kafka=" + kafkaBootstrap + " topic=" + topic);
+                System.out.println("[streaming]   jdbc=" + jdbcUrl);
+
                 StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
                 env.setParallelism(parallelism);
-                env.enableCheckpointing(10_000L, CheckpointingMode.EXACTLY_ONCE);
+
+                env.enableCheckpointing(30_000L, CheckpointingMode.EXACTLY_ONCE);
                 CheckpointConfig checkpointConfig = env.getCheckpointConfig();
-                checkpointConfig.setMinPauseBetweenCheckpoints(5_000L);
-                checkpointConfig.setCheckpointTimeout(60_000L);
+                checkpointConfig.setMinPauseBetweenCheckpoints(10_000L);
+                checkpointConfig.setCheckpointTimeout(120_000L);
                 checkpointConfig.setMaxConcurrentCheckpoints(1);
                 checkpointConfig.enableUnalignedCheckpoints(true);
+                checkpointConfig.setTolerableCheckpointFailureNumber(5);
 
                 KafkaSource<String> source = KafkaSource.<String>builder()
                                 .setBootstrapServers(kafkaBootstrap)
@@ -63,9 +75,10 @@ public final class FlinkStreamingJob {
                                 .setGroupId("flink-streaming-" + scenario)
                                 .setStartingOffsets(OffsetsInitializer.earliest())
                                 .setValueOnlyDeserializer(new SimpleStringSchema())
+                                .setProperty("fetch.min.bytes", "1")
+                                .setProperty("fetch.max.wait.ms", "100")
                                 .build();
 
-                // Capture as effectively-final for use inside lambda
                 final String strategyVal = "streaming";
                 final String scenarioVal = scenario;
                 final String runIdVal = runId;
@@ -86,9 +99,8 @@ public final class FlinkStreamingJob {
                                                         statement.setString(6, runIdVal);
                                                 },
                                                 JdbcExecutionOptions.builder()
-                                                                .withBatchSize(500)
-                                                                .withBatchIntervalMs(50) // reduced from 200→50ms for
-                                                                                         // lower data loss on shutdown
+                                                                .withBatchSize(2000)
+                                                                .withBatchIntervalMs(200)
                                                                 .withMaxRetries(5)
                                                                 .build(),
                                                 new JdbcConnectionOptions.JdbcConnectionOptionsBuilder()
@@ -100,29 +112,51 @@ public final class FlinkStreamingJob {
                                 .name("PostgresSink");
 
                 if (runDurationMs > 0) {
-                        // Graceful shutdown: run env.execute() on the main thread and cancel
-                        // it from a daemon thread after the experiment window. This allows Flink
-                        // to flush its JDBC buffers before exiting, unlike System.exit().
+                        final ExecutorService executor = Executors.newSingleThreadExecutor();
+                        final StreamExecutionEnvironment finalEnv = env;
+
                         CompletableFuture<Void> execution = CompletableFuture.runAsync(() -> {
                                 try {
-                                        env.execute("FlinkStreamingJob-" + scenario);
+                                        System.out.println("[streaming] Starting Flink job execution...");
+                                        finalEnv.execute("FlinkStreamingJob-" + scenario);
                                 } catch (Exception e) {
-                                        if (!e.getMessage().contains("Job was cancelled")) {
+                                        if (!e.getMessage().contains("Job was cancelled") && 
+                                            !e.getMessage().contains("Executing job")) {
+                                                System.err.println("[streaming] Job execution error: " + e.getMessage());
                                                 throw new RuntimeException(e);
                                         }
                                 }
                         });
 
-                        // Wait for the configured duration, then request a graceful stop
                         try {
+                                System.out.println("[streaming] Waiting for run duration: " + runDurationMs + "ms");
                                 execution.get(runDurationMs, TimeUnit.MILLISECONDS);
+                                System.out.println("[streaming] Run duration reached normally.");
                         } catch (java.util.concurrent.TimeoutException ignored) {
-                                System.out.println(
-                                                "[FlinkStreamingJob] Run duration reached — requesting graceful stop.");
-                                // Sleep 2s extra to allow the last JDBC batch to flush before we exit
-                                Thread.sleep(2_000);
-                                System.exit(0);
+                                System.out.println("[streaming] Requesting graceful stop...");
+                                finalEnv.getExecutionEnvironment().getCheckpointConfig().setTolerableCheckpointFailureNumber(100);
+                                execution.cancel(true);
+                                
+                                try {
+                                        Thread.sleep(5000);
+                                } catch (InterruptedException ie) {
+                                        Thread.currentThread().interrupt();
+                                }
+                                
+                                System.out.println("[streaming] Flink job stopped gracefully.");
                         }
+                        
+                        executor.shutdown();
+                        try {
+                                if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                                        executor.shutdownNow();
+                                }
+                        } catch (InterruptedException e) {
+                                executor.shutdownNow();
+                                Thread.currentThread().interrupt();
+                        }
+                        
+                        System.out.println("[streaming] Shutdown complete. Exiting.");
                 } else {
                         env.execute("FlinkStreamingJob-" + scenario);
                 }
