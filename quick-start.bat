@@ -102,8 +102,7 @@ echo.
 docker compose ps
 echo.
 echo   Servicios disponibles:
-echo   • Grafana:    http://localhost:3000  (admin/admin)
-echo   • Prometheus: http://localhost:9090
+
 echo   • Spark UI:   http://localhost:8080
 echo   • Flink UI:   http://localhost:8081
 echo.

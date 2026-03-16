@@ -9,9 +9,7 @@ a gran escala sobre la misma infraestructura:
 | `microbatch` | Spark Structured Streaming + Kafka | Trigger periódico (1/5/10 s) |
 | `streaming` | Apache Flink 1.18 + Kafka | Flujo continuo exactly-once |
 
-Todas consumen de **Apache Kafka** (12 particiones) y escriben en **PostgreSQL**,
-con observabilidad completa en Prometheus y Grafana.
-
+Todas consumen de **Apache Kafka** (12 particiones) y escriben en **PostgreSQL**.
 ---
 
 ## ¿Qué es un evento?
@@ -66,11 +64,12 @@ El tamaño de un evento es dinámico. El generador rellena el campo `payload` co
 
 - **Generador multi-thread** en Python: schemas realistas IoT/Financiero/Salud, LZ4 compression, hasta 100k+ ev/s.
 - **Sonda de disponibilidad** en Python: polling a PostgreSQL, mide latencia = `visible_at − produced_at`.
-- **Stack completo en Docker Compose**: Kafka, Spark, Flink, Postgres, Prometheus, Grafana, cAdvisor, exporters.
+- **Stack completo en Docker Compose**: Kafka, Spark, Flink, Postgres.
 - **Jobs Java** compilados con Gradle wrapper (Spark Batch, Spark SS, Flink Streaming). Parseo robusto JSON via **Jackson Databind**.
 - **Scripts de orquestación**: setup, run, clean, teardown, export de métricas.
-- **Análisis estadístico** (`analyze.py`): **14 gráficas** de calidad de publicación + filtro de warmup + Kruskal-Wallis + Bonferroni.
-- **36+ métricas** capturadas: latencia (p50/p75/p95/p99), IQR, CV%, throughput E2E y de escritura, CPU, memoria, red, disco, Kafka lag, Flink checkpoints, errores, PostgreSQL transactions.
+- **Análisis estadístico** (`analyze.py`): **9 gráficas** de calidad de publicación + filtro de warmup + Kruskal-Wallis + Bonferroni.
+- **Observabilidad**: Prometheus + cAdvisor + kafka-exporter para captura de CPU, memoria y consumer lag.
+- **Métricas** capturadas: latencia E2E, throughput, fault recovery, eficiencia de escalado, recursos y consumer lag.
 
 ---
 
@@ -123,6 +122,8 @@ El tamaño de un evento es dinámico. El generador rellena el campo `payload` co
 | `bash ./scripts/experiment.sh --smoke` | ~5 min | Validar que todo funciona |
 | `bash ./scripts/experiment.sh --quick` | ~30 min | Prueba rápida de 3 estrategias × 2 escenarios |
 | `bash ./scripts/experiment.sh` | ~2-3 horas | Experimento estándar (5 min/run, 30 s warmup) |
+| `bash ./scripts/experiment.sh --fault-inject` | +~15 min | Incluye medición de fault recovery |
+| `bash ./scripts/experiment.sh --scaling-test` | +~20 min | Incluye medición de eficiencia de escalado |
 
 ---
 
@@ -156,6 +157,12 @@ FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
 # Experimento rápido: 3 estrategias × 2 escenarios × 1 repetición (~30 min)
 ./scripts/experiment.sh --quick
 
+# Con fault injection (mide tiempo de recuperación ante fallos)
+./scripts/experiment.sh --fault-inject
+
+# Con scaling test (mide eficiencia de escalado 1→2→3 workers)
+./scripts/experiment.sh --scaling-test
+
 # Con escenarios extremos incluidos
 ./scripts/experiment.sh \
   --scenarios "low-load medium-load high-load burst extreme-load mixed-payload"
@@ -188,18 +195,20 @@ analysis\.venv\Scripts\python.exe analysis\analyze.py
 analysis/.venv/bin/python analysis/analyze.py
 ```
 
-Genera **14 gráficas** en `results/figures/` incluyendo:
-- Violin + boxplot (distribución real con densidad)
-- CDF en escala logarítmica (3 estrategias visibles simultáneamente)
-- Throughput E2E vs escritura al sink diferenciados
-- Tabla resumen con IQR, CV%, Min, Max
-- Heatmap de escalabilidad por escenario
-- Ranking table objetivo (sin normalización arbitraria)
-- Tests de significancia estadística (Kruskal-Wallis + Bonferroni)
+Genera **9 gráficas** en `results/figures/` incluyendo:
+- Boxplot anotado con p50/p95/p99/IQR/CV% por estrategia × escenario
+- Throughput E2E vs escritura al sink (barras duales)
+- Tiempo de recuperación ante fallos (barras horizontales)
+- Eficiencia de escalado horizontal 1→2→3 workers
+- Scatter de recursos: CPU cores vs MB/evento
+- Kafka Consumer Lag con umbral crítico de 10.000 mensajes
+- Tabla resumen completa (p50/p95/p99/IQR/CV%/Min/Max)
+- Heatmap de escalabilidad p95 por escenario
+- Ranking objetivo multi-criterio (p95=35%, throughput=30%, recovery=20%, CV=15%)
 
-> **Nota:** El filtro de warmup (`--warmup-ms`, default 30 000 ms) excluye automáticamente
-> los primeros 30 s de cada run en estrategias streaming y microbatch, permitiendo
-> que la JVM (JIT) se estabilice antes de medir.
+> **Nota:** El filtro de warmup (default 30 s) excluye automáticamente los primeros
+> 30 s de cada run en estrategias streaming y microbatch, permitiendo que la JVM (JIT)
+> se estabilice antes de medir. Desactivar con `--no-warmup-filter`.
 
 ### 5) Bajar y limpiar
 
@@ -231,12 +240,11 @@ Genera **14 gráficas** en `results/figures/` incluyendo:
 
 | Servicio | URL |
 |---|---|
-| Grafana | `http://localhost:3000` (admin/admin) |
-| Prometheus | `http://localhost:9090` |
 | Spark UI | `http://localhost:8080` |
 | Flink UI | `http://localhost:8081` |
-| Generator metrics | `http://localhost:8000/metrics` |
-| Probe metrics | `http://localhost:8001/metrics` |
+| Prometheus | `http://localhost:9090` |
+| cAdvisor | `http://localhost:8083` |
+| Kafka Metrics | `http://localhost:9308/metrics` |
 
 ---
 
@@ -262,9 +270,9 @@ Genera **14 gráficas** en `results/figures/` incluyendo:
 |--------|-------------|
 | `scripts/manage.sh` | Gestión del entorno: `up`, `build`, `status`, `clean`, `down`, `reset` |
 | `scripts/run.sh` | Ejecuta una estrategia: `batch`, `microbatch`, `streaming` |
-| `scripts/experiment.sh` | Experimento automatizado: `--smoke`, `--quick`, `--standard`, `--full` |
-| `scripts/export_metrics.py` | Snapshot de 36+ métricas Prometheus a CSV por corrida |
-| `analysis/analyze.py` | **14 gráficas** + filtro warmup + tests estadísticos (Kruskal-Wallis + Bonferroni) |
+| `scripts/experiment.sh` | Experimento automatizado: `--smoke`, `--quick`, `--fault-inject`, `--scaling-test` |
+| `scripts/fault_inject.sh` | Inyección de fallos y medición de fault recovery time |
+| `analysis/analyze.py` | **9 gráficas** + filtro warmup + tests estadísticos (Kruskal-Wallis + Bonferroni) |
 
 ---
 
@@ -276,12 +284,12 @@ microbatch/     Spark Structured Streaming job (Java)
 streaming/      Flink Streaming job (Java)
 common/         Clases compartidas
 generator/      Productor Kafka multi-thread + schemas IoT/Financial/Health
-probe/          Sonda de disponibilidad + CSV + métricas Prometheus
+probe/          Sonda de disponibilidad + CSV
 analysis/       analyze.py + requirements.txt + .venv/ (auto-creado)
-infrastructure/ SQL, Prometheus, Grafana, Kafka config
-scripts/        Orquestación (bash) + export_metrics.py
+infrastructure/ SQL, Kafka config, prometheus.yml
+scripts/        Orquestación (bash): manage, run, experiment, fault_inject
 docs/           Arquitectura + protocolo experimental
-results/        CSV de latencias + snapshots Prometheus + figuras
+results/        CSV de latencias + fault_recovery.csv + figuras/
 ```
 
 ---
@@ -293,6 +301,9 @@ results/        CSV de latencias + snapshots Prometheus + figuras
 - **Flink job no aparece en UI**: usa `FLINK_DETACHED=true` o revisa logs con `docker compose logs flink-jobmanager`.
 - **Throughput menor al esperado**: el generador escala threads automáticamente; verifica `docker compose logs generator` para ver la configuración de threads activa.
 - **p99 anormalmente alto en primer run**: es normal — el filtro de warmup en `analyze.py` excluye los primeros 30 s automáticamente.
+- **Prometheus no disponible**: verifica `./scripts/manage.sh status` — debe mostrar `✅ Prometheus:9090`. Si falla, revisa `docker compose logs prometheus`.
+- **Chart 03 (fault recovery) vacío**: ejecuta primero `./scripts/experiment.sh --fault-inject` para generar `results/fault_recovery.csv`.
+- **Chart 04 (scaling) con datos sintéticos**: ejecuta `./scripts/experiment.sh --scaling-test` para reemplazar el placeholder con datos reales.
 
 ---
 

@@ -45,6 +45,87 @@ POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
 RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
 FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-1}
 FLINK_DETACHED=${FLINK_DETACHED:-false}
+PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+
+# ═══════════════════════════════════════════════════════════════════
+# PROMETHEUS SNAPSHOT
+# ═══════════════════════════════════════════════════════════════════
+# Consulta el endpoint /api/v1/query de Prometheus al finalizar cada
+# corrida y guarda las métricas relevantes en prometheus_snapshot.csv
+# dentro del directorio de resultados del run.
+collect_prometheus_snapshot() {
+    local run_dir="$1"      # directorio destino, ej: results/batch/low-load/run_1
+    local strategy="$2"     # batch | microbatch | streaming
+    local scenario="$3"
+    local run_id="$4"
+
+    local out_file="$run_dir/prometheus_snapshot.csv"
+
+    log "Recolectando snapshot de Prometheus → $out_file"
+
+    # Verificar que Prometheus esté disponible
+    if ! curl -sf "${PROMETHEUS_URL}/-/healthy" >/dev/null 2>&1; then
+        warn "Prometheus no disponible en ${PROMETHEUS_URL} — omitiendo snapshot"
+        return 0
+    fi
+
+    # Función auxiliar: consulta una métrica PromQL y devuelve "value"
+    # Uso: query_prometheus "<promql>"
+    query_prometheus() {
+        local promql="$1"
+        local encoded
+        encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$promql" 2>/dev/null \
+            || printf '%s' "$promql" | sed 's/ /%20/g; s/{/%7B/g; s/}/%7D/g; s/"/%22/g; s/=/%3D/g; s/,/%2C/g')
+        local result
+        result=$(curl -sf "${PROMETHEUS_URL}/api/v1/query?query=${encoded}" 2>/dev/null || echo "")
+        # Extraer primer valor numérico del JSON
+        echo "$result" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    v = d['data']['result']
+    if v:
+        print(v[0]['value'][1])
+    else:
+        print('NaN')
+except:
+    print('NaN')
+" 2>/dev/null || echo "NaN"
+    }
+
+    # Encabezado CSV
+    echo "strategy,scenario,run_id,metric,value,unit" > "$out_file"
+
+    # ── CPU total del namespace (todos los contenedores tesis-ingestion-*) ──
+    CPU_TOTAL=$(query_prometheus 'sum(rate(container_cpu_usage_seconds_total{name=~"tesis-ingestion-.*"}[2m]))')
+    echo "${strategy},${scenario},${run_id},cpu_total_cores,${CPU_TOTAL},cores" >> "$out_file"
+
+    # ── Memoria RSS total ──
+    MEM_TOTAL=$(query_prometheus 'sum(container_memory_rss{name=~"tesis-ingestion-.*"})')
+    echo "${strategy},${scenario},${run_id},mem_rss_bytes,${MEM_TOTAL},bytes" >> "$out_file"
+
+    # ── Throughput: mensajes producidos por segundo (generator) ──
+    TPUT_PRODUCED=$(query_prometheus 'rate(kafka_produced_messages_total[2m])')
+    echo "${strategy},${scenario},${run_id},tput_produced_eps,${TPUT_PRODUCED},events/s" >> "$out_file"
+
+    # ── Throughput escritura al sink: filas insertadas por segundo ──
+    TPUT_SINK=$(query_prometheus 'rate(sink_rows_written_total[2m])')
+    echo "${strategy},${scenario},${run_id},tput_sink_eps,${TPUT_SINK},events/s" >> "$out_file"
+
+    # ── Kafka consumer lag (suma todos los grupos/particiones del topic events) ──
+    KAFKA_LAG=$(query_prometheus 'sum(kafka_consumergroup_lag{topic="events"})')
+    echo "${strategy},${scenario},${run_id},kafka_consumer_lag,${KAFKA_LAG},messages" >> "$out_file"
+
+    # ── Latencia p50 / p95 / p99 en ms (desde histograma del probe si existe) ──
+    LAT_P50=$(query_prometheus 'histogram_quantile(0.50, rate(probe_latency_ms_bucket[2m]))')
+    LAT_P95=$(query_prometheus 'histogram_quantile(0.95, rate(probe_latency_ms_bucket[2m]))')
+    LAT_P99=$(query_prometheus 'histogram_quantile(0.99, rate(probe_latency_ms_bucket[2m]))')
+    echo "${strategy},${scenario},${run_id},latency_p50_ms,${LAT_P50},ms" >> "$out_file"
+    echo "${strategy},${scenario},${run_id},latency_p95_ms,${LAT_P95},ms" >> "$out_file"
+    echo "${strategy},${scenario},${run_id},latency_p99_ms,${LAT_P99},ms" >> "$out_file"
+
+    log "Snapshot guardado: $(wc -l < "$out_file") métricas en $out_file"
+}
 
 # ═══════════════════════════════════════════════════════════════════
 # RUN BATCH
@@ -100,6 +181,11 @@ run_batch() {
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
         --run.duration.seconds=${RUN_DURATION_SECONDS}
     
+    # Exportar snapshot de Prometheus al directorio del run
+    RUN_DIR="${ROOT_DIR}/results/batch/${SCENARIO}/${RUN_ID}"
+    mkdir -p "$RUN_DIR"
+    collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
+
     log "Completed: batch/$SCENARIO/$RUN_ID"
 }
 
@@ -142,6 +228,11 @@ run_microbatch() {
     # Detener generator
     docker compose stop generator
     
+    # Exportar snapshot de Prometheus al directorio del run
+    RUN_DIR="${ROOT_DIR}/results/microbatch/${SCENARIO}/${RUN_ID}"
+    mkdir -p "$RUN_DIR"
+    collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
+
     log "Completed: microbatch/$SCENARIO/$RUN_ID"
 }
 
@@ -208,6 +299,11 @@ run_streaming() {
     # Detener generator
     docker compose stop generator
     
+    # Exportar snapshot de Prometheus al directorio del run
+    RUN_DIR="${ROOT_DIR}/results/streaming/${SCENARIO}/${RUN_ID}"
+    mkdir -p "$RUN_DIR"
+    collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
+
     log "Completed: streaming/$SCENARIO/$RUN_ID"
 }
 

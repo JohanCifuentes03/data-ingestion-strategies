@@ -19,7 +19,6 @@ from typing import Any
 
 import yaml
 from confluent_kafka import Producer, KafkaException
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,28 +64,7 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
     },
 }
 
-# ── Prometheus metrics ──────────────────────────────────────────────
-EVENT_COUNTER = Counter(
-    "generator_events_total", "Events produced", ["scenario", "schema"]
-)
-ERROR_COUNTER = Counter(
-    "generator_errors_total", "Errors while producing", ["scenario"]
-)
-BYTE_COUNTER = Counter(
-    "generator_bytes_total", "Payload bytes produced", ["scenario"]
-)
-CURRENT_RATE = Gauge(
-    "generator_current_rate", "Configured event rate per second", ["scenario"]
-)
-WARMUP_GAUGE = Gauge("generator_warmup_active", "1 during warmup phase, 0 after")
-SEND_LATENCY = Histogram(
-    "generator_produce_latency_ms",
-    "Time spent in producer.produce() call (ms)",
-    buckets=(0.5, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000),
-)
-THREAD_ERRORS = Counter(
-    "generator_thread_errors_total", "Unhandled errors in producer threads"
-)
+
 
 
 # ── Event schema builders ───────────────────────────────────────────
@@ -222,14 +200,13 @@ def producer_thread(
         producer = configure_producer(bootstrap_servers)
     except Exception as exc:
         log.error("Thread %d: producer init failed: %s", thread_id, exc)
-        THREAD_ERRORS.inc()
         return
 
     log.info("Producer thread %d started", thread_id)
 
     def on_delivery(err, msg):
         if err:
-            ERROR_COUNTER.labels(scenario_name).inc()
+            pass
 
     while state.running:
         try:
@@ -251,13 +228,9 @@ def producer_thread(
                 try:
                     producer.produce(topic, value=raw, key=key, on_delivery=on_delivery)
                     producer.poll(0)
-                    SEND_LATENCY.observe((time.perf_counter() - t0) * 1000)
-                    EVENT_COUNTER.labels(scenario_name, schema).inc()
-                    BYTE_COUNTER.labels(scenario_name).inc(len(raw))
                 except BufferError:
                     producer.poll(0.01)
                 except Exception as exc:
-                    ERROR_COUNTER.labels(scenario_name).inc()
                     log.error("Thread %d: produce error: %s", thread_id, exc)
 
             producer.flush(0)  # non-blocking flush
@@ -267,7 +240,6 @@ def producer_thread(
             time.sleep(sleep_for)
 
         except Exception as exc:
-            THREAD_ERRORS.inc()
             log.error("Thread %d: unexpected error: %s", thread_id, exc)
             time.sleep(1.0)
 
@@ -301,9 +273,6 @@ def decide_n_threads(target_rate: int) -> int:
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
-    prometheus_port = int(os.getenv("PROMETHEUS_PORT", "8000"))
-    start_http_server(prometheus_port)
-
     run_duration = int(os.getenv("RUN_DURATION_SECONDS", "0"))  # 0 = infinite
     warmup_seconds = int(os.getenv("WARMUP_SECONDS", "30"))
 
@@ -342,9 +311,6 @@ def main():
     def current_rate_fn() -> int:
         return state.current_rate
 
-    CURRENT_RATE.labels(scenario_name).set(base_rate)
-    WARMUP_GAUGE.set(1)
-
     # Launch producer threads
     threads = []
     for i in range(n_threads):
@@ -369,7 +335,6 @@ def main():
             # Warmup transition
             if not warmup_complete and elapsed >= warmup_seconds:
                 warmup_complete = True
-                WARMUP_GAUGE.set(0)
                 log.info("Warmup complete (%ds) — measurements now valid", warmup_seconds)
 
             # Duration check
@@ -387,7 +352,6 @@ def main():
 
             new_rate = burst_rate if in_burst else base_rate
             state.current_rate = new_rate
-            CURRENT_RATE.labels(scenario_name).set(new_rate)
 
             time.sleep(0.5)  # control loop ticks every 500ms
 

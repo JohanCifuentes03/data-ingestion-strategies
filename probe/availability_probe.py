@@ -13,43 +13,12 @@ import time
 from pathlib import Path
 
 import psycopg2
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [probe] %(levelname)s %(message)s",
 )
 log = logging.getLogger("probe")
-
-# ── Prometheus metrics ─────────────────────────────────────────────
-LATENCY_HISTOGRAM = Histogram(
-    "probe_latency",
-    "Latency between production and visibility (ms)",
-    ["strategy", "scenario"],
-    buckets=(
-        # Sub-second (streaming / realtime)
-        50, 100, 250, 500, 750, 1000,
-        # 1-10s (microbatch)
-        1500, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
-        # 10-60s (batch)
-        15000, 20000, 25000, 30000, 45000, 60000,
-        # > 60s
-        120000,
-    ),
-)
-VISIBLE_EVENTS = Counter(
-    "probe_visible_events_total",
-    "Events observed in sink",
-    ["strategy", "scenario"],
-)
-ERROR_COUNTER = Counter("probe_errors_total", "Errors while probing")
-LAST_VISIBLE_GAUGE = Gauge("probe_last_visible_at_ms", "Latest visible_at seen")
-THROUGHPUT_GAUGE = Gauge(
-    "probe_throughput_events_per_sec",
-    "Observed throughput",
-    ["strategy", "scenario"],
-)
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 def pg_connection(max_retries: int = 60, retry_interval: float = 2.0):
@@ -95,9 +64,6 @@ def handle_signal(signum, frame):  # pylint: disable=unused-argument
 
 # ── Main loop ──────────────────────────────────────────────────────
 def main():
-    prometheus_port = int(os.getenv("PROMETHEUS_PORT", "8001"))
-    start_http_server(prometheus_port)
-
     poll_interval = int(os.getenv("PROBE_POLL_INTERVAL_MS", "500")) / 1000.0
     results_path = Path(os.getenv("RESULTS_PATH", "/results")) / "latency_samples.csv"
     ensure_results_file(results_path)
@@ -140,10 +106,6 @@ def main():
                         strategy = strategy or "unknown"
                         scenario = scenario or "unknown"
                         run_id = run_id or "unset"
-
-                        LATENCY_HISTOGRAM.labels(strategy, scenario).observe(latency)
-                        VISIBLE_EVENTS.labels(strategy, scenario).inc()
-                        LAST_VISIBLE_GAUGE.set(visible_at)
                         writer.writerow([
                             event_id, produced_at, visible_at, latency,
                             strategy, scenario, run_id,
@@ -154,19 +116,9 @@ def main():
                         last_strategy = strategy
                         last_scenario = scenario
 
-            # ── Throughput gauge (once per second) ─────────────────
-            now = time.time()
-            window = now - throughput_window_start
-            if window >= 1.0:
-                tp = throughput_window_count / window
-                THROUGHPUT_GAUGE.labels(last_strategy, last_scenario).set(tp)
-                throughput_window_start = now
-                throughput_window_count = 0
-
             time.sleep(poll_interval)
 
         except psycopg2.OperationalError as exc:
-            ERROR_COUNTER.inc()
             log.error("Connection lost, reconnecting: %s", exc)
             try:
                 conn.close()
@@ -175,7 +127,6 @@ def main():
             conn = pg_connection()
             conn.autocommit = True
         except Exception as exc:  # pylint: disable=broad-except
-            ERROR_COUNTER.inc()
             log.error("Error while sampling: %s", exc)
             time.sleep(2)
 

@@ -41,12 +41,16 @@ services:
       retries: 10
       start_period: 30s
 
+  # ── Kafka Exporter (métricas Kafka → Prometheus) ───────────────────
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
+    restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
-    command: ["--kafka.server=kafka:9092"]
+    command:
+      - "--kafka.server=kafka:9092"
+      - "--web.listen-address=:9308"
     ports:
       - "9308:9308"
 
@@ -71,6 +75,7 @@ services:
       - ./microbatch/out/libs:/opt/spark/jobs/microbatch:ro
       - spark-checkpoints:/opt/spark/checkpoints
 
+  # spark-worker replica 1 (siempre activo)
   spark-worker:
     image: apache/spark:3.5.8-java17
     restart: unless-stopped
@@ -86,6 +91,48 @@ services:
       --cores ${SPARK_WORKER_CORES}
       --memory ${SPARK_WORKER_MEMORY}
       --work-dir /opt/spark/work-dir"
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+
+  # spark-worker replica 2 (activar con: docker compose up -d spark-worker-2)
+  spark-worker-2:
+    image: apache/spark:3.5.8-java17
+    restart: "no"
+    user: root
+    profiles:
+      - scaling
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:${SPARK_MASTER_PORT}
+      --cores ${SPARK_WORKER_CORES}
+      --memory ${SPARK_WORKER_MEMORY}
+      --work-dir /opt/spark/work-dir-2"
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+
+  # spark-worker replica 3 (activar con: docker compose up -d spark-worker-3)
+  spark-worker-3:
+    image: apache/spark:3.5.8-java17
+    restart: "no"
+    user: root
+    profiles:
+      - scaling
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:${SPARK_MASTER_PORT}
+      --cores ${SPARK_WORKER_CORES}
+      --memory ${SPARK_WORKER_MEMORY}
+      --work-dir /opt/spark/work-dir-3"
     volumes:
       - spark-checkpoints:/opt/spark/checkpoints
 
@@ -105,7 +152,7 @@ services:
           jobmanager.memory.process.size: 1024m
           rest.port: 8081
           parallelism.default: ${FLINK_PARALLELISM}
-          metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
           metrics.reporter.prom.port: 9249
     ports:
       - "8081:8081"
@@ -126,10 +173,10 @@ services:
           jobmanager.rpc.address: flink-jobmanager
           taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM}
           taskmanager.memory.process.size: ${FLINK_TASKMANAGER_MEMORY}
-          metrics.reporter.prom.factory: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
-          metrics.reporter.prom.port: 9249
+          metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.port: 9250
     ports:
-      - "9250:9249"
+      - "9250:9250"
     volumes:
       - ./streaming/out/libs:/opt/flink/usrlib:ro
 
@@ -153,59 +200,41 @@ services:
       retries: 10
       start_period: 10s
 
-  postgres-exporter:
-    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
-      DATA_SOURCE_USER: ${POSTGRES_USER}
-      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
-    ports:
-      - "9187:9187"
+  # ── Observabilidad ─────────────────────────────────────────────────
 
-  # ── Observability ──────────────────────────────────────────────────
+  # Prometheus: recolecta y almacena series temporales de métricas
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    restart: unless-stopped
+    depends_on:
+      - kafka-exporter
+      - cadvisor
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  # cAdvisor: expone métricas de CPU, Memoria, Red e I/O por contenedor
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped
     privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro
     ports:
-      - "8888:8080"
-
-  prometheus:
-    image: prom/prometheus:v2.49.1
-    restart: unless-stopped
-    depends_on:
-      - kafka-exporter
-      - postgres-exporter
-      - generator
-      - probe
-    volumes:
-      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "9090:9090"
-
-  grafana:
-    image: grafana/grafana:10.3.1
-    restart: unless-stopped
-    depends_on:
-      - prometheus
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - "8083:8080"
 
   # ── Workload ───────────────────────────────────────────────────────
   generator:
@@ -223,9 +252,6 @@ services:
       EVENT_SCHEMA: ${GENERATOR_EVENT_SCHEMA:-}
       RUN_DURATION_SECONDS: ${GENERATOR_RUN_DURATION_SECONDS:-0}
       WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
-      PROMETHEUS_PORT: 8000
-    ports:
-      - "8000:8000"
 
   probe:
     build:
@@ -241,9 +267,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       PROBE_POLL_INTERVAL_MS: ${PROBE_POLL_INTERVAL_MS}
       RESULTS_PATH: /results
-      PROMETHEUS_PORT: 8001
-    ports:
-      - "8001:8001"
     volumes:
       - ./results:/results
 
@@ -254,4 +277,3 @@ volumes:
   postgres-data:
   spark-checkpoints:
   prometheus-data:
-  grafana-data:

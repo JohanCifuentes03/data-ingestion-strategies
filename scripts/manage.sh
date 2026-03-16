@@ -54,15 +54,15 @@ cmd_up() {
         fi
     fi
 
-    # Verificar JARs
-    if [ ! -d "$LIB_DIR" ] || [ -z "$(ls -A "$LIB_DIR"/*.jar 2>/dev/null)" ]; then
-        warn "No se encontraron JARs pre-compilados."
-        if command -v gradle >/dev/null 2>&1 || [ -f "$ROOT_DIR/gradlew" ]; then
-            log "Compilando jobs..."
-            ./gradlew buildJobs
-        else
-            error "Necesitas Java 17+ y Gradle para compilar, o descarga los JARs pre-compilados."
+    # Compilar JARs siempre para tener la última versión
+    if command -v java >/dev/null 2>&1 && { command -v gradle >/dev/null 2>&1 || [ -f "$ROOT_DIR/gradlew" ]; }; then
+        cmd_build
+    else
+        if [ ! -d "$LIB_DIR" ] || [ -z "$(ls -A "$LIB_DIR"/*.jar 2>/dev/null)" ]; then
+            error "Necesitas Java 17+ y Gradle para compilar, o descarga los JARs pre-compilados en lib/."
             exit 1
+        else
+            warn "No se encontraron herramientas de compilación. Usando JARs pre-compilados existentes."
         fi
     fi
 
@@ -96,19 +96,25 @@ cmd_up() {
     log "Infraestructura lista!"
     echo ""
     echo "Servicios:"
-    echo "  • Grafana:    http://localhost:3000 (admin/admin)"
-    echo "  • Prometheus: http://localhost:9090"
-    echo "  • Spark UI:   http://localhost:8080"
-    echo "  • Flink UI:   http://localhost:8081"
+
+    echo "  • Spark UI:     http://localhost:8080"
+    echo "  • Flink UI:     http://localhost:8081"
+    echo "  • Prometheus:   http://localhost:9090"
+    echo "  • cAdvisor:     http://localhost:8083"
+    echo "  • Kafka Metrics: http://localhost:9308/metrics"
 }
 
 cmd_build() {
     log "Compilando jobs Java..."
     
     require_cmd java
-    require_cmd gradle
     
-    ./gradlew buildJobs
+    if [ -f "$ROOT_DIR/gradlew" ]; then
+        ./gradlew buildJobs
+    else
+        require_cmd gradle
+        gradle buildJobs
+    fi
     
     # Copiar a lib/
     mkdir -p "$LIB_DIR"
@@ -138,6 +144,27 @@ cmd_status() {
         echo "  ✅ PostgreSQL:5432"
     else
         echo "  ❌ PostgreSQL:5432"
+    fi
+
+    # Prometheus
+    if curl -sf http://localhost:9090/-/healthy >/dev/null 2>&1; then
+        echo "  ✅ Prometheus:9090"
+    else
+        echo "  ❌ Prometheus:9090"
+    fi
+
+    # cAdvisor
+    if curl -sf http://localhost:8083/healthz >/dev/null 2>&1; then
+        echo "  ✅ cAdvisor:8083"
+    else
+        echo "  ❌ cAdvisor:8083"
+    fi
+
+    # Kafka Exporter
+    if curl -sf http://localhost:9308/metrics >/dev/null 2>&1; then
+        echo "  ✅ kafka-exporter:9308"
+    else
+        echo "  ❌ kafka-exporter:9308"
     fi
 }
 
@@ -179,7 +206,7 @@ cmd_reset() {
     fi
     
     log "Deteniendo contenedores y eliminando volúmenes..."
-    docker compose down -v --remove-orphans 2>/dev/null || true
+    docker compose --profile scaling down -v --remove-orphans 2>/dev/null || true
     
     log "Eliminando imágenes generadas..."
     docker rmi tesis-ingestion-generator tesis-ingestion-probe 2>/dev/null || true

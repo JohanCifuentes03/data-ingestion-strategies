@@ -45,8 +45,6 @@ public final class SparkStructuredJob {
         }
 
         private static void writeBatchWithRetry(Dataset<Row> batch, String jdbcUrl, Properties props, int batchId) {
-                // We cache the dataset to prevent Spark from re-evaluating the entire 
-                // lineage (reading from Kafka and parsing JSON) multiple times per microbatch.
                 batch.persist();
                 try {
                         long rowCount = batch.count();
@@ -57,23 +55,42 @@ public final class SparkStructuredJob {
 
                         System.out.println("[microbatch] Batch " + batchId + " writing " + rowCount + " rows...");
 
-                        // We rely entirely on Spark's built-in task retry mechanism.
-                        // Spark commits each JDBC partition in an independent PostgreSQL transaction.
-                        // If a partition fails, Spark safely retries ONLY that partition, maintaining 
-                        // idempotency. A manual whole-batch retry would cause massive data duplication 
-                        // for partitions that succeeded.
-                        batch.write()
-                                .mode("append")
-                                .option("batchsize", 1000)
-                                .option("numPartitions", 4)
-                                // We use default isolation level (READ_UNCOMMITTED inside Spark Postgres dialect)
-                                // to ensure the partition correctly rolls back on task failure.
-                                .jdbc(jdbcUrl, "events", props);
+                        batch.foreachPartition(partition -> {
+                                if (!partition.hasNext()) return;
+                                
+                                java.sql.Connection conn = java.sql.DriverManager.getConnection(jdbcUrl, props);
+                                conn.setAutoCommit(false);
+                                
+                                String sql = "INSERT INTO events (event_id, produced_at, payload, strategy, scenario, run_id) " +
+                                             "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING";
+                                java.sql.PreparedStatement stmt = conn.prepareStatement(sql);
+                                
+                                int count = 0;
+                                while (partition.hasNext()) {
+                                        Row row = partition.next();
+                                        stmt.setString(1, row.getAs("event_id"));
+                                        stmt.setLong(2, row.getAs("produced_at"));
+                                        stmt.setString(3, row.getAs("payload"));
+                                        stmt.setString(4, row.getAs("strategy"));
+                                        stmt.setString(5, row.getAs("scenario"));
+                                        stmt.setString(6, row.getAs("run_id"));
+                                        stmt.addBatch();
+                                        count++;
+                                        
+                                        if (count % 1000 == 0) {
+                                                stmt.executeBatch();
+                                        }
+                                }
+                                stmt.executeBatch();
+                                conn.commit();
+                                stmt.close();
+                                conn.close();
+                        });
 
-                        System.out.println("[microbatch] Batch " + batchId + " write successful: " + rowCount + " rows");
+                        System.out.println("[microbatch] Batch " + batchId + " write successful (idempotent): " + rowCount + " rows");
                 } catch (Exception e) {
                         System.err.println("[microbatch] Batch " + batchId + " failed fatally: " + e.getMessage());
-                        throw e; // Fail the microbatch so the streaming query engine can handle it or crash safely
+                        throw new RuntimeException("Microbatch write failed", e);
                 } finally {
                         batch.unpersist();
                 }

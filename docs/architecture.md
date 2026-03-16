@@ -41,9 +41,7 @@ flowchart LR
 
     subgraph Observabilidad
         PROBE["Sonda de disponibilidad<br/>(Python, polling PG)"]
-        PROM["Prometheus"]
-        GRAF["Grafana"]
-        CAD["cAdvisor"]
+        PROBE["Sonda de disponibilidad<br/>(Python, polling PG)"]
     end
 
     GEN -->|"produce JSON events (lz4)"| K
@@ -56,13 +54,7 @@ flowchart LR
     FL -->|"JDBC Sink (batch 500)"| PG
 
     PG --> PROBE
-    PROBE -->|"probe_latency, probe_visible_events_total"| PROM
-    GEN -->|"generator_events_total, errors, bytes, produce_latency"| PROM
-    K -.-|"kafka-exporter (consumer lag, offsets)"| PROM
-    PG -.-|"postgres-exporter (xact/s, tup_inserted)"| PROM
-    FL -.-|"Prometheus Reporter :9249 (checkpoints, GC, backpressure)"| PROM
-    CAD -.-|"container CPU/mem/net/disk"| PROM
-    PROM --> GRAF
+    GEN -->|"generator_events_total, errors, bytes, produce_latency"| PROBE
 ```
 
 ---
@@ -86,7 +78,7 @@ sequenceDiagram
     Note over PG: visible_at = DEFAULT NOW()
     P->>PG: SELECT WHERE visible_at > last_seen LIMIT 1000
     PG-->>P: rows (event_id, produced_at, visible_at, ...)
-    Note over P: latency = visible_at − produced_at → CSV + Prometheus
+    Note over P: latency = visible_at − produced_at → CSV
 
 *Nota: Para garantizar una comparación justa, el script `run_batch.sh` incluye una fase de **acumulación** previa de `RUN_DURATION_SECONDS` antes de lanzar el job de Spark, asegurando que el lote procese el mismo volumen de datos que las estrategias de streaming.*
 ```
@@ -108,7 +100,7 @@ sequenceDiagram
         Note over PG: visible_at = DEFAULT NOW()
     end
     P->>PG: SELECT WHERE visible_at > last_seen
-    PG-->>P: rows → CSV + Prometheus
+    PG-->>P: rows → CSV
 ```
 
 ### 3.3 Flink Streaming
@@ -127,7 +119,7 @@ sequenceDiagram
     FL->>PG: JdbcSink (batch=500, interval=50ms) + ON CONFLICT
     Note over PG: visible_at = DEFAULT NOW()
     P->>PG: SELECT WHERE visible_at > last_seen
-    PG-->>P: rows → CSV + Prometheus
+    PG-->>P: rows → CSV
 
 ---
 
@@ -236,23 +228,21 @@ Cada escenario se repite **5 veces** siguiendo el protocolo:
 
 ---
 
-## 7. Métricas recolectadas (completo)
+## 7. Métricas recolectadas — 6 KPIs esenciales
 
-| Categoría | Métrica | Fuente |
-|-----------|---------|--------|
-| **Latencia** | `probe_latency` (hist p50/p75/p95/p99/mean) | Probe → Prometheus |
-| **Throughput** | `probe_visible_events_total`, `probe_throughput_events_per_sec` | Probe → Prometheus |
-| **Generación** | `generator_events_total`, `generator_errors_total`, `generator_bytes_total` | Generator → Prometheus |
-| **Latencia de producción** | `generator_produce_latency_ms` (hist p50/p99) | Generator → Prometheus |
-| **CPU** | `container_cpu_usage_seconds_total`, `container_cpu_cfs_throttled_*` | cAdvisor → Prometheus |
-| **Memoria** | `container_memory_usage_bytes`, `container_memory_rss` | cAdvisor → Prometheus |
-| **Red** | `container_network_receive/transmit_bytes_total` | cAdvisor → Prometheus |
-| **Disco** | `container_fs_reads/writes_bytes_total` | cAdvisor → Prometheus |
-| **Kafka** | Consumer lag (sum/max), offsets, particiones | kafka-exporter → Prometheus |
-| **PostgreSQL** | Conexiones, transacciones/s, tuplas insertadas/s, tamaño DB | postgres-exporter → Prometheus |
-| **Flink** | Records in/out, checkpoints (dur/size/count), backpressure, Heap, GC time | Flink Reporter → Prometheus |
-| **CSV** | `latency_samples.csv`: event_id, produced_at, visible_at, latency_ms, strategy, scenario, run_id | Probe → disco |
-| **Snapshot CSV** | `prometheus_snapshot.csv`: snapshot de ≥36 métricas por corrida | export_metrics.py → disco |
+| # | KPI | Definición formal | Fuente | Unidad |
+|---|-----|-------------------|--------|--------|
+| 1 | **Latencia E2E** | `visible_at − produced_at` (percentiles p50/p95/p99 + IQR + CV%) | `latency_samples.csv` | ms |
+| 2 | **Throughput E2E vs Sink** | `N_eventos / (visible_at_max − produced_at_min)` vs `tput_sink_eps` | `latency_samples.csv` + `prometheus_snapshot.csv` | eventos/s |
+| 3 | **Fault Recovery Time** | Tiempo desde kill del contenedor hasta recuperar 85% del throughput base | `fault_recovery.csv` | s |
+| 4 | **Scaling Efficiency** | `(tput_N / tput_1) / N × 100%` medido en 1→2→3 Spark workers | `results/*/scaling_*w/` | % |
+| 5 | **Resource Utilization** | CPU total (cores) + memoria RSS por evento (MB/evento) | `prometheus_snapshot.csv` → cAdvisor | cores / MB/ev |
+| 6 | **Kafka Consumer Lag** | `sum(kafka_consumergroup_lag{topic="events"})` al final de cada run | `prometheus_snapshot.csv` → kafka-exporter | mensajes |
+
+Los datos fuente son:
+- `results/<strategy>/<scenario>/<run>/latency_samples.csv` — muestra por evento
+- `results/<strategy>/<scenario>/<run>/prometheus_snapshot.csv` — snapshot Prometheus al cierre del run
+- `results/fault_recovery.csv` — tiempos de recuperación ante fallos inyectados
 
 ---
 
@@ -262,22 +252,19 @@ Por cada escenario se ejecutan:
 - **Kruskal-Wallis H test** (no paramétrico): ¿son las distribuciones de latencia de las 3 estrategias estadísticamente diferentes?
 - **Mann-Whitney U pairwise** con **corrección Bonferroni**: comparaciones por pares con p-valores ajustados.
 
-### Gráficas generadas (12 total)
+### Gráficas generadas (9 total)
 
-| # | Archivo | Descripción |
-|---|---------|-------------|
-| 01 | `01_boxplot_latencia.png` | Distribución de latencia por estrategia y escenario |
-| 02 | `02_cdf_latencia.png` | CDF acumulada de latencia |
-| 03 | `03_percentiles_barras.png` | Barras p50/p95/p99 por escenario |
-| 04 | `04_throughput.png` | Throughput promedio ± SD |
-| 05 | `05_estabilidad_runs.png` | Variabilidad entre repeticiones |
-| 06 | `06_tabla_resumen.png/.csv` | Tabla completa de métricas por estrategia/escenario |
-| 07 | `07_latencia_temporal.png` | Evolución temporal de latencia (p50 + banda p95) |
-| 08 | `08_eficiencia_recursos.png` | Scatter: latencia p95 vs. CPU promedio |
-| 09 | `09_kafka_lag.png` | Consumer lag máximo por estrategia y escenario |
-| 10 | `10_tasa_errores.png` | Tasa de errores de generador y probe |
-| 11 | `11_significancia.png/.csv` | Tabla de p-valores Kruskal-Wallis y Bonferroni |
-| 12 | `12_radar_multikpi.png` | Radar chart multi-KPI normalizado holístico |
+| # | Archivo | Descripción | Datos fuente |
+|---|---------|-------------|--------------|
+| 01 | `01_boxplot_latencia_e2e.png` | Boxplot anotado de latencia E2E con p50/p95/p99/IQR/CV% por estrategia × escenario | `latency_samples.csv` |
+| 02 | `02_throughput_dual.png` | Barras duales: Throughput E2E vs escritura al Sink (eventos/s) | `latency_samples.csv` + `prometheus_snapshot.csv` |
+| 03 | `03_fault_recovery.png` | Barras horizontales de tiempo de recuperación ante fallos (media ± std) | `fault_recovery.csv` |
+| 04 | `04_scaling_efficiency.png` | Eficiencia de escalado horizontal 1→2→3 workers (% de ideal) | `results/*/scaling_*w/` |
+| 05 | `05_resource_utilization.png` | Scatter CPU cores vs MB/evento por run y estrategia | `prometheus_snapshot.csv` |
+| 06 | `06_kafka_lag.png` | Consumer Lag promedio con umbral crítico de 10.000 mensajes | `prometheus_snapshot.csv` |
+| 07 | `07_tabla_resumen.csv/.png` | Tabla completa: p50/p95/p99/IQR/CV%/Min/Max por estrategia × escenario | `latency_samples.csv` |
+| 08 | `08_heatmap_escalabilidad.png` | Heatmap de latencia p95 por estrategia × escenario | `latency_samples.csv` |
+| 09 | `09_ranking_table.csv/.png` | Ranking objetivo multi-criterio normalizado (pesos: p95=35%, tput=30%, recovery=20%, CV=15%) | todos |
 
 ---
 
@@ -287,18 +274,41 @@ Por cada escenario se ejecutan:
 |----------|--------|--------|-----|
 | `zookeeper` | confluentinc/cp-zookeeper:7.5.3 | 2181 | Coordinación Kafka |
 | `kafka` | confluentinc/cp-kafka:7.5.3 | 9092 | Broker de eventos (12 particiones) |
-| `kafka-exporter` | danielqsj/kafka-exporter:v1.7.0 | 9308 | Métricas Kafka |
+| `kafka-exporter` | danielqsj/kafka-exporter:v1.7.0 | 9308 | Métricas Kafka para Prometheus |
 | `spark-master` | apache/spark:3.5.8-java17 | 7077, 8080 | Coordinador Spark |
-| `spark-worker` | apache/spark:3.5.8-java17 | — | Ejecutor (4 cores, 2 GB) |
+| `spark-worker-1` | apache/spark:3.5.8-java17 | — | Ejecutor (4 cores, 2 GB) |
+| `spark-worker-2` | apache/spark:3.5.8-java17 | — | Ejecutor adicional (profile: scaling) |
+| `spark-worker-3` | apache/spark:3.5.8-java17 | — | Ejecutor adicional (profile: scaling) |
 | `flink-jobmanager` | flink:1.18.1-scala_2.12-java17 | 8081, 9249 | Coordinador Flink (2 GB) |
 | `flink-taskmanager` | flink:1.18.1-scala_2.12-java17 | 9250 | Ejecutor (4 slots, 2 GB) |
 | `postgres` | postgres:15 | 5432 | Sink (tabla events) |
-| `postgres-exporter` | postgres-exporter:v0.15.0 | 9187 | Métricas PostgreSQL |
-| `cadvisor` | cadvisor:v0.49.1 | 8888 | Métricas de contenedores |
-| `prometheus` | prometheus:v2.49.1 | 9090 | Almacén de métricas |
-| `grafana` | grafana:10.3.1 | 3000 | Visualización |
 | `generator` | python:3.11-slim (custom) | 8000 | Generador multi-thread |
 | `probe` | python:3.11-slim (custom) | 8001 | Sonda de disponibilidad |
+| `prometheus` | prom/prometheus:v2.51.0 | 9090 | Almacenamiento de métricas de series temporales |
+| `cadvisor` | gcr.io/cadvisor/cadvisor:v0.49.1 | 8083 | Métricas de recursos de contenedores |
+
+### Flujo de observabilidad
+
+```mermaid
+flowchart LR
+    GEN["generator\n:8000/metrics"] -->|scrape 5s| PROM["Prometheus\n:9090"]
+    PROBE["probe\n:8001/metrics"] -->|scrape 5s| PROM
+    KE["kafka-exporter\n:9308/metrics"] -->|scrape 5s| PROM
+    CA["cAdvisor\n:8083/metrics"] -->|scrape 5s| PROM
+    PROM -->|"/api/v1/query al cierre del run"| SNAP["prometheus_snapshot.csv"]
+    SNAP --> ANA["analyze.py\n(charts 02,05,06)"]
+```
+
+### Flujo de inyección de fallos
+
+```
+fault_inject.sh <strategy> <scenario>
+  1. Registra throughput base durante 30 s
+  2. Mata el contenedor target (docker stop)
+  3. Espera recuperación espontánea (Docker restart policy: unless-stopped)
+  4. Mide tiempo hasta que throughput >= 85% del base
+  5. Guarda recovery_time_s en results/fault_recovery.csv
+```
 
 ---
 
@@ -306,23 +316,31 @@ Por cada escenario se ejecutan:
 
 ```
 results/
-├── latency_samples.csv           # CSV acumulado del probe (todos los runs)
-├── figures/                      # 12 gráficas generadas por analyze.py
-│   ├── 01_boxplot_latencia.png
-│   ├── 02_cdf_latencia.png
-│   ├── ...
-│   └── 12_radar_multikpi.png
+├── latency_samples.csv             # CSV acumulado del probe (todos los runs)
+├── fault_recovery.csv              # Tiempos de recuperación ante fallos
+├── figures/                        # 9 gráficas generadas por analyze.py
+│   ├── 01_boxplot_latencia_e2e.png
+│   ├── 02_throughput_dual.png
+│   ├── 03_fault_recovery.png
+│   ├── 04_scaling_efficiency.png
+│   ├── 05_resource_utilization.png
+│   ├── 06_kafka_lag.png
+│   ├── 07_tabla_resumen.csv
+│   ├── 07_tabla_resumen.png
+│   ├── 08_heatmap_escalabilidad.png
+│   ├── 09_ranking_table.csv
+│   ├── 09_ranking_table.png
+│   └── statistical_tests.csv
 ├── batch/
 │   ├── low-load/
 │   │   ├── run_1/
 │   │   │   ├── latency_samples.csv
 │   │   │   └── prometheus_snapshot.csv
-│   │   └── run_2/ ... run_5/
+│   │   ├── run_2/ ... run_5/
+│   │   └── scaling_1w/ scaling_2w/ scaling_3w/  # solo con --scaling-test
 │   ├── medium-load/ ...
 │   ├── high-load/ ...
-│   ├── burst/ ...
-│   ├── extreme-load/ ...
-│   └── mixed-payload/ ...
+│   └── burst/ ...
 ├── microbatch/ ...
 └── streaming/ ...
 ```

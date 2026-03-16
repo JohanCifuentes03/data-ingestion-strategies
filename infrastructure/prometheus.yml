@@ -1,0 +1,50 @@
+global:
+  scrape_interval:     5s
+  evaluation_interval: 5s
+  external_labels:
+    project: 'tesis-ingestion'
+
+scrape_configs:
+
+  # ── Kafka Exporter ─────────────────────────────────────────────────
+  # Expone métricas de Kafka: consumer lag, topic offsets, partitions
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'kafka'
+
+  # ── cAdvisor (Docker containers CPU/Mem/Net/IO) ────────────────────
+  # Expone métricas de recursos por contenedor Docker
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metric_relabel_configs:
+      # Solo conservar contenedores relevantes del benchmark
+      - source_labels: [container_label_com_docker_compose_service]
+        regex: 'spark-master|spark-worker|flink-jobmanager|flink-taskmanager|kafka|generator|probe|postgres'
+        action: keep
+
+  # ── Generator (métricas de producción) ────────────────────────────
+  # Expone: generator_events_total, generator_errors_total,
+  #         generator_bytes_total, generator_produce_latency_seconds
+  - job_name: 'generator'
+    static_configs:
+      - targets: ['generator:8000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'generator'
+
+  # ── Probe (métricas de disponibilidad) ────────────────────────────
+  # Expone: probe_events_seen_total, probe_poll_latency_seconds,
+  #         probe_errors_total
+  - job_name: 'probe'
+    static_configs:
+      - targets: ['probe:8001']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'probe'
