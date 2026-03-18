@@ -16,12 +16,28 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
 # Colores
+RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
 log() { echo -e "${GREEN}[run]${NC} $*"; }
 warn() { echo -e "${YELLOW}[run]${NC} $*"; }
+error() { echo -e "${RED}[run]${NC} $*"; }
+
+PYTHON_BIN=$(command -v python3 2>/dev/null || true)
+if [ -n "$PYTHON_BIN" ]; then
+    if ! "$PYTHON_BIN" -c "import sys" >/dev/null 2>&1; then
+        PYTHON_BIN=""
+    fi
+fi
+if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN=$(command -v python 2>/dev/null || true)
+fi
+if [ -z "$PYTHON_BIN" ]; then
+    warn "Python no encontrado en PATH; se intentará usar 'python3'"
+    PYTHON_BIN=python3
+fi
 
 ensure_services() {
     log "Verificando servicios..."
@@ -73,53 +89,73 @@ collect_prometheus_snapshot() {
     # Uso: query_prometheus "<promql>"
     query_prometheus() {
         local promql="$1"
-        local encoded
-        encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$promql" 2>/dev/null \
-            || printf '%s' "$promql" | sed 's/ /%20/g; s/{/%7B/g; s/}/%7D/g; s/"/%22/g; s/=/%3D/g; s/,/%2C/g')
-        local result
-        result=$(curl -sf "${PROMETHEUS_URL}/api/v1/query?query=${encoded}" 2>/dev/null || echo "")
-        # Extraer primer valor numérico del JSON
-        echo "$result" | python3 -c "
-import json,sys
-try:
-    d = json.load(sys.stdin)
-    v = d['data']['result']
-    if v:
-        print(v[0]['value'][1])
+        "$PYTHON_BIN" - "$PROMETHEUS_URL" "$promql" <<'PY' 2>/dev/null || echo "NaN"
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+def run(base_url: str, query: str) -> None:
+    params = urllib.parse.urlencode({'query': query})
+    url = f"{base_url}/api/v1/query?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.load(response)
+    except Exception:
+        print('NaN')
+        return
+
+    values = payload.get('data', {}).get('result', [])
+    if values:
+        print(values[0]['value'][1])
     else:
         print('NaN')
-except:
-    print('NaN')
-" 2>/dev/null || echo "NaN"
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print('NaN')
+    else:
+        run(sys.argv[1], sys.argv[2])
+PY
+    }
+
+    query_or_zero() {
+        local value
+        value=$(query_prometheus "$1")
+        if [[ -z "$value" || "$value" == "NaN" || "$value" == "null" ]]; then
+            echo 0
+        else
+            echo "$value"
+        fi
     }
 
     # Encabezado CSV
     echo "strategy,scenario,run_id,metric,value,unit" > "$out_file"
 
-    # ── CPU total del namespace (todos los contenedores tesis-ingestion-*) ──
-    CPU_TOTAL=$(query_prometheus 'sum(rate(container_cpu_usage_seconds_total{name=~"tesis-ingestion-.*"}[2m]))')
+    # ── CPU total del proyecto ──
+    CPU_TOTAL=$(query_or_zero "sum(rate(container_cpu_usage_seconds_total{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[2m]))")
     echo "${strategy},${scenario},${run_id},cpu_total_cores,${CPU_TOTAL},cores" >> "$out_file"
 
     # ── Memoria RSS total ──
-    MEM_TOTAL=$(query_prometheus 'sum(container_memory_rss{name=~"tesis-ingestion-.*"})')
+    MEM_TOTAL=$(query_or_zero "sum(container_memory_rss{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"})")
     echo "${strategy},${scenario},${run_id},mem_rss_bytes,${MEM_TOTAL},bytes" >> "$out_file"
 
     # ── Throughput: mensajes producidos por segundo (generator) ──
-    TPUT_PRODUCED=$(query_prometheus 'rate(kafka_produced_messages_total[2m])')
+    TPUT_PRODUCED=$(query_or_zero "sum(rate(kafka_produced_messages_total{scenario=\"${scenario}\"}[2m]))")
     echo "${strategy},${scenario},${run_id},tput_produced_eps,${TPUT_PRODUCED},events/s" >> "$out_file"
 
     # ── Throughput escritura al sink: filas insertadas por segundo ──
-    TPUT_SINK=$(query_prometheus 'rate(sink_rows_written_total[2m])')
+    TPUT_SINK=$(query_or_zero "sum(rate(sink_rows_written_total{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m]))")
     echo "${strategy},${scenario},${run_id},tput_sink_eps,${TPUT_SINK},events/s" >> "$out_file"
 
     # ── Kafka consumer lag (suma todos los grupos/particiones del topic events) ──
-    KAFKA_LAG=$(query_prometheus 'sum(kafka_consumergroup_lag{topic="events"})')
+    KAFKA_LAG=$(query_or_zero 'sum(kafka_consumergroup_lag{topic="events"})')
     echo "${strategy},${scenario},${run_id},kafka_consumer_lag,${KAFKA_LAG},messages" >> "$out_file"
 
     # ── Latencia p50 / p95 / p99 en ms (desde histograma del probe si existe) ──
-    LAT_P50=$(query_prometheus 'histogram_quantile(0.50, rate(probe_latency_ms_bucket[2m]))')
-    LAT_P95=$(query_prometheus 'histogram_quantile(0.95, rate(probe_latency_ms_bucket[2m]))')
-    LAT_P99=$(query_prometheus 'histogram_quantile(0.99, rate(probe_latency_ms_bucket[2m]))')
+    LAT_P50=$(query_or_zero "histogram_quantile(0.50, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
+    LAT_P95=$(query_or_zero "histogram_quantile(0.95, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
+    LAT_P99=$(query_or_zero "histogram_quantile(0.99, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
     echo "${strategy},${scenario},${run_id},latency_p50_ms,${LAT_P50},ms" >> "$out_file"
     echo "${strategy},${scenario},${run_id},latency_p95_ms,${LAT_P95},ms" >> "$out_file"
     echo "${strategy},${scenario},${run_id},latency_p99_ms,${LAT_P99},ms" >> "$out_file"

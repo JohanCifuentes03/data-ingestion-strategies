@@ -67,10 +67,10 @@ cmd_up() {
     fi
 
     # Copiar JARs a ubicaciones esperadas
-    mkdir -p "$ROOT_DIR/batch/out/libs" "$ROOT_DIR/microbatch/out/libs" "$ROOT_DIR/streaming/out/libs"
-    cp "$LIB_DIR"/batch-job.jar "$ROOT_DIR/batch/out/libs/" 2>/dev/null || true
-    cp "$LIB_DIR"/microbatch-job.jar "$ROOT_DIR/microbatch/out/libs/" 2>/dev/null || true
-    cp "$LIB_DIR"/streaming-job.jar "$ROOT_DIR/streaming/out/libs/" 2>/dev/null || true
+    mkdir -p "$ROOT_DIR/batch/build/libs" "$ROOT_DIR/microbatch/build/libs" "$ROOT_DIR/streaming/build/libs"
+    cp "$LIB_DIR"/batch-job.jar "$ROOT_DIR/batch/build/libs/" 2>/dev/null || true
+    cp "$LIB_DIR"/microbatch-job.jar "$ROOT_DIR/microbatch/build/libs/" 2>/dev/null || true
+    cp "$LIB_DIR"/streaming-job.jar "$ROOT_DIR/streaming/build/libs/" 2>/dev/null || true
 
     # Construir imágenes
     log "Construyendo imágenes Docker..."
@@ -118,9 +118,9 @@ cmd_build() {
     
     # Copiar a lib/
     mkdir -p "$LIB_DIR"
-    cp "$ROOT_DIR/batch/out/libs/batch-job.jar" "$LIB_DIR/" 2>/dev/null || true
-    cp "$ROOT_DIR/microbatch/out/libs/microbatch-job.jar" "$LIB_DIR/" 2>/dev/null || true
-    cp "$ROOT_DIR/streaming/out/libs/streaming-job.jar" "$LIB_DIR/" 2>/dev/null || true
+    cp "$ROOT_DIR/batch/build/libs/batch-job.jar" "$LIB_DIR/" 2>/dev/null || true
+    cp "$ROOT_DIR/microbatch/build/libs/microbatch-job.jar" "$LIB_DIR/" 2>/dev/null || true
+    cp "$ROOT_DIR/streaming/build/libs/streaming-job.jar" "$LIB_DIR/" 2>/dev/null || true
     
     log "Jobs compilados y copiados a lib/"
 }
