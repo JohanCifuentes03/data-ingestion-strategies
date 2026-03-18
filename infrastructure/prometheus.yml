@@ -17,14 +17,21 @@ scrape_configs:
         replacement: 'kafka'
 
   # ── cAdvisor (Docker containers CPU/Mem/Net/IO) ────────────────────
-  # Expone métricas de recursos por contenedor Docker
+  # Expone métricas de recursos por contenedor Docker.
+  # IMPORTANTE: usar PrometheusText0.0.4 para que Prometheus ignore los
+  # timestamps en milisegundos que cAdvisor embebe en sus métricas; con
+  # OpenMetrics esos timestamps se interpretan como segundos de época y
+  # quedan ~56.000 años en el futuro, haciendo las muestras invisibles.
   - job_name: 'cadvisor'
+    scrape_protocols:
+      - PrometheusText0.0.4
     static_configs:
       - targets: ['cadvisor:8080']
     metric_relabel_configs:
-      # Solo conservar contenedores relevantes del benchmark
-      - source_labels: [container_label_com_docker_compose_service]
-        regex: 'spark-master|spark-worker|flink-jobmanager|flink-taskmanager|kafka|generator|probe|postgres'
+      # Descartar cgroups raíz "/" y "/docker" — solo conservar contenedores
+      # individuales cuyo id tiene la forma /docker/<sha256>.
+      - source_labels: [id]
+        regex: '/docker/.+'
         action: keep
 
   # ── Generator (métricas de producción) ────────────────────────────

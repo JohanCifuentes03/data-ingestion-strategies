@@ -19,12 +19,41 @@ from typing import Any
 
 import yaml
 from confluent_kafka import Producer, KafkaException
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [generator] %(levelname)s %(message)s",
 )
 log = logging.getLogger("generator")
+
+# ── Prometheus metrics ───────────────────────────────────────────────
+MESSAGES_TOTAL = Counter(
+    "kafka_produced_messages_total",
+    "Total events enviados a Kafka",
+    labelnames=["scenario"],
+)
+BYTES_TOTAL = Counter(
+    "kafka_produced_bytes_total",
+    "Bytes producidos hacia Kafka",
+    labelnames=["scenario"],
+)
+ERROR_TOTAL = Counter(
+    "kafka_produce_errors_total",
+    "Errores al enviar eventos",
+    labelnames=["scenario"],
+)
+CURRENT_RATE = Gauge(
+    "generator_current_rate",
+    "Tasa objetivo actual (eventos/s)",
+    labelnames=["scenario"],
+)
+PRODUCE_LAT_MS = Histogram(
+    "kafka_produce_latency_ms",
+    "Latencia de produce() a Kafka en ms",
+    labelnames=["scenario"],
+    buckets=(0.5, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000),
+)
 
 # ── Scenario defaults ───────────────────────────────────────────────
 DEFAULT_SCENARIOS: dict[str, Any] = {
@@ -58,13 +87,11 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
     },
     "mixed-payload": {
         "event_rate": 10_000,
-        "payload": 512,          # base; rotates across payload_sizes
+        "payload": 512,  # base; rotates across payload_sizes
         "payload_sizes": [512, 4096, 65536],
         "schema": "iot_sensor",
     },
 }
-
-
 
 
 # ── Event schema builders ───────────────────────────────────────────
@@ -137,19 +164,21 @@ def build_event(schema: str, payload_size: int) -> bytes:
 
 # ── Kafka helpers ───────────────────────────────────────────────────
 def configure_producer(bootstrap_servers: str) -> Producer:
-    return Producer({
-        "bootstrap.servers": bootstrap_servers,
-        # Throughput-oriented settings
-        "linger.ms": 5,
-        "batch.num.messages": 10_000,
-        "batch.size": 1_048_576,          # 1 MB batch
-        "queue.buffering.max.messages": 1_000_000,
-        "queue.buffering.max.kbytes": 2_097_152,
-        "compression.type": "lz4",
-        "acks": "1",                      # Leader ack — balance speed/durability
-        "retries": 3,
-        "retry.backoff.ms": 100,
-    })
+    return Producer(
+        {
+            "bootstrap.servers": bootstrap_servers,
+            # Throughput-oriented settings
+            "linger.ms": 5,
+            "batch.num.messages": 10_000,
+            "batch.size": 1_048_576,  # 1 MB batch
+            "queue.buffering.max.messages": 1_000_000,
+            "queue.buffering.max.kbytes": 2_097_152,
+            "compression.type": "lz4",
+            "acks": "1",  # Leader ack — balance speed/durability
+            "retries": 3,
+            "retry.backoff.ms": 100,
+        }
+    )
 
 
 def wait_for_kafka(bootstrap_servers: str, max_retries: int = 30) -> Producer:
@@ -192,8 +221,8 @@ def producer_thread(
     topic: str,
     scenario_name: str,
     state: SharedState,
-    target_rate_fn,          # callable() → int (events/s for this thread)
-    interval: float = 0.1,   # send window in seconds (100ms → fine-grained pacing)
+    target_rate_fn,  # callable() → int (events/s for this thread)
+    interval: float = 0.1,  # send window in seconds (100ms → fine-grained pacing)
 ):
     """Each thread manages its own Kafka Producer and sends events independently."""
     try:
@@ -228,10 +257,15 @@ def producer_thread(
                 try:
                     producer.produce(topic, value=raw, key=key, on_delivery=on_delivery)
                     producer.poll(0)
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    PRODUCE_LAT_MS.labels(scenario_name).observe(elapsed_ms)
+                    MESSAGES_TOTAL.labels(scenario_name).inc()
+                    BYTES_TOTAL.labels(scenario_name).inc(len(raw))
                 except BufferError:
                     producer.poll(0.01)
                 except Exception as exc:
                     log.error("Thread %d: produce error: %s", thread_id, exc)
+                    ERROR_TOTAL.labels(scenario_name).inc()
 
             producer.flush(0)  # non-blocking flush
 
@@ -291,11 +325,19 @@ def main():
     n_threads = decide_n_threads(max(base_rate, burst_rate))
     log.info(
         "Config: scenario=%s rate=%d burst=%d schema=%s payload=%s threads=%d duration=%s warmup=%ds",
-        scenario_name, base_rate, burst_rate, scenario["schema"],
-        payload_sizes, n_threads,
+        scenario_name,
+        base_rate,
+        burst_rate,
+        scenario["schema"],
+        payload_sizes,
+        n_threads,
         f"{run_duration}s" if run_duration > 0 else "infinite",
         warmup_seconds,
     )
+
+    prom_port = int(os.getenv("PROMETHEUS_PORT", "8000"))
+    start_http_server(prom_port)
+    log.info("Prometheus metrics en :%d", prom_port)
 
     # Wait for Kafka
     wait_for_kafka(bootstrap_servers)
@@ -335,11 +377,15 @@ def main():
             # Warmup transition
             if not warmup_complete and elapsed >= warmup_seconds:
                 warmup_complete = True
-                log.info("Warmup complete (%ds) — measurements now valid", warmup_seconds)
+                log.info(
+                    "Warmup complete (%ds) — measurements now valid", warmup_seconds
+                )
 
             # Duration check
             if run_duration > 0 and elapsed >= (warmup_seconds + run_duration):
-                log.info("Run duration reached (%ds post-warmup), stopping", run_duration)
+                log.info(
+                    "Run duration reached (%ds post-warmup), stopping", run_duration
+                )
                 break
 
             # Burst logic
@@ -352,6 +398,7 @@ def main():
 
             new_rate = burst_rate if in_burst else base_rate
             state.current_rate = new_rate
+            CURRENT_RATE.labels(scenario_name).set(new_rate)
 
             time.sleep(0.5)  # control loop ticks every 500ms
 
