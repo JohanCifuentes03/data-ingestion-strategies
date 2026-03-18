@@ -192,7 +192,11 @@ def filter_warmup(df: pd.DataFrame, warmup_ms: int = WARMUP_MS) -> pd.DataFrame:
         else:
             if "produced_at" in grp.columns:
                 t0 = grp["produced_at"].min()
-                parts.append(grp[grp["produced_at"] >= t0 + warmup_ms])
+                filtered = grp[grp["produced_at"] >= t0 + warmup_ms]
+                if not filtered.empty:
+                    parts.append(filtered)
+                else:
+                    parts.append(grp)  # Fallback: si el warmup elimina todo, mantenemos original
             else:
                 parts.append(grp)
 
@@ -294,33 +298,6 @@ def chart_latency_boxplot(df: pd.DataFrame, out: Path):
             patch.set_facecolor(PALETTE.get(strat, "#90A4AE"))
             patch.set_alpha(0.75)
 
-        # Anotar p50 / p95 / p99 / IQR / CV%
-        y_max = sub["latency_ms"].quantile(0.99) * 1.05
-        for j, strat in enumerate(order):
-            vals = sub[sub["strategy"] == strat]["latency_ms"]
-            p50 = vals.quantile(0.50)
-            p95 = vals.quantile(0.95)
-            p99 = vals.quantile(0.99)
-            iqr = vals.quantile(0.75) - vals.quantile(0.25)
-            cv = (vals.std() / vals.mean() * 100) if vals.mean() > 0 else 0.0
-            annotation = (
-                f"p50={p50:,.0f}\n"
-                f"p95={p95:,.0f}\n"
-                f"p99={p99:,.0f}\n"
-                f"IQR={iqr:,.0f}\n"
-                f"CV={cv:.0f}%"
-            )
-            axes[i].text(
-                j,
-                y_max * 1.01,
-                annotation,
-                ha="center",
-                va="bottom",
-                fontsize=7.5,
-                color="#333",
-                linespacing=1.4,
-            )
-
         axes[i].set_title(scenario, fontsize=11, pad=8)
         axes[i].set_xlabel("")
         axes[i].set_xticks(range(len(order)))
@@ -329,11 +306,12 @@ def chart_latency_boxplot(df: pd.DataFrame, out: Path):
             axes[i].set_ylabel("Latencia E2E (ms)")
         else:
             axes[i].set_ylabel("")
+        axes[i].set_yscale("log")
         axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(_fmt_ms))
 
     fig.suptitle(
         "Chart 01 — Latencia E2E por Estrategia y Escenario\n"
-        "(boxplot: cajas = IQR, línea roja = mediana; anotaciones: p50/p95/p99/IQR/CV%)",
+        "(boxplot: cajas = IQR, línea roja = mediana; eje Y en escala log)",
         fontsize=13,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.93])
@@ -583,17 +561,8 @@ def chart_scaling_efficiency(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             records.append({"strategy": strategy, "n_workers": n_w, "tput": tput})
 
     if not records:
-        # Datos sintéticos de ejemplo para visualizar la gráfica
-        print("  [WARN] Sin datos de scaling — usando placeholder sintético")
-        for strategy in STRATEGY_ORDER:
-            for n_w, eff_factor in [(1, 1.0), (2, 0.88), (3, 0.76)]:
-                records.append(
-                    {
-                        "strategy": strategy,
-                        "n_workers": n_w,
-                        "tput": 500.0 * n_w * eff_factor,
-                    }
-                )
+        print("  [SKIP] 04_scaling_efficiency.png (sin datos de profiling)")
+        return
 
     sc_df = pd.DataFrame(records)
 
@@ -737,29 +706,8 @@ def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             )
 
     if not records:
-        # Estimar desde throughput en latency_samples como proxy
-        print("  [WARN] Sin datos Prometheus de CPU/mem — usando estimación proxy")
-        for (strategy, scenario, run_id), grp in df.groupby(
-            ["strategy", "scenario", "run_id"]
-        ):
-            if "visible_at" in grp.columns and "produced_at" in grp.columns:
-                dur = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-                tput = len(grp) / dur if dur > 0 else 1.0
-            else:
-                tput = len(grp) / 60.0
-            # Estimaciones sintéticas realistas basadas en literatura
-            cpu_map = {"batch": 1.8, "microbatch": 1.4, "streaming": 0.9}
-            mem_map = {"batch": 0.0025, "microbatch": 0.0018, "streaming": 0.0012}
-            records.append(
-                {
-                    "strategy": strategy,
-                    "scenario": scenario,
-                    "run_id": run_id,
-                    "cpu_cores": cpu_map.get(strategy, 1.0) + np.random.normal(0, 0.1),
-                    "mem_mb_per_event": mem_map.get(strategy, 0.002)
-                    + np.random.normal(0, 0.0002),
-                }
-            )
+        print("  [SKIP] 05_resource_utilization.png (sin datos)")
+        return
 
     res_df = pd.DataFrame(records).dropna(subset=["cpu_cores", "mem_mb_per_event"])
     if res_df.empty:

@@ -15,15 +15,174 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
+RESULTS_BASE="$ROOT_DIR/results"
+PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
+PROBE_HEADER="event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id"
+RUN_START_TS=0
+RUN_END_TS=0
+GENERATOR_DEFAULT_RATE=0
+GENERATOR_DEFAULT_PAYLOAD=0
+GENERATOR_DEFAULT_SCHEMA=""
+
 # Colores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-log() { echo -e "${GREEN}[run]${NC} $*"; }
-warn() { echo -e "${YELLOW}[run]${NC} $*"; }
+log()   { echo -e "${GREEN}[run]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[run]${NC} $*"; }
 error() { echo -e "${RED}[run]${NC} $*"; }
+
+set_generator_defaults() {
+    local scenario="$1"
+    case "$scenario" in
+        low-load)
+            GENERATOR_DEFAULT_RATE=2000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
+            ;;
+        medium-load)
+            GENERATOR_DEFAULT_RATE=10000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="financial_tick"
+            ;;
+        high-load)
+            GENERATOR_DEFAULT_RATE=30000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="health_monitor"
+            ;;
+        extreme-load)
+            GENERATOR_DEFAULT_RATE=100000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
+            ;;
+        burst)
+            GENERATOR_DEFAULT_RATE=10000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="financial_tick"
+            ;;
+        mixed-payload)
+            GENERATOR_DEFAULT_RATE=10000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
+            ;;
+        *)
+            warn "Escenario '$scenario' no reconocido para generator; usando configuracion low-load"
+            GENERATOR_DEFAULT_RATE=2000
+            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
+            ;;
+    esac
+}
+
+start_generator_for_scenario() {
+    local scenario="$1"
+    set_generator_defaults "$scenario"
+    log "Iniciando generator (scenario=${scenario}, rate=${GENERATOR_DEFAULT_RATE} ev/s, payload=${GENERATOR_DEFAULT_PAYLOAD}B)"
+    (
+        export GENERATOR_SCENARIO="$scenario"
+        export GENERATOR_EVENT_RATE="$GENERATOR_DEFAULT_RATE"
+        export GENERATOR_PAYLOAD_BYTES="$GENERATOR_DEFAULT_PAYLOAD"
+        export GENERATOR_EVENT_SCHEMA="$GENERATOR_DEFAULT_SCHEMA"
+        docker compose up -d --no-deps --force-recreate generator
+    )
+}
+
+clear_checkpoint_dir() {
+    local subdir="$1"
+    if [ -z "$subdir" ]; then
+        return
+    fi
+    log "Limpiando checkpoint Spark (${subdir})"
+    docker compose exec -T spark-master sh -c "rm -rf /opt/spark/checkpoints/${subdir} && mkdir -p /opt/spark/checkpoints/${subdir}" 2>/dev/null || true
+}
+
+start_run_timer() {
+    RUN_START_TS=$(date +%s)
+}
+
+end_run_timer() {
+    RUN_END_TS=$(date +%s)
+}
+
+reset_probe_csv() {
+    mkdir -p "$RESULTS_BASE"
+    # Resetear via el container del probe para evitar errores de permisos.
+    # El probe escribe continuamente en /results/latency_samples.csv (montado
+    # desde el host), por lo que el archivo puede estar bloqueado/en uso.
+    if docker compose exec -T probe sh -c \
+        "echo '${PROBE_HEADER}' > /results/latency_samples.csv" 2>/dev/null; then
+        log "Probe CSV reseteado (via container)"
+    else
+        # Fallback: escribir directamente si el container no esta disponible
+        printf '%s\n' "$PROBE_HEADER" >"$PROBE_GLOBAL" 2>/dev/null || \
+            warn "No se pudo resetear probe CSV"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# copy_probe_csv_to_run  <dest_dir> <strategy> <scenario> <run_id>
+#
+# FIX (2026-03-18): Extrae SOLO las filas del run actual desde el CSV global
+# acumulativo del probe. Antes se copiaba el CSV completo, lo que contaminaba
+# los resultados de cada run con datos de todos los runs anteriores.
+# ─────────────────────────────────────────────────────────────────────────────
+copy_probe_csv_to_run() {
+    local dest="$1"
+    local strategy="$2"
+    local scenario="$3"
+    local run_id="$4"
+    if [ -f "$PROBE_GLOBAL" ]; then
+        # Encabezado + solo las filas de este run especifico
+        head -1 "$PROBE_GLOBAL" > "$dest/latency_samples.csv"
+        grep -F ",${strategy},${scenario},${run_id}" "$PROBE_GLOBAL" >> "$dest/latency_samples.csv" || true
+        local lines
+        lines=$(wc -l < "$dest/latency_samples.csv" 2>/dev/null || echo 0)
+        log "copy_probe_csv: ${lines} lineas extraidas (${strategy}/${scenario}/${run_id})"
+    fi
+}
+
+calc_latency_quantile_from_csv() {
+    local file="$1"
+    local quantile="$2"
+    "$PYTHON_BIN" - "$file" "$quantile" <<'PY' 2>/dev/null || echo "NaN"
+import csv
+import math
+import sys
+
+file_path = sys.argv[1]
+q = float(sys.argv[2])
+values = []
+try:
+    with open(file_path, newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                values.append(float(row.get('latency_ms', 'nan')))
+            except ValueError:
+                continue
+except FileNotFoundError:
+    print('NaN')
+    sys.exit(0)
+
+if not values:
+    print('NaN')
+    sys.exit(0)
+
+values.sort()
+n = len(values)
+k = (n - 1) * q
+f = math.floor(k)
+c = math.ceil(k)
+if f == c:
+    print(values[int(k)])
+else:
+    lower = values[f]
+    upper = values[c]
+    print(lower + (k - f) * (upper - lower))
+PY
+}
 
 PYTHON_BIN=$(command -v python3 2>/dev/null || true)
 if [ -n "$PYTHON_BIN" ]; then
@@ -35,15 +194,14 @@ if [ -z "$PYTHON_BIN" ]; then
     PYTHON_BIN=$(command -v python 2>/dev/null || true)
 fi
 if [ -z "$PYTHON_BIN" ]; then
-    warn "Python no encontrado en PATH; se intentará usar 'python3'"
+    warn "Python no encontrado en PATH; se intentara usar 'python3'"
     PYTHON_BIN=python3
 fi
 
 ensure_services() {
     log "Verificando servicios..."
-    # Verificar que Kafka y PostgreSQL estén corriendo
     if ! docker compose ps kafka postgres 2>/dev/null | grep -q "Up"; then
-        warn "Servicios no están levantados. Ejecuta ./scripts/manage.sh up primero."
+        warn "Servicios no estan levantados. Ejecuta ./scripts/manage.sh up primero."
         exit 1
     fi
     log "Servicios verificados"
@@ -66,38 +224,44 @@ PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
 # ═══════════════════════════════════════════════════════════════════
 # PROMETHEUS SNAPSHOT
 # ═══════════════════════════════════════════════════════════════════
-# Consulta el endpoint /api/v1/query de Prometheus al finalizar cada
-# corrida y guarda las métricas relevantes en prometheus_snapshot.csv
-# dentro del directorio de resultados del run.
 collect_prometheus_snapshot() {
-    local run_dir="$1"      # directorio destino, ej: results/batch/low-load/run_1
-    local strategy="$2"     # batch | microbatch | streaming
+    local run_dir="$1"
+    local strategy="$2"
     local scenario="$3"
     local run_id="$4"
+    local start_ts=${5:-0}
+    local end_ts=${6:-0}
 
     local out_file="$run_dir/prometheus_snapshot.csv"
+    local latency_file="$run_dir/latency_samples.csv"
+    local duration=$((end_ts - start_ts))
+    if [ "$duration" -le 0 ]; then
+        duration=${RUN_DURATION_SECONDS:-60}
+    fi
+    local prom_window="${duration}s"
+    local prom_time="$end_ts"
 
-    log "Recolectando snapshot de Prometheus → $out_file"
+    log "Recolectando snapshot de Prometheus -> $out_file (ventana=${prom_window})"
 
-    # Verificar que Prometheus esté disponible
     if ! curl -sf "${PROMETHEUS_URL}/-/healthy" >/dev/null 2>&1; then
-        warn "Prometheus no disponible en ${PROMETHEUS_URL} — omitiendo snapshot"
+        warn "Prometheus no disponible en ${PROMETHEUS_URL} -- omitiendo snapshot"
         return 0
     fi
 
-    # Función auxiliar: consulta una métrica PromQL y devuelve "value"
-    # Uso: query_prometheus "<promql>"
     query_prometheus() {
         local promql="$1"
-        "$PYTHON_BIN" - "$PROMETHEUS_URL" "$promql" <<'PY' 2>/dev/null || echo "NaN"
+        local eval_time="$2"
+        "$PYTHON_BIN" - "$PROMETHEUS_URL" "$promql" "$eval_time" <<'PY' 2>/dev/null || echo "NaN"
 import json
 import sys
 import urllib.parse
 import urllib.request
 
-def run(base_url: str, query: str) -> None:
-    params = urllib.parse.urlencode({'query': query})
-    url = f"{base_url}/api/v1/query?{params}"
+def run(base_url, query, eval_time):
+    params = {'query': query}
+    if eval_time:
+        params['time'] = eval_time
+    url = f"{base_url}/api/v1/query?{urllib.parse.urlencode(params)}"
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
             payload = json.load(response)
@@ -115,13 +279,15 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         print('NaN')
     else:
-        run(sys.argv[1], sys.argv[2])
+        run(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
 PY
     }
 
     query_or_zero() {
+        local promql="$1"
+        local eval_time="$2"
         local value
-        value=$(query_prometheus "$1")
+        value=$(query_prometheus "$promql" "$eval_time")
         if [[ -z "$value" || "$value" == "NaN" || "$value" == "null" ]]; then
             echo 0
         else
@@ -129,38 +295,58 @@ PY
         fi
     }
 
-    # Encabezado CSV
-    echo "strategy,scenario,run_id,metric,value,unit" > "$out_file"
+    echo "strategy,scenario,run_id,metric,value,unit" >"$out_file"
 
-    # ── CPU total del proyecto ──
-    CPU_TOTAL=$(query_or_zero "sum(rate(container_cpu_usage_seconds_total{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[2m]))")
-    echo "${strategy},${scenario},${run_id},cpu_total_cores,${CPU_TOTAL},cores" >> "$out_file"
+    local cpu_query="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[${prom_window}])) / ${duration}"
+    local mem_query="avg_over_time(container_memory_rss{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[${prom_window}])"
+    local prod_query="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\"}[${prom_window}])) / ${duration}"
+    local kafka_lag_query='max_over_time(kafka_consumergroup_lag{topic="events"}['"${prom_window}"'])'
 
-    # ── Memoria RSS total ──
-    MEM_TOTAL=$(query_or_zero "sum(container_memory_rss{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"})")
-    echo "${strategy},${scenario},${run_id},mem_rss_bytes,${MEM_TOTAL},bytes" >> "$out_file"
+    CPU_TOTAL=$(query_or_zero "$cpu_query" "$prom_time")
+    MEM_TOTAL=$(query_or_zero "$mem_query" "$prom_time")
+    TPUT_PRODUCED=$(query_or_zero "$prod_query" "$prom_time")
+    KAFKA_LAG=$(query_or_zero "$kafka_lag_query" "$prom_time")
 
-    # ── Throughput: mensajes producidos por segundo (generator) ──
-    TPUT_PRODUCED=$(query_or_zero "sum(rate(kafka_produced_messages_total{scenario=\"${scenario}\"}[2m]))")
-    echo "${strategy},${scenario},${run_id},tput_produced_eps,${TPUT_PRODUCED},events/s" >> "$out_file"
+    echo "${strategy},${scenario},${run_id},cpu_total_cores,${CPU_TOTAL},cores" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},mem_rss_bytes,${MEM_TOTAL},bytes" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},tput_produced_eps,${TPUT_PRODUCED},events/s" >>"$out_file"
 
-    # ── Throughput escritura al sink: filas insertadas por segundo ──
-    TPUT_SINK=$(query_or_zero "sum(rate(sink_rows_written_total{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m]))")
-    echo "${strategy},${scenario},${run_id},tput_sink_eps,${TPUT_SINK},events/s" >> "$out_file"
+    local sample_count=0
+    local tput_sink=0
+    local lat_p50=0
+    local lat_p95=0
+    local lat_p99=0
 
-    # ── Kafka consumer lag (suma todos los grupos/particiones del topic events) ──
-    KAFKA_LAG=$(query_or_zero 'sum(kafka_consumergroup_lag{topic="events"})')
-    echo "${strategy},${scenario},${run_id},kafka_consumer_lag,${KAFKA_LAG},messages" >> "$out_file"
+    if [ -f "$latency_file" ]; then
+        sample_count=$(($(wc -l <"$latency_file") - 1))
+        if [ "$sample_count" -lt 0 ]; then
+            sample_count=0
+        fi
+        if [ "$sample_count" -gt 0 ] && [ "$duration" -gt 0 ]; then
+            tput_sink=$("$PYTHON_BIN" - "$sample_count" "$duration" <<'PY'
+import sys
 
-    # ── Latencia p50 / p95 / p99 en ms (desde histograma del probe si existe) ──
-    LAT_P50=$(query_or_zero "histogram_quantile(0.50, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
-    LAT_P95=$(query_or_zero "histogram_quantile(0.95, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
-    LAT_P99=$(query_or_zero "histogram_quantile(0.99, sum(rate(probe_latency_ms_bucket{strategy=\"${strategy}\",scenario=\"${scenario}\"}[2m])) by (le))")
-    echo "${strategy},${scenario},${run_id},latency_p50_ms,${LAT_P50},ms" >> "$out_file"
-    echo "${strategy},${scenario},${run_id},latency_p95_ms,${LAT_P95},ms" >> "$out_file"
-    echo "${strategy},${scenario},${run_id},latency_p99_ms,${LAT_P99},ms" >> "$out_file"
+rows = float(sys.argv[1])
+duration = float(sys.argv[2])
+if duration <= 0:
+    print('0')
+else:
+    print(rows / duration)
+PY
+)
+            lat_p50=$(calc_latency_quantile_from_csv "$latency_file" 0.50)
+            lat_p95=$(calc_latency_quantile_from_csv "$latency_file" 0.95)
+            lat_p99=$(calc_latency_quantile_from_csv "$latency_file" 0.99)
+        fi
+    fi
 
-    log "Snapshot guardado: $(wc -l < "$out_file") métricas en $out_file"
+    echo "${strategy},${scenario},${run_id},tput_sink_eps,${tput_sink},events/s" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},kafka_consumer_lag,${KAFKA_LAG},messages" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},latency_p50_ms,${lat_p50},ms" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},latency_p95_ms,${lat_p95},ms" >>"$out_file"
+    echo "${strategy},${scenario},${run_id},latency_p99_ms,${lat_p99},ms" >>"$out_file"
+
+    log "Snapshot guardado: $(wc -l <"$out_file") metricas en $out_file"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -168,40 +354,44 @@ PY
 # ═══════════════════════════════════════════════════════════════════
 run_batch() {
     ensure_services
-    
+
     log "Ejecutando BATCH: scenario=$SCENARIO run_id=$RUN_ID duration=${RUN_DURATION_SECONDS}s"
+
+    # Limpiar antes
+    log "Limpiando entorno y deteniendo jobs previos..."
+    docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
+    docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
     
-    # Limpiar antes (directo, sin llamar a manage.sh)
-    log "Limpiando entorno..."
     docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
     docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
     docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
-    
+    reset_probe_csv
+    start_run_timer
+
     echo "────────────────────────────────────────────────────────────"
     echo "[run_batch] strategy=batch  scenario=$SCENARIO  run_id=$RUN_ID"
     echo "────────────────────────────────────────────────────────────"
-    
+
     ACCUMULATE_TIME=$RUN_DURATION_SECONDS
-    log "Fase de acumulación: generator corre por ${ACCUMULATE_TIME}s antes del batch job"
-    
-    # Fase de acumulación
+    log "Fase de acumulacion: generator corre por ${ACCUMULATE_TIME}s antes del batch job"
+
     echo "[run_batch] Accumulation phase: generator runs for ${ACCUMULATE_TIME}s before batch job executes"
     echo "[run_batch] Accumulating..."
-    
+
     # Iniciar generator en background
-    docker compose up -d generator
-    
-    # Esperar acumulación
+    start_generator_for_scenario "$SCENARIO"
+
+    # Esperar acumulacion
     for i in $(seq 1 $((ACCUMULATE_TIME / 60))); do
         ELAPSED=$((i * 60))
         REMAINING=$((ACCUMULATE_TIME - ELAPSED))
         echo "[run_batch] Accumulating... ${ELAPSED}s elapsed, ${REMAINING}s remaining"
         sleep 60
     done
-    
+
     # Detener generator
     docker compose stop generator
-    
+
     # Ejecutar Spark Batch
     log "Ejecutando Spark Batch..."
     MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
@@ -216,11 +406,12 @@ run_batch() {
         --postgres.user=${POSTGRES_USER_NAME} \
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
         --run.duration.seconds=${RUN_DURATION_SECONDS}
-    
-    # Exportar snapshot de Prometheus al directorio del run
+
+    end_run_timer
     RUN_DIR="${ROOT_DIR}/results/batch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
-    collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
+    copy_probe_csv_to_run "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
+    collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 
     log "Completed: batch/$SCENARIO/$RUN_ID"
 }
@@ -230,22 +421,28 @@ run_batch() {
 # ═══════════════════════════════════════════════════════════════════
 run_microbatch() {
     ensure_services
-    
+
     log "Ejecutando MICROBATCH: scenario=$SCENARIO run_id=$RUN_ID trigger=$TRIGGER_INTERVAL"
-    
+
     # Limpiar antes
-    log "Limpiando entorno..."
+    log "Limpiando entorno y deteniendo jobs previos..."
+    docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
+    docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
+    
     docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
     docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
     docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
-    
+    reset_probe_csv
+    clear_checkpoint_dir "microbatch"
+    start_run_timer
+
     echo "────────────────────────────────────────────────────────────"
     echo "[run_microbatch] strategy=microbatch  scenario=$SCENARIO  run_id=$RUN_ID  trigger=$TRIGGER_INTERVAL"
     echo "────────────────────────────────────────────────────────────"
-    
+
     # Iniciar generator y microbatch
-    docker compose up -d generator
-    
+    start_generator_for_scenario "$SCENARIO"
+
     MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.microbatch.SparkStructuredJob \
         --master spark://spark-master:${MASTER_PORT} \
@@ -259,15 +456,16 @@ run_microbatch() {
         --postgres.url=jdbc:postgresql://postgres:5432/${POSTGRES_DB_NAME} \
         --postgres.user=${POSTGRES_USER_NAME} \
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
-        --run.duration.seconds=${RUN_DURATION_SECONDS}
-    
+        --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))
+
     # Detener generator
     docker compose stop generator
-    
-    # Exportar snapshot de Prometheus al directorio del run
+
     RUN_DIR="${ROOT_DIR}/results/microbatch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
-    collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
+    end_run_timer
+    copy_probe_csv_to_run "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
+    collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 
     log "Completed: microbatch/$SCENARIO/$RUN_ID"
 }
@@ -277,22 +475,24 @@ run_microbatch() {
 # ═══════════════════════════════════════════════════════════════════
 run_streaming() {
     ensure_services
-    
+
     log "Ejecutando STREAMING: scenario=$SCENARIO run_id=$RUN_ID"
-    
+
     # Limpiar antes
     log "Limpiando entorno..."
     docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
     docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
     docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
-    
+    reset_probe_csv
+    start_run_timer
+
     echo "────────────────────────────────────────────────────────────"
     echo "[run_streaming] strategy=streaming  scenario=$SCENARIO  run_id=$RUN_ID"
     echo "────────────────────────────────────────────────────────────"
-    
+
     # Reiniciar Flink para estado limpio
     docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1
-    
+
     # Esperar Flink
     log "Esperando Flink..."
     for i in $(seq 1 45); do
@@ -304,20 +504,20 @@ run_streaming() {
             fi
         fi
         if [ $i -eq 45 ]; then
-            error "Flink no está listo"
+            error "Flink no esta listo"
             exit 1
         fi
         sleep 2
     done
-    
+
     # Iniciar generator
-    docker compose up -d generator
-    
+    start_generator_for_scenario "$SCENARIO"
+
     FLINK_DETACH_FLAG=""
     if [ "$FLINK_DETACHED" = "true" ]; then
         FLINK_DETACH_FLAG="-d"
     fi
-    
+
     MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
         ${FLINK_DETACH_FLAG} \
         -c org.tesis.streaming.FlinkStreamingJob \
@@ -330,15 +530,16 @@ run_streaming() {
         --postgres.url jdbc:postgresql://postgres:5432/${POSTGRES_DB_NAME} \
         --postgres.user ${POSTGRES_USER_NAME} \
         --postgres.password ${POSTGRES_PASSWORD_VALUE} \
-        --run.duration.seconds ${RUN_DURATION_SECONDS}
-    
+        --run.duration.seconds $((RUN_DURATION_SECONDS + 20))
+
     # Detener generator
     docker compose stop generator
-    
-    # Exportar snapshot de Prometheus al directorio del run
+
     RUN_DIR="${ROOT_DIR}/results/streaming/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
-    collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
+    end_run_timer
+    copy_probe_csv_to_run "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
+    collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 
     log "Completed: streaming/$SCENARIO/$RUN_ID"
 }
@@ -359,20 +560,20 @@ case "$STRATEGY" in
         ;;
     help|--help|-h)
         echo "╔══════════════════════════════════════════════════════════════╗"
-        echo "║              EJECUTAR ESTRATEGIA DE INGESTIÓN              ║"
+        echo "║              EJECUTAR ESTRATEGIA DE INGESTION              ║"
         echo "╚══════════════════════════════════════════════════════════════╝"
         echo ""
         echo "Uso: ./scripts/run.sh <estrategia> [escenario] [run_id] [trigger]"
         echo ""
         echo "Argumentos:"
         echo "  estrategia   batch | microbatch | streaming"
-        echo "  escenario   low-load | medium-load | high-load | burst | extreme-load"
-        echo "  run_id      Identificador de la corrida (default: run_1)"
-        echo "  trigger     Intervalo para microbatch, ej: '5 seconds' (default)"
+        echo "  escenario    low-load | medium-load | high-load | burst | extreme-load"
+        echo "  run_id       Identificador de la corrida (default: run_1)"
+        echo "  trigger      Intervalo para microbatch, ej: '5 seconds' (default)"
         echo ""
         echo "Variables de entorno:"
-        echo "  RUN_DURATION_SECONDS   Duración en segundos (default: 300)"
-        echo "  FLINK_PARALLELISM     Paralelismo Flink (default: 1)"
+        echo "  RUN_DURATION_SECONDS   Duracion en segundos (default: 300)"
+        echo "  FLINK_PARALLELISM      Paralelismo Flink (default: 1)"
         echo ""
         echo "Ejemplos:"
         echo "  ./scripts/run.sh batch low-load run_1"
