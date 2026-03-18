@@ -41,7 +41,6 @@ flowchart LR
 
     subgraph Observabilidad
         PROBE["Sonda de disponibilidad<br/>(Python, polling PG)"]
-        PROBE["Sonda de disponibilidad<br/>(Python, polling PG)"]
     end
 
     GEN -->|"produce JSON events (lz4)"| K
@@ -54,7 +53,7 @@ flowchart LR
     FL -->|"JDBC Sink (batch 500)"| PG
 
     PG --> PROBE
-    GEN -->|"generator_events_total, errors, bytes, produce_latency"| PROBE
+    GEN -->|"/metrics (generator_events_total, etc)"| PROM["Prometheus"]
 ```
 
 ---
@@ -79,9 +78,9 @@ sequenceDiagram
     P->>PG: SELECT WHERE visible_at > last_seen LIMIT 1000
     PG-->>P: rows (event_id, produced_at, visible_at, ...)
     Note over P: latency = visible_at − produced_at → CSV
-
-*Nota: Para garantizar una comparación justa, el script `run_batch.sh` incluye una fase de **acumulación** previa de `RUN_DURATION_SECONDS` antes de lanzar el job de Spark, asegurando que el lote procese el mismo volumen de datos que las estrategias de streaming.*
 ```
+
+*Nota: Para garantizar una comparación justa, el script `run.sh` (estrategia batch) incluye una fase de **acumulación** previa de `RUN_DURATION_SECONDS` antes de lanzar el job de Spark, asegurando que el lote procese el mismo volumen de datos que las estrategias de streaming.*
 
 ### 3.2 Spark Structured Streaming (Micro-batch)
 
@@ -120,6 +119,7 @@ sequenceDiagram
     Note over PG: visible_at = DEFAULT NOW()
     P->>PG: SELECT WHERE visible_at > last_seen
     PG-->>P: rows → CSV
+```
 
 ---
 
@@ -129,8 +129,7 @@ El benchmark implementa varias mejoras críticas para asegurar la validez de los
 
 - **Parseo Robusto (Jackson)**: Se eliminó el parseo basado en expresiones regulares en favor de `Jackson Databind` para manejar correctamente el esquema JSON y evitar corrupciones en payloads complejos.
 - **Escritura Idempotente**: Tanto Spark Batch como Flink utilizan estrategias `ON CONFLICT (event_id) DO NOTHING` para permitir re-intentos de jobs sin duplicar datos ni fallar por llaves duplicadas.
-- **Cierre Elegante (Graceful Shutdown)**: Flink implementa una terminación controlada a través de `CompletableFuture` que permite hacer un flush final de los buffers JDBC antes de cerrar el proceso, minimizando la pérdida de eventos al final de cada experimento.
-```
+- **Cierre Elegante y Drain Time**: Los jobs de *Spark Structured Streaming* y *Flink* reciben administrativamente un margen (+20 segundos) adicional de tiempo de vida tras detenerse la generación de eventos, logrando drenar todos los mensajes de Kafka retenidos por backpressure. Sumado a terminaciones por `CompletableFuture`, esto minimiza drásticamente la pérdida experimental de los últimos micro-lotes.
 
 ---
 

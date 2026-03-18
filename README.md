@@ -67,9 +67,9 @@ El tamaño de un evento es dinámico. El generador rellena el campo `payload` co
 - **Stack completo en Docker Compose**: Kafka, Spark, Flink, Postgres.
 - **Jobs Java** compilados con Gradle wrapper (Spark Batch, Spark SS, Flink Streaming). Parseo robusto JSON via **Jackson Databind**.
 - **Scripts de orquestación**: setup, run, clean, teardown, export de métricas.
-- **Análisis estadístico** (`analyze.py`): **9 gráficas** de calidad de publicación + filtro de warmup + Kruskal-Wallis + Bonferroni.
-- **Observabilidad**: Prometheus + cAdvisor + kafka-exporter para captura de CPU, memoria y consumer lag.
-- **Métricas** capturadas: latencia E2E, throughput, fault recovery, eficiencia de escalado, recursos y consumer lag.
+- **Análisis estadístico y Dashboards** (`analyze.py`): Centralizado nativamente en Python, el motor extrae directamente los snapshots de Prometheus sin depender de Grafana, exportando **9 gráficas estáticas** de calidad de publicación + filtro de warmup + Kruskal-Wallis + Bonferroni.
+- **Observabilidad Centralizada**: Prometheus almacena CPU, memoria pasiva (cAdvisor) y lag (kafka-exporter).
+- **Métricas** capturadas: latencia E2E, throughput absoluto, throughput de escritura a base de datos, fault recovery, eficiencia de escalado horizontal, consumo de RAM (MB) absoluto y consumer lag.
 
 ---
 
