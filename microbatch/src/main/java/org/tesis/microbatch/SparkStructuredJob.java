@@ -89,11 +89,29 @@ public final class SparkStructuredJob {
 
                         System.out.println("[microbatch] Batch " + batchId + " write successful (idempotent): " + rowCount + " rows");
                 } catch (Exception e) {
+                        if (isInterrupted(e)) {
+                                System.err.println("[microbatch] Batch " + batchId + " interrupted during shutdown, ignoring batch.");
+                                Thread.currentThread().interrupt();
+                                return;
+                        }
+
                         System.err.println("[microbatch] Batch " + batchId + " failed fatally: " + e.getMessage());
                         throw new RuntimeException("Microbatch write failed", e);
                 } finally {
                         batch.unpersist();
                 }
+        }
+
+        private static boolean isInterrupted(Throwable throwable) {
+                while (throwable != null) {
+                        if (throwable instanceof InterruptedException
+                                        || throwable instanceof java.util.concurrent.CancellationException) {
+                                return true;
+                        }
+                        throwable = throwable.getCause();
+                }
+
+                return false;
         }
 
         public static void main(String[] args) throws StreamingQueryException, TimeoutException {

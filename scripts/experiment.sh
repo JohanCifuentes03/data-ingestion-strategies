@@ -41,6 +41,7 @@ FAULT_SCENARIO=${FAULT_SCENARIO:-"medium-load"}   # escenario sobre el que se in
 
 # ── Quick mode presets ─────────────────────────────────────────────
 QUICK_MODE=false
+FAST_MODE=false
 SMOKE_MODE=false
 
 # ── Parse CLI flags ───────────────────────────────────────────────
@@ -53,6 +54,16 @@ while [[ $# -gt 0 ]]; do
             REPETITIONS=1
             export RUN_DURATION_SECONDS=180
             WARMUP_SECONDS=10
+            shift
+            ;;
+        --fast)
+            FAST_MODE=true
+            STRATEGIES="batch microbatch streaming"
+            SCENARIOS="low-load medium-load"
+            REPETITIONS=1
+            export RUN_DURATION_SECONDS=60
+            WARMUP_SECONDS=5
+            EXPORT_WINDOW="2m"
             shift
             ;;
         --smoke)
@@ -95,6 +106,8 @@ ESTIMATED_MINUTES=$((TOTAL_RUNS * (RUN_DURATION_SECONDS + WARMUP_SECONDS + COOLD
 MODE_NAME="standard"
 if [ "$QUICK_MODE" = true ]; then
     MODE_NAME="quick"
+elif [ "$FAST_MODE" = true ]; then
+    MODE_NAME="fast"
 elif [ "$SMOKE_MODE" = true ]; then
     MODE_NAME="smoke"
 fi
@@ -155,18 +168,14 @@ for STRATEGY in $STRATEGIES; do
             echo "[experiment] Cooldown ${COOLDOWN_SECONDS}s ..."
             sleep "$COOLDOWN_SECONDS"
 
-            # ── Copy results ───────────────────────────────────────
-            if [ -f "$RESULTS_BASE/latency_samples.csv" ]; then
-                cp "$RESULTS_BASE/latency_samples.csv" "$RUN_DIR/latency_samples.csv"
-                # Validate that the run produced enough data (more than just the header)
-                SAMPLE_LINES=$(wc -l < "$RUN_DIR/latency_samples.csv" 2>/dev/null || echo 0)
-                if [ "$SAMPLE_LINES" -lt 10 ]; then
-                    echo "[experiment] WARNING: run $STRATEGY/$SCENARIO/$RUN_ID produced only $SAMPLE_LINES sample lines — possible silent failure"
-                else
-                    echo "[experiment] Results saved to $RUN_DIR/ ($SAMPLE_LINES lines)"
-                fi
+            # Nota: la copia del CSV de latencias al directorio del run la realiza
+            # run.sh a traves de copy_probe_csv_to_run, filtrando solo las filas
+            # de este run (strategy/scenario/run_id). No es necesario copiar aqui.
+            SAMPLE_LINES=$(wc -l < "$RUN_DIR/latency_samples.csv" 2>/dev/null || echo 0)
+            if [ "$SAMPLE_LINES" -lt 10 ]; then
+                echo "[experiment] WARNING: run $STRATEGY/$SCENARIO/$RUN_ID produjo solo $SAMPLE_LINES lineas de muestra"
             else
-                echo "[experiment] WARNING: no results CSV found for $STRATEGY/$SCENARIO/$RUN_ID"
+                echo "[experiment] Results en $RUN_DIR/ ($SAMPLE_LINES lineas)"
             fi
 
 
@@ -250,10 +259,7 @@ if [ "$SCALING_TEST" = true ]; then
             RUN_DURATION_SECONDS=$SCALING_DURATION \
                 bash "$ROOT_DIR/scripts/run.sh" "$STRATEGY" "$SCALING_SCENARIO" "$SCALING_RUN_ID"
 
-            # Copiar latency CSV al directorio de scaling
-            if [ -f "$RESULTS_BASE/latency_samples.csv" ]; then
-                cp "$RESULTS_BASE/latency_samples.csv" "$SCALING_RUN_DIR/latency_samples.csv"
-            fi
+            # Nota: run.sh ya copio el CSV filtrado al directorio del run via copy_probe_csv_to_run.
 
             # Añadir metadato de workers al snapshot de Prometheus
             if [ -f "$SCALING_RUN_DIR/prometheus_snapshot.csv" ]; then
@@ -267,4 +273,3 @@ if [ "$SCALING_TEST" = true ]; then
     docker compose --profile scaling down spark-worker-2 spark-worker-3 2>/dev/null || true
     echo "[experiment] Scaling test completado. Ver results/*/scaling_*w/"
 fi
-
