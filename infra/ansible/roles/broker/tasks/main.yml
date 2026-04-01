@@ -59,7 +59,7 @@
 - name: "Construir e iniciar servicios del broker"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/base.yml -f docker/broker.yml up -d --build 2>&1
+    docker compose -f docker/broker.yml up -d --build 2>&1
   become_user: ubuntu
   register: broker_up
   changed_when: "'Started' in broker_up.stdout or 'Created' in broker_up.stdout"

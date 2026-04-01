@@ -77,7 +77,7 @@
 - name: "Iniciar PostgreSQL, Prometheus y cAdvisor"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/base.yml -f docker/sink.yml up -d 2>&1
+    docker compose -f docker/sink.yml up -d 2>&1
   become_user: ubuntu
   register: sink_up
   changed_when: "'Started' in sink_up.stdout or 'Created' in sink_up.stdout"

@@ -107,7 +107,7 @@
 - name: "Iniciar Spark y Flink"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/base.yml -f docker/compute.yml up -d 2>&1
+    docker compose -f docker/compute.yml up -d 2>&1
   become_user: ubuntu
   register: compute_up
   changed_when: "'Started' in compute_up.stdout or 'Created' in compute_up.stdout"
