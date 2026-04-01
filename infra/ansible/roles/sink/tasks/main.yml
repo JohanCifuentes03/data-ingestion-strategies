@@ -1,0 +1,112 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# infra/ansible/roles/sink/tasks/main.yml — Nodo sink (VM-4)
+#
+# Responsabilidades:
+#   1. Crear .env con variables de PostgreSQL
+#   2. Renderizar prometheus.distributed.yml.j2 con IPs reales
+#      y copiarlo como infrastructure/prometheus.yml para que
+#      docker/sink.yml lo monte al levantar
+#   3. Levantar docker/sink.yml (PostgreSQL + Prometheus + cAdvisor)
+#   4. Esperar healthcheck de PostgreSQL
+# ══════════════════════════════════════════════════════════════════
+
+# ── 1. Crear .env ───────────────────────────────────────────────
+- name: "Crear .env del nodo sink"
+  copy:
+    dest: "{{ repo_dest }}/.env"
+    owner: ubuntu
+    group: ubuntu
+    mode: '0600'
+    content: |
+      COMPOSE_PROJECT_NAME=tesis-ingestion
+      # ── PostgreSQL ──────────────────────────────────────────────
+      POSTGRES_USER={{ postgres_user }}
+      POSTGRES_PASSWORD={{ postgres_password }}
+      POSTGRES_DB={{ postgres_db }}
+      POSTGRES_PORT={{ postgres_port }}
+      # ── Kafka ───────────────────────────────────────────────────
+      KAFKA_BROKER_ID={{ kafka_broker_id }}
+      KAFKA_PORT=9092
+      KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{{ vm_broker_ip }}:9092
+      KAFKA_BOOTSTRAP_SERVERS={{ vm_broker_ip }}:9092
+      KAFKA_NUM_PARTITIONS={{ kafka_num_partitions }}
+      KAFKA_REPLICATION_FACTOR={{ kafka_replication_factor }}
+      # ── Spark ───────────────────────────────────────────────────
+      SPARK_MASTER_PORT={{ spark_master_port }}
+      SPARK_MASTER_WEBUI_PORT={{ spark_master_webui_port }}
+      SPARK_WORKER_CORES={{ spark_worker_cores }}
+      SPARK_WORKER_MEMORY={{ spark_worker_memory }}
+      # ── Flink ───────────────────────────────────────────────────
+      FLINK_PARALLELISM={{ flink_parallelism }}
+      FLINK_TASKMANAGER_MEMORY={{ flink_taskmanager_memory }}
+      # ── Generator ───────────────────────────────────────────────
+      GENERATOR_EVENT_RATE={{ generator_event_rate }}
+      GENERATOR_PAYLOAD_BYTES={{ generator_payload_bytes }}
+      GENERATOR_SCENARIO={{ generator_scenario }}
+      GENERATOR_RUN_DURATION_SECONDS={{ generator_run_duration }}
+      GENERATOR_WARMUP_SECONDS={{ generator_warmup }}
+      # ── Probe ────────────────────────────────────────────────────
+      POSTGRES_HOST={{ vm_sink_ip }}
+      PROBE_POLL_INTERVAL_MS={{ probe_poll_interval_ms }}
+      # ── Modo distribuido ─────────────────────────────────────────
+      MODE=distributed
+      OCI_VM_PRODUCER_IP={{ vm_producers_ip }}
+      OCI_VM_BROKER_IP={{ vm_broker_ip }}
+      OCI_VM_COMPUTE_IP={{ vm_compute_ip }}
+      OCI_VM_SINK_IP={{ vm_sink_ip }}
+  tags: [config]
+
+# ── 2. Renderizar prometheus.yml con IPs reales ─────────────────
+- name: "Renderizar template prometheus.distributed.yml.j2 con IPs reales"
+  template:
+    src: "{{ repo_dest }}/infrastructure/prometheus.distributed.yml.j2"
+    dest: "{{ repo_dest }}/infrastructure/prometheus.yml"
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+    backup: yes  # respalda el prometheus.yml original como prometheus.yml.bak
+  vars:
+    vm_producers_ip: "{{ vm_producers_ip }}"
+    vm_broker_ip:    "{{ vm_broker_ip }}"
+    vm_compute_ip:   "{{ vm_compute_ip }}"
+    vm_sink_ip:      "{{ vm_sink_ip }}"
+  tags: [config, prometheus]
+
+# ── 3. Levantar el stack del sink ───────────────────────────────
+- name: "Iniciar PostgreSQL, Prometheus y cAdvisor"
+  shell: |
+    cd {{ repo_dest }}
+    docker compose -f docker/base.yml -f docker/sink.yml up -d 2>&1
+  become_user: ubuntu
+  register: sink_up
+  changed_when: "'Started' in sink_up.stdout or 'Created' in sink_up.stdout"
+  tags: [docker]
+
+# ── 4. Esperar healthcheck de PostgreSQL ────────────────────────
+- name: "Esperar que PostgreSQL esté disponible (máx 90s)"
+  shell: |
+    docker exec tesis-postgres pg_isready \
+      -U {{ postgres_user }} -d {{ postgres_db }} > /dev/null 2>&1
+  register: pg_health
+  until: pg_health.rc == 0
+  retries: 18
+  delay: 5
+  tags: [healthcheck]
+
+- name: "Verificar que la tabla 'events' existe"
+  shell: |
+    docker exec tesis-postgres psql \
+      -U {{ postgres_user }} -d {{ postgres_db }} \
+      -c "\dt events" 2>&1
+  register: pg_table
+  changed_when: false
+  tags: [healthcheck]
+
+- name: "Nodo sink listo"
+  debug:
+    msg: >
+      PostgreSQL: {{ vm_sink_ip }}:{{ postgres_port }} (db: {{ postgres_db }})
+      Prometheus: http://{{ vm_sink_ip }}:9090
+      cAdvisor:   http://{{ vm_sink_ip }}:8083
+  tags: [healthcheck]

@@ -1,0 +1,52 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# infra/ansible/site.yml — Playbook principal de provisioning
+#
+# Orden de ejecución (importante — respeta dependencias):
+#   1. common  → todos los nodos: Docker, chrony, git clone
+#   2. broker  → VM-2: Kafka + ZooKeeper (debe estar up antes que compute)
+#   3. compute → VM-3: Spark + Flink (necesita Kafka para conectar)
+#   4. sink    → VM-4: PostgreSQL + Prometheus + cAdvisor
+#   5. producer→ VM-1: solo clonar repo y preparar .env (sin levantar docker)
+#
+# USO:
+#   cd infra/ansible
+#   ansible-playbook -i inventory.ini site.yml
+#   ansible-playbook -i inventory.ini site.yml --tags common  # solo un rol
+#   ansible-playbook -i inventory.ini site.yml --check        # dry-run
+# ══════════════════════════════════════════════════════════════════
+
+- name: "Fase 1/5 — Configuración base (todos los nodos)"
+  hosts: all
+  become: yes
+  gather_facts: yes
+  roles:
+    - common
+
+- name: "Fase 2/5 — Levantar Message Broker (VM-2: node-broker)"
+  hosts: broker
+  become: yes
+  gather_facts: yes
+  roles:
+    - broker
+
+- name: "Fase 3/5 — Levantar Capa de Cómputo (VM-3: node-compute)"
+  hosts: compute
+  become: yes
+  gather_facts: yes
+  roles:
+    - compute
+
+- name: "Fase 4/5 — Levantar Capa de Persistencia (VM-4: node-sink)"
+  hosts: sink
+  become: yes
+  gather_facts: yes
+  roles:
+    - sink
+
+- name: "Fase 5/5 — Preparar Nodo de Producción (VM-1: node-producers)"
+  hosts: producers
+  become: yes
+  gather_facts: yes
+  roles:
+    - producer

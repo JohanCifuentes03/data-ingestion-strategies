@@ -1,0 +1,45 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# infra/ansible/group_vars/all.yml — Variables compartidas globales
+# ══════════════════════════════════════════════════════════════════
+
+# ── Repositorio ─────────────────────────────────────────────────
+repo_url:  "https://github.com/JohanCifuentes03/data-ingestion-strategies.git"
+repo_dest: "/home/ubuntu/data-ingestion-strategies"
+repo_branch: "main"
+
+# ── Docker ──────────────────────────────────────────────────────
+docker_compose_version: "2.24.0"  # mínimo requerido del plugin
+
+# ── NTP / Clock Sync ────────────────────────────────────────────
+# 169.254.169.123 es el Amazon Time Sync Service (link-local intra-VM).
+# Latencia ~0.1 ms — garantiza offset < 1 ms entre VMs, esencial para
+# que la métrica latencia = visible_at − produced_at sea válida.
+ntp_server: "169.254.169.123"
+max_ntp_offset_ms: 5  # umbral máximo aceptable para ejecutar experimentos
+
+# ── Benchmark ───────────────────────────────────────────────────
+postgres_user:     "benchmark"
+postgres_password: "benchmark"
+postgres_db:       "benchmark"
+postgres_port:     5432
+
+kafka_num_partitions:      12
+kafka_replication_factor:  1
+kafka_broker_id:           1
+
+spark_master_port:      7077
+spark_master_webui_port: 8080
+spark_worker_cores:     4
+spark_worker_memory:    "2G"
+
+flink_parallelism:         4
+flink_taskmanager_memory:  "2048m"
+
+generator_event_rate:    2000
+generator_payload_bytes: 512
+generator_scenario:      "low-load"
+generator_run_duration:  300
+generator_warmup:        30
+
+probe_poll_interval_ms: 500

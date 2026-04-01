@@ -1,0 +1,163 @@
+---
+# ══════════════════════════════════════════════════════════════════
+# infra/ansible/roles/common/tasks/main.yml — Base de todos los nodos
+#
+# Ejecuta en: todos los nodos (producers, broker, compute, sink)
+# Responsabilidades:
+#   1. Actualizar paquetes del sistema
+#   2. Instalar Docker, git, chrony, bc
+#   3. Agregar ubuntu al grupo docker
+#   4. Iniciar servicio docker
+#   5. Configurar NTP con servidor AWS (Amazon Time Sync)
+#   6. Clonar / actualizar el repositorio
+# ══════════════════════════════════════════════════════════════════
+
+# ── 1. Actualización del sistema ────────────────────────────────
+- name: "Actualizar caché de apt"
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  tags: [packages]
+
+- name: "Instalar dependencias del sistema"
+  apt:
+    name:
+      - docker.io
+      - git
+      - chrony
+      - bc
+      - curl
+      - jq
+      - netcat-openbsd
+    state: present
+  tags: [packages]
+
+# ── 2. Configurar Docker ────────────────────────────────────────
+- name: "Agregar usuario ubuntu al grupo docker"
+  user:
+    name: ubuntu
+    groups: docker
+    append: yes
+  tags: [docker]
+
+- name: "Habilitar e iniciar el servicio docker"
+  systemd:
+    name: docker
+    enabled: yes
+    state: started
+  tags: [docker]
+
+- name: "Crear directorio de plugins de Docker CLI"
+  file:
+    path: "/usr/libexec/docker/cli-plugins"
+    state: directory
+    mode: '0755'
+  become: yes
+  tags: [docker, packages]
+
+- name: "Descargar e instalar Docker Compose V2 (Plugin)"
+  get_url:
+    url: "https://github.com/docker/compose/releases/download/v2.24.6/docker-compose-linux-x86_64"
+    dest: "/usr/libexec/docker/cli-plugins/docker-compose"
+    mode: 'a+x'
+  become: yes
+  tags: [docker, packages]
+
+# ── 3. Configurar sincronización NTP con Amazon Time Sync ────────
+# El servidor 169.254.169.123 es el Amazon Time Sync Service.
+# Es un endpoint link-local disponible en todas las instancias EC2.
+# Latencia típica: ~0.1 ms. Offset residual: < 1 ms.
+# Esto es CRÍTICO: produced_at (VM-1) y visible_at (VM-4) vienen
+# de relojes físicos distintos. Sin sync, la latencia medida puede
+# ser negativa o errónea por decenas de ms.
+- name: "Escribir configuración chrony con servidor NTP de AWS"
+  copy:
+    dest: /etc/chrony.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # Amazon Time Sync Service: latencia ~0.1 ms, offset residual < 1 ms
+      server {{ ntp_server }} iburst prefer
+
+      # Sincronización inicial agresiva (max 3 pasos, umbral 1 seg)
+      makestep 1.0 3
+
+      # Sincronizar reloj hardware (RTC) con el del sistema
+      rtcsync
+
+      # Drift file para recuperación tras reinicios
+      driftfile /var/lib/chrony/drift
+
+      # Logging
+      logdir /var/log/chrony
+  tags: [ntp]
+
+- name: "Reiniciar chronyd para aplicar nueva configuración"
+  systemd:
+    name: chronyd
+    state: restarted
+    enabled: yes
+  tags: [ntp]
+
+- name: "Esperar 10 segundos para que chrony sincronice"
+  pause:
+    seconds: 10
+  tags: [ntp]
+
+- name: "Verificar que el offset NTP esté dentro del umbral (< {{ max_ntp_offset_ms }}ms)"
+  shell: |
+    OFFSET_SEC=$(chronyc tracking | grep "System time" | awk '{print $4}')
+    OFFSET_MS=$(echo "$OFFSET_SEC * 1000" | bc | awk '{printf "%.2f", $1}')
+    ABS_MS=$(echo "$OFFSET_MS" | tr -d '-' | awk '{printf "%d", $1+0.5}')
+    echo "Offset NTP: ${OFFSET_MS}ms (umbral: {{ max_ntp_offset_ms }}ms)"
+    if [ "$ABS_MS" -gt "{{ max_ntp_offset_ms }}" ]; then
+      echo "ERROR: Offset ${ABS_MS}ms supera umbral {{ max_ntp_offset_ms }}ms"
+      exit 1
+    fi
+    echo "OK: dentro del umbral"
+  register: ntp_check
+  changed_when: false
+  tags: [ntp]
+
+- name: "Mostrar resultado de sincronización NTP"
+  debug:
+    msg: "{{ ntp_check.stdout_lines }}"
+  tags: [ntp]
+
+# ── 4. Clonar / actualizar repositorio ──────────────────────────
+- name: "Comprobar si el repositorio ya existe"
+  stat:
+    path: "{{ repo_dest }}/.git"
+  register: repo_stat
+  tags: [repo]
+
+- name: "Clonar repositorio (primera vez)"
+  git:
+    repo:    "{{ repo_url }}"
+    dest:    "{{ repo_dest }}"
+    version: "{{ repo_branch }}"
+    force:   no
+  become_user: ubuntu
+  when: not repo_stat.stat.exists
+  tags: [repo]
+
+- name: "Actualizar repositorio (git pull)"
+  git:
+    repo:    "{{ repo_url }}"
+    dest:    "{{ repo_dest }}"
+    version: "{{ repo_branch }}"
+    force:   no
+    update:  yes
+  become_user: ubuntu
+  when: repo_stat.stat.exists
+  tags: [repo]
+
+- name: "Crear directorio de resultados"
+  file:
+    path: "{{ repo_dest }}/results"
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+  tags: [repo]
