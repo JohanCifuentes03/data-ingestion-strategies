@@ -130,6 +130,25 @@ echo "║  Scaling test: $SCALING_TEST"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
+# ── Pre-flight: verificar sincronización NTP en modo distribuido ──
+# Si los relojes de VM-1 (produced_at) y VM-4 (visible_at) tienen un
+# offset > 5ms, la métrica latencia puede ser negativa o incorrecta.
+# Este check bloquea el experimento si el skew es inaceptable.
+if [ "${MODE:-local}" = "distributed" ]; then
+    echo "[experiment] Modo distribuido: verificando sincronización de relojes NTP..."
+    CLOCK_SYNC_SCRIPT="$(dirname "$0")/check-clock-sync.sh"
+    if [ -f "$CLOCK_SYNC_SCRIPT" ]; then
+        if ! bash "$CLOCK_SYNC_SCRIPT"; then
+            echo "[experiment] ABORT: Relojes desincronizados. Ver log en results/clock_offsets_*.csv"
+            echo "[experiment] Solución: esperar 30s para que chrony converja y reintentar."
+            exit 1
+        fi
+    else
+        echo "[experiment] WARN: check-clock-sync.sh no encontrado — omitiendo verificación NTP"
+    fi
+    echo ""
+fi
+
 for STRATEGY in $STRATEGIES; do
     for SCENARIO in $SCENARIOS; do
         for REP in $(seq 1 "$REPETITIONS"); do

@@ -1,0 +1,73 @@
+# ══════════════════════════════════════════════════════════════════
+# docker/producer.yml — Carga de Trabajo (VM-1: node-producers)
+#
+# Servicios: generator + probe
+#
+# MODO DISTRIBUIDO (VM-1, IP: 10.0.1.10):
+#   source infra/terraform/outputs.env
+#   docker compose -f docker/base.yml -f docker/producer.yml up -d
+#
+# NOTA IMPORTANTE: Este archivo NO se levanta automáticamente durante
+# el provisioning de Ansible. El generator y el probe los arrancan
+# los scripts de experimento bajo demanda (run.sh / experiment.sh)
+# para controlar con precisión el ciclo clean → warmup → run → cooldown.
+#
+# Variables clave en modo distribuido:
+#   KAFKA_BOOTSTRAP_SERVERS=10.0.1.20:9092  (IP de VM-2, node-broker)
+#   POSTGRES_HOST=10.0.1.40                 (IP de VM-4, node-sink)
+# ══════════════════════════════════════════════════════════════════
+
+include:
+  - path: ./base.yml
+
+services:
+  # ── Generator (productor Kafka multi-thread) ───────────────────
+  generator:
+    build:
+      context: ../generator
+    restart: "no"
+    container_name: tesis-generator
+    networks:
+      - benchmark-net
+    environment:
+      # En modo distribuido: OCI_VM_BROKER_IP:9092 (Ansible inyecta en .env)
+      # En modo local: kafka:9092 (nombre del servicio dentro de Docker)
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      TOPIC_NAME: events
+      EVENT_RATE: ${GENERATOR_EVENT_RATE:-2000}
+      PAYLOAD_SIZE: ${GENERATOR_PAYLOAD_BYTES:-512}
+      SCENARIO: ${GENERATOR_SCENARIO:-low-load}
+      EVENT_SCHEMA: ${GENERATOR_EVENT_SCHEMA:-}
+      RUN_DURATION_SECONDS: ${GENERATOR_RUN_DURATION_SECONDS:-0}
+      WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
+      PROMETHEUS_PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../results:/results
+
+  # ── Probe (sonda de disponibilidad PostgreSQL) ─────────────────
+  probe:
+    build:
+      context: ../probe
+    restart: "no"
+    container_name: tesis-probe
+    networks:
+      - benchmark-net
+    environment:
+      # En modo distribuido: OCI_VM_SINK_IP (Ansible inyecta en .env)
+      # En modo local: postgres (nombre del servicio dentro de Docker)
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-benchmark}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-benchmark}
+      POSTGRES_DB: ${POSTGRES_DB:-benchmark}
+      PROBE_POLL_INTERVAL_MS: ${PROBE_POLL_INTERVAL_MS:-500}
+      RESULTS_PATH: /results
+      PROMETHEUS_PORT: 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      # Los resultados se persisten en el host para que collect-results.sh
+      # pueda copiarlos via scp al finale del experimento
+      - ../results:/results

@@ -1,0 +1,92 @@
+# ══════════════════════════════════════════════════════════════════
+# infrastructure/prometheus.distributed.yml.j2
+# Template Jinja2 para configuración Prometheus en modo distribuido
+#
+# Ansible renderiza este archivo con las IPs reales de cada VM y lo
+# copia como infrastructure/prometheus.yml antes de levantar el stack
+# del nodo sink (docker/sink.yml).
+#
+# En modo local, el docker-compose.yml raíz monta el prometheus.yml
+# original (que apunta a localhost). Este template NO afecta el modo local.
+#
+# Variables Jinja2 requeridas (inyectadas por rol Ansible sink):
+#   vm_producers_ip  — IP privada de VM-1 (generator + probe)
+#   vm_broker_ip     — IP privada de VM-2 (kafka-exporter)
+#   vm_compute_ip    — IP privada de VM-3 (Flink metrics)
+#   vm_sink_ip       — IP privada de VM-4 (cAdvisor local)
+# ══════════════════════════════════════════════════════════════════
+
+global:
+  scrape_interval:     5s
+  evaluation_interval: 5s
+  external_labels:
+    environment: 'distributed'
+    experiment:  'tesis-benchmark'
+
+scrape_configs:
+
+  # ── Generator (VM-1: node-producers) ──────────────────────────
+  # Exporta: generator_events_total, generator_events_rate,
+  # generator_warmup_active, generator_payload_bytes_avg
+  - job_name: generator
+    static_configs:
+      - targets: ['{{ vm_producers_ip }}:8000']
+        labels:
+          nodo: 'node-producers'
+          vm_ip: '{{ vm_producers_ip }}'
+
+  # ── Probe de disponibilidad (VM-1: node-producers) ─────────────
+  # Exporta: probe_latency_ms_hist, probe_events_visible_total
+  - job_name: probe
+    static_configs:
+      - targets: ['{{ vm_producers_ip }}:8001']
+        labels:
+          nodo: 'node-producers'
+          vm_ip: '{{ vm_producers_ip }}'
+
+  # ── Kafka Exporter (VM-2: node-broker) ─────────────────────────
+  # Exporta: kafka_consumergroup_lag, kafka_topic_partitions,
+  # kafka_brokers, kafka_produced_messages_total
+  - job_name: kafka
+    static_configs:
+      - targets: ['{{ vm_broker_ip }}:9308']
+        labels:
+          nodo: 'node-broker'
+          vm_ip: '{{ vm_broker_ip }}'
+
+  # ── cAdvisor — CPU y memoria de contenedores (todos los nodos) ─
+  # Exporta: container_cpu_usage_seconds_total, container_memory_rss
+  # Se scrapeará en los 4 nodos para métricas de recursos completas
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - '{{ vm_compute_ip }}:8083'
+          - '{{ vm_broker_ip }}:8083'
+          - '{{ vm_producers_ip }}:8083'
+        labels:
+          job: 'cadvisor'
+    # cadvisor en VM-4 (sink) está en localhost desde el POV de Prometheus
+    - targets: ['{{ vm_sink_ip }}:8083']
+      labels:
+        nodo: 'node-sink'
+        vm_ip: '{{ vm_sink_ip }}'
+
+  # ── Flink Metrics (VM-3: node-compute) ─────────────────────────
+  # 9249: JobManager metrics
+  # 9250: TaskManager metrics
+  # Exporta: flink_jobmanager_numRunningJobs, flink_taskmanager_*
+  - job_name: flink_jobmanager
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:9249']
+        labels:
+          nodo: 'node-compute'
+          componente: 'jobmanager'
+          vm_ip: '{{ vm_compute_ip }}'
+
+  - job_name: flink_taskmanager
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:9250']
+        labels:
+          nodo: 'node-compute'
+          componente: 'taskmanager'
+          vm_ip: '{{ vm_compute_ip }}'

@@ -1,0 +1,172 @@
+# ══════════════════════════════════════════════════════════════════
+# docker/compute.yml — Capa de Cómputo (VM-3: node-compute)
+#
+# Servicios: spark-master + spark-worker + spark-worker-2/3 (scaling)
+#            + flink-jobmanager + flink-taskmanager
+#
+# MODO DISTRIBUIDO (VM-3, IP: 10.0.1.30):
+#   source infra/terraform/outputs.env
+#   docker compose -f docker/base.yml -f docker/compute.yml up -d
+#
+# Variables de entorno clave:
+#   SPARK_MASTER_HOST  — hostname del master (default: spark-master)
+#   FLINK_JOBMANAGER_HOST — hostname del jobmanager (default: flink-jobmanager)
+#   KAFKA_BOOTSTRAP_SERVERS — IP:puerto del broker (10.0.1.20:9092 en dist.)
+#
+# Los JARs de los jobs deben estar compilados antes de levantar:
+#   ./gradlew build -x test
+# ══════════════════════════════════════════════════════════════════
+
+include:
+  - path: ./base.yml
+
+services:
+  # ── Spark Master ───────────────────────────────────────────────
+  spark-master:
+    image: apache/spark:3.5.8-java17
+    restart: unless-stopped
+    container_name: tesis-spark-master
+    networks:
+      - benchmark-net
+    user: root
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_MASTER_HOST: ${SPARK_MASTER_HOST:-spark-master}
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host ${SPARK_MASTER_HOST:-spark-master}
+      --port ${SPARK_MASTER_PORT:-7077}
+      --webui-port ${SPARK_MASTER_WEBUI_PORT:-8080}"
+    ports:
+      - "${SPARK_MASTER_PORT:-7077}:${SPARK_MASTER_PORT:-7077}"
+      - "${SPARK_MASTER_WEBUI_PORT:-8080}:${SPARK_MASTER_WEBUI_PORT:-8080}"
+    volumes:
+      - ../batch/build/libs:/opt/spark/jobs/batch:ro
+      - ../microbatch/build/libs:/opt/spark/jobs/microbatch:ro
+      - spark-checkpoints:/opt/spark/checkpoints
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -sf http://localhost:${SPARK_MASTER_WEBUI_PORT:-8080} > /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  # ── Spark Worker 1 (siempre activo) ───────────────────────────
+  spark-worker:
+    image: apache/spark:3.5.8-java17
+    restart: unless-stopped
+    container_name: tesis-spark-worker-1
+    networks:
+      - benchmark-net
+    user: root
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://${SPARK_MASTER_HOST:-spark-master}:${SPARK_MASTER_PORT:-7077}
+      --cores ${SPARK_WORKER_CORES:-4}
+      --memory ${SPARK_WORKER_MEMORY:-2G}
+      --work-dir /opt/spark/work-dir"
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+
+  # ── Spark Worker 2 (perfil: scaling) ──────────────────────────
+  spark-worker-2:
+    image: apache/spark:3.5.8-java17
+    restart: "no"
+    container_name: tesis-spark-worker-2
+    networks:
+      - benchmark-net
+    user: root
+    profiles:
+      - scaling
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://${SPARK_MASTER_HOST:-spark-master}:${SPARK_MASTER_PORT:-7077}
+      --cores ${SPARK_WORKER_CORES:-4}
+      --memory ${SPARK_WORKER_MEMORY:-2G}
+      --work-dir /opt/spark/work-dir-2"
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+
+  # ── Spark Worker 3 (perfil: scaling) ──────────────────────────
+  spark-worker-3:
+    image: apache/spark:3.5.8-java17
+    restart: "no"
+    container_name: tesis-spark-worker-3
+    networks:
+      - benchmark-net
+    user: root
+    profiles:
+      - scaling
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    command: >-
+      bash -c "mkdir -p /opt/spark/checkpoints && chmod 777 /opt/spark/checkpoints &&
+      exec gosu spark /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://${SPARK_MASTER_HOST:-spark-master}:${SPARK_MASTER_PORT:-7077}
+      --cores ${SPARK_WORKER_CORES:-4}
+      --memory ${SPARK_WORKER_MEMORY:-2G}
+      --work-dir /opt/spark/work-dir-3"
+    volumes:
+      - spark-checkpoints:/opt/spark/checkpoints
+
+  # ── Flink JobManager ───────────────────────────────────────────
+  flink-jobmanager:
+    image: flink:1.18.1-scala_2.12-java17
+    restart: unless-stopped
+    container_name: tesis-flink-jobmanager
+    networks:
+      - benchmark-net
+    command: jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=${FLINK_JOBMANAGER_HOST:-flink-jobmanager}
+      - |
+        FLINK_PROPERTIES=
+          jobmanager.rpc.address: ${FLINK_JOBMANAGER_HOST:-flink-jobmanager}
+          jobmanager.memory.process.size: 1024m
+          rest.port: 8081
+          parallelism.default: ${FLINK_PARALLELISM:-4}
+          metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.port: 9249
+    ports:
+      - "8081:8081"
+      - "9249:9249"
+    volumes:
+      - ../streaming/build/libs:/opt/flink/usrlib:ro
+
+  # ── Flink TaskManager ──────────────────────────────────────────
+  flink-taskmanager:
+    image: flink:1.18.1-scala_2.12-java17
+    restart: unless-stopped
+    container_name: tesis-flink-taskmanager
+    networks:
+      - benchmark-net
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=${FLINK_JOBMANAGER_HOST:-flink-jobmanager}
+      - |
+        FLINK_PROPERTIES=
+          jobmanager.rpc.address: ${FLINK_JOBMANAGER_HOST:-flink-jobmanager}
+          taskmanager.numberOfTaskSlots: ${FLINK_PARALLELISM:-4}
+          taskmanager.memory.process.size: ${FLINK_TASKMANAGER_MEMORY:-2048m}
+          metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+          metrics.reporter.prom.port: 9250
+    ports:
+      - "9250:9250"
+    volumes:
+      - ../streaming/build/libs:/opt/flink/usrlib:ro

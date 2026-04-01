@@ -307,6 +307,130 @@ results/        CSV de latencias + fault_recovery.csv + figuras/
 
 ---
 
+## Modo distribuido (AWS)
+
+El benchmark soporta un modo distribuido donde cada capa del stack se despliega en
+una instancia EC2 dedicada en **Amazon Web Services (AWS)**, replicando condiciones de
+producción reales. Este modo es el que se utiliza en los experimentos de validación
+de la tesis.
+
+### Topología de red
+
+```
+  ┌─────────────────────────────────────── VPC: 10.0.0.0/16 ───────────────────────────────────────┐
+  │                               subnet pública: 10.0.1.0/24                                       │
+  │                                                                                                  │
+  │   ┌──────────────────┐    produce JSON (lz4)    ┌─────────────────────┐                        │
+  │   │  VM-1            │ ─────────────────────── ▶ │  VM-2               │                        │
+  │   │  node-producers  │                           │  node-broker        │                        │
+  │   │  10.0.1.10       │                           │  10.0.1.20          │                        │
+  │   │  t3.medium       │                           │  t3.large           │                        │
+  │   │  · generator     │     probe ─── SELECT ──── │  · zookeeper:2181   │                        │
+  │   │  · probe         │         ▼                 │  · kafka:9092       │                        │
+  │   └──────────────────┘         │                 │  · kafka-exporter   │                        │
+  │          │ /metrics            │                 └─────────────────────┘                        │
+  │          │                     │                         │ consume                               │
+  │          ▼                     ▼                         ▼                                      │
+  │   ┌──────────────────────────────────┐     ┌──────────────────────────┐                        │
+  │   │  VM-4                            │     │  VM-3                    │                        │
+  │   │  node-sink                       │     │  node-compute            │                        │
+  │   │  10.0.1.40                       │ ◀── │  10.0.1.30              │                        │
+  │   │  t3.medium                       │JDBC │  t3.xlarge               │                        │
+  │   │  · postgres:5432  ◀ INSERT       │     │  · spark-master:7077     │                        │
+  │   │  · prometheus:9090               │     │  · spark-worker (4 cores)│                        │
+  │   │  · cadvisor:8083                 │     │  · flink-jobmanager:8081 │                        │
+  │   └──────────────────────────────────┘     │  · flink-taskmanager     │                        │
+  │                                             └──────────────────────────┘                        │
+  └──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### VMs y recursos AWS (x86_64)
+
+| VM | Rol | IP Privada | Shape EC2 | vCPUs | RAM | Servicios |
+|---|---|---|---|---|---|---|
+| VM-1 | node-producers | 10.0.1.10 | t3.medium | 2 | 4 GB | generator, probe |
+| VM-2 | node-broker | 10.0.1.20 | t3.large | 2 | 8 GB | zookeeper, kafka, kafka-exporter |
+| VM-3 | node-compute | 10.0.1.30 | t3.xlarge | 4 | 16 GB | spark-master, spark-worker, flink |
+| VM-4 | node-sink | 10.0.1.40 | t3.medium | 2 | 4 GB | postgres, prometheus, cadvisor |
+
+> **Región elegida: `us-east-1` (N. Virginia).**
+> Justificación: mayor disponibilidad de instancias t3 y servicios.
+
+> ⚠️ **Costo estimado:** El despliegue de las 4 instancias cuesta aproximadamente **~$0.37 USD por hora** bajo el modelo On-Demand. Es ideal aprovechar los créditos de Free Trial (ej. $300 USD de bienvenida o GitHub Student Pack). **Recuerda destruir las VMs al terminar.**
+
+### Prerrequisitos
+
+```bash
+# Herramientas requeridas en la máquina local
+terraform --version  # >= 1.5.0
+ansible --version    # >= 2.14.0
+aws --version        # AWS CLI (opcional, Terraform usa las access keys)
+
+# Asegúrate de tener un par de claves SSH en ~/.ssh/id_rsa
+# Si no, genera uno: ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N ""
+```
+
+### Flujo completo de uso (8 pasos)
+
+```bash
+# 1. Configurar credenciales AWS en Terraform
+cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
+# Edita terraform.tfvars colocando tue aws_access_key y aws_secret_key
+
+# 2. Crear infraestructura en AWS (~3 min)
+cd infra/terraform
+terraform init
+terraform apply
+# Genera automáticamente:
+#   infra/ansible/inventory.ini
+#   infra/terraform/outputs.env
+
+# 3. Provisionar las 4 VMs: Docker, NTP, repo, compilación (~10 min)
+cd ../ansible
+ansible-playbook -i inventory.ini site.yml
+
+# 4. Verificar que todo está en pie (pre-flight check)
+bash scripts/up.sh
+
+# 5. Ejecutar experimento en modo distribuido
+MODE=distributed bash scripts/experiment.sh --smoke   # validación rápida (~5 min)
+MODE=distributed bash scripts/experiment.sh --quick   # prueba rápida (~30 min)
+MODE=distributed bash scripts/experiment.sh           # experimento completo (~2-3 h)
+
+# 6. Recolectar resultados desde VM-4 (node-sink)
+bash scripts/collect-results.sh
+
+# 7. Analizar con el mismo pipeline estadístico de modo local
+analysis/.venv/bin/python analysis/analyze.py \
+    --results-dir results-distributed/
+
+# 8. IMPORTANTE: destruir VMs para no gastar saldo AWS
+cd infra/terraform
+terraform destroy
+```
+
+### Sincronización de relojes (validez experimental)
+
+En modo distribuido, `produced_at` se genera en VM-1 y `visible_at` se asigna
+en VM-4. Si sus relojes difieren, la latencia medida puede ser incorrecta.
+
+**Solución implementada:** chrony apunta al NTP interno de AWS (`169.254.169.123`,
+latencia ~0.1 ms). El offset residual típico es < 1 ms, despreciable frente a
+latencias de batch (segundos) y streaming (decenas de ms).
+
+El script `check-clock-sync.sh` bloquea automáticamente el experimento si
+cualquier nodo supera el umbral de **5 ms**:
+
+```bash
+# Verificar manualmente
+bash scripts/check-clock-sync.sh
+
+# Omitir en el up.sh (no recomendado en producción)
+bash scripts/up.sh --skip-clock
+```
+
+---
+
 ## Referencias
 
 - **Arquitectura detallada**: [`docs/architecture.md`](docs/architecture.md)

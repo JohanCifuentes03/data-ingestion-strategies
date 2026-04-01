@@ -343,3 +343,95 @@ results/
 ├── microbatch/ ...
 └── streaming/ ...
 ```
+
+---
+
+## 11. Topología distribuida (modo AWS)
+
+El benchmark soporta un modo distribuido donde las 4 capas funcionales se despliegan
+en instancias EC2 x86_64 dedicadas en AWS, replicando condiciones de
+producción reales. Este modo permite validar la arquitectura bajo condiciones de
+red físicamente separada, donde `produced_at` y `visible_at` provienen de relojes
+de hardware distintos sincronizados via Amazon Time Sync Service.
+
+### 11.1 Diagrama de componentes distribuidos
+
+```mermaid
+flowchart TB
+    subgraph AWS["Amazon Web Services — VPC 10.0.0.0/16 / subnet 10.0.1.0/24"]
+
+        subgraph VM1["VM-1: node-producers (10.0.1.10 · 1 OCPU / 4 GB)"]
+            GEN["Generador\nPython multi-thread"]
+            PROBE["Sonda de disponibilidad\nPython, polling PG"]
+        end
+
+        subgraph VM2["VM-2: node-broker (10.0.1.20 · 2 OCPU / 12 GB)"]
+            ZK["ZooKeeper :2181"]
+            KF["Kafka :9092 (12 particiones)"]
+            KE["kafka-exporter :9308"]
+        end
+
+        subgraph VM3["VM-3: node-compute (10.0.1.30 · 4 OCPU / 16 GB)"]
+            SM["Spark Master :7077 / UI:8080"]
+            SW["Spark Worker (4 cores, 2 GB)"]
+            FJ["Flink JobManager :8081 / metrics:9249"]
+            FT["Flink TaskManager :9250 (4 slots)"]
+        end
+
+        subgraph VM4["VM-4: node-sink (10.0.1.40 · 1 OCPU / 8 GB)"]
+            PG["PostgreSQL 15 :5432"]
+            PROM["Prometheus :9090"]
+            CA["cAdvisor :8083"]
+        end
+    end
+
+    GEN -->|"produce JSON lz4\n10.0.1.20:9092"| KF
+    KF --> SM
+    KF --> FJ
+    SM --> SW
+
+    SW -->|"JDBC batch append\n10.0.1.40:5432"| PG
+    FT -->|"JDBC Sink batch 500\n10.0.1.40:5432"| PG
+
+    PG -->|"SELECT WHERE visible_at > last"| PROBE
+
+    GEN -->|"/metrics :8000"| PROM
+    PROBE -->|"/metrics :8001"| PROM
+    KE -->|"/metrics :9308"| PROM
+    CA -->|"/metrics :8083"| PROM
+    FJ -->|"metrics :9249"| PROM
+    FT -->|"metrics :9250"| PROM
+
+    ZK --- KF
+```
+
+### 11.2 Asignación de servicios por VM
+
+| VM | Nombre | IP Privada | OCPU | RAM | Compose file | Servicios |
+|---|---|---|---|---|---|---|
+| VM-1 | node-producers | 10.0.1.10 | 1 | 4 GB | `docker/producer.yml` | generator, probe |
+| VM-2 | node-broker | 10.0.1.20 | 2 | 12 GB | `docker/broker.yml` | zookeeper, kafka, kafka-exporter |
+| VM-3 | node-compute | 10.0.1.30 | 4 | 16 GB | `docker/compute.yml` | spark-master, spark-worker, flink-jobmanager, flink-taskmanager |
+| VM-4 | node-sink | 10.0.1.40 | 1 | 8 GB | `docker/sink.yml` | postgres, prometheus, cadvisor |
+
+### 11.3 Variables críticas del modo distribuido
+
+| Variable | Valor en modo distribuido | Impacto si es incorrecto |
+|---|---|---|
+| `KAFKA_ADVERTISED_LISTENERS` | `PLAINTEXT://10.0.1.20:9092` | **Crítica:** Spark y generator no pueden conectar al broker |
+| `KAFKA_BOOTSTRAP_SERVERS` | `10.0.1.20:9092` | Generator y probe no producen/leen eventos |
+| `POSTGRES_HOST` | `10.0.1.40` | Jobs Spark/Flink y probe no pueden escribir/leer resultados |
+| `SPARK_MASTER_URL` | `spark://10.0.1.30:7077` | spark-submit falla |
+| `FLINK_REST_URL` | `http://10.0.1.30:8081` | Submit de jobs Flink falla |
+
+### 11.4 Consideración de clock skew (validez experimental)
+
+La métrica `latencia = visible_at − produced_at` involucra dos relojes físicos
+distintos (VM-1 y VM-4). El offset NTP se controla así:
+
+- **Mecanismo:** chrony apunta al NTP interno de AWS `169.254.169.123` (latencia ~0.1 ms)
+- **Offset residual típico:** < 1 ms → despreciable frente a p50 de batch (segundos)
+  y p50 de streaming (20–60 ms)
+- **Umbral de seguridad experimentalmente definido:** 5 ms
+- **Verificación automática:** `check-clock-sync.sh` bloquea el experimento si cualquier
+  nodo supera el umbral y registra el log en `results/clock_offsets_YYYYMMDD_HHmmSS.csv`

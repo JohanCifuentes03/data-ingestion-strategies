@@ -219,3 +219,24 @@ pyrightconfig.json
 /common/.gitignore
 /microbatch/.gitignore
 /streaming/.gitignore
+
+# ── Terraform — NUNCA subir state ni credenciales al repo ────────
+infra/terraform/.terraform/
+infra/terraform/.terraform.lock.hcl
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.backup
+infra/terraform/terraform.tfstate.d/
+# terraform.tfvars contiene OCIDs, fingerprints y claves reales
+infra/terraform/terraform.tfvars
+# outputs.env contiene IPs generadas por apply — se regenera con terraform apply
+infra/terraform/outputs.env
+# Patrón general para cualquier archivo de variables con valores reales
+*.tfvars
+*.tfvars.json
+
+# ── Ansible — inventory generado por Terraform ───────────────────
+# Se regenera automáticamente con cada terraform apply — no editar a mano
+infra/ansible/inventory.ini
+
+# ── Resultados experimento distribuido ───────────────────────────
+results-distributed/

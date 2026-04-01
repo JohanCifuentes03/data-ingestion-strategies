@@ -276,3 +276,109 @@ streaming y microbatch, basado en el timestamp `produced_at` de cada evento:
 - **Batch:** Exento del filtro — su warmup es estructural (toda la fase de acumulación
   ocurre antes de que el job de Spark ejecute, por lo que los datos ya reflejan
   el estado estacionario del sistema cuando ingresan a PostgreSQL).
+
+---
+
+## 8. Modo distribuido (AWS)
+
+El protocolo experimental puede ejecutarse en modo distribuido donde cada capa del
+stack reside en una instancia dedicada EC2 de AWS. Los **procedimientos
+de medición y análisis son idénticos** al modo local; solo cambian el entorno de
+despliegue y algunos comandos de orquestación.
+
+### 8.1 Prerrequisitos adicionales (modo distribuido)
+
+- [ ] Terraform ≥ 1.5 instalado en la máquina local.
+- [ ] Ansible ≥ 2.14 instalado en la máquina local.
+- [ ] Credenciales AWS programáticas configuradas en `terraform.tfvars`.
+- [ ] Par de claves SSH en `~/.ssh/oci_rsa` y `~/.ssh/oci_rsa.pub`.
+- [ ] `infra/terraform/terraform.tfvars` completado con OCIDs reales.
+  Ver instrucciones en `infra/terraform/terraform.tfvars.example`.
+
+```bash
+# Generar SSH key si no existe
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/oci_rsa -N ""
+cat ~/.ssh/oci_rsa.pub  # copiar en terraform.tfvars → ssh_public_key
+```
+
+### 8.2 Preparación (una sola vez)
+
+```bash
+# 1. Crear infraestructura AWS (~3 min)
+cd infra/terraform
+terraform init && terraform apply
+# Genera: infra/ansible/inventory.ini y infra/terraform/outputs.env
+
+# 2. Provisionar las 4 VMs: Docker, chrony, git clone, compilación (~10 min)
+cd ../ansible
+ansible-playbook -i inventory.ini site.yml
+
+# 3. Pre-flight check completo (SSH + servicios + NTP)
+bash scripts/up.sh
+```
+
+### 8.3 Diferencias con el modo local
+
+| Aspecto | Modo local | Modo distribuido |
+|---|---|---|
+| Infraestructura | 1 máquina, Docker Compose | 4 instancias EC2, cada una con su compose file |
+| Compose file | `docker-compose.yml` (raíz) | `docker/broker.yml`, `docker/compute.yml`, etc. |
+| `KAFKA_ADVERTISED_LISTENERS` | `PLAINTEXT://kafka:9092` | `PLAINTEXT://10.0.1.20:9092` |
+| `POSTGRES_HOST` | `postgres` (nombre Docker) | `10.0.1.40` (IP privada VM-4) |
+| Clock skew | N/A (mismo host) | Verificado con `check-clock-sync.sh` antes de cada experimento |
+| Resultados | `./results/` local | `./results-distributed/` (copiados via scp desde VM-4) |
+| Análisis | `analyze.py` | `analyze.py --results-dir results-distributed/` |
+
+### 8.4 Ejecución del experimento
+
+```bash
+# Pre-flight: verifica IPs, SSH, servicios y NTP
+bash scripts/up.sh
+
+# Smoke test (~5 min)
+MODE=distributed bash scripts/experiment.sh --smoke
+
+# Experimento rápido (3 × 2 escenarios × 1 rep, ~30 min)
+MODE=distributed bash scripts/experiment.sh --quick
+
+# Experimento estándar completo (~2-3 horas)
+MODE=distributed bash scripts/experiment.sh
+
+# Con fault injection y scaling test
+MODE=distributed bash scripts/experiment.sh --fault-inject --scaling-test
+```
+
+### 8.5 Recolección y análisis
+
+```bash
+# 1. Copiar resultados desde VM-4 al directorio local
+bash scripts/collect-results.sh
+# Destino: ./results-distributed/
+
+# 2. Análisis estadístico: las 9 gráficas + Kruskal-Wallis + Bonferroni
+analysis/.venv/bin/python analysis/analyze.py \
+    --results-dir results-distributed/
+
+# 3. DESTRUIR las VMs para no gastar saldo AWS
+cd infra/terraform && terraform destroy
+```
+
+### 8.6 Protocolo de sincronización NTP
+
+La validez de la métrica `latencia = visible_at − produced_at` depende de que
+VM-1 (`produced_at`) y VM-4 (`visible_at`) tengan relojes sincronizados.
+
+**Mecanismo:**
+1. Ansible configura chrony con `server 169.254.169.254 iburst prefer` en todos los nodos
+   (Amazon Time Sync, latencia ~0.1 ms).
+2. `scripts/up.sh` ejecuta `check-clock-sync.sh` como parte del pre-flight.
+3. `experiment.sh` ejecuta `check-clock-sync.sh` antes del primer run en modo distribuido.
+4. Si el offset de cualquier nodo supera **5 ms**, el experimento se aborta automáticamente.
+
+**Interpretación de resultados:** Los offsets < 5 ms son estadísticamente despreciables:
+- Batch: p50 en el orden de segundos (ratio señal/ruido > 1000×)
+- Micro-batch: p50 típicamente en decenas de ms (ratio > 10×)
+- Streaming: p50 en 20–60 ms (ratio > 4×)
+
+Los logs de sincronización se guardan en `results/clock_offsets_YYYYMMDD_HHmmSS.csv`
+como evidencia metodológica para la documentación de la tesis.

@@ -1,0 +1,32 @@
+# ══════════════════════════════════════════════════════════════════
+# docker/base.yml — Red y volúmenes compartidos
+#
+# PROPÓSITO: Anchor que todos los demás archivos modulares extienden.
+#            Define benchmark-net y todos los named volumes de forma
+#            centralizada para evitar conflictos entre archivos.
+#
+# USO: Nunca se levanta solo. Se combina con los otros archivos:
+#   docker compose -f docker/base.yml -f docker/broker.yml up -d
+#
+# MODO LOCAL:  Usar docker-compose.yml en la raíz del repositorio.
+# MODO DISTRIBUIDO: Cada VM levanta solo su archivo funcional.
+# ══════════════════════════════════════════════════════════════════
+
+networks:
+  benchmark-net:
+    driver: bridge
+    name: benchmark-net
+
+volumes:
+  zookeeper-data:
+    name: tesis-zookeeper-data
+  zookeeper-log:
+    name: tesis-zookeeper-log
+  kafka-data:
+    name: tesis-kafka-data
+  postgres-data:
+    name: tesis-postgres-data
+  spark-checkpoints:
+    name: tesis-spark-checkpoints
+  prometheus-data:
+    name: tesis-prometheus-data

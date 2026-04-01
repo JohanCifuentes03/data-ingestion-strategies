@@ -1,0 +1,26 @@
+# ══════════════════════════════════════════════════════════════════
+# infra/terraform/terraform.tfvars.example — Plantilla credenciales AWS
+#
+# INSTRUCCIONES:
+#   1. Copia este archivo como `terraform.tfvars`.
+#      $ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
+#   2. Completa cada valor con los datos reales de tu cuenta AWS
+#   3. NO subas `terraform.tfvars` al repositorio (ya está en .gitignore).
+#
+# COMO OBTENER CREDENCIALES AWS:
+#   - aws_access_key:   AWS Console → Nombre → Security credentials → Access keys → Create
+#   - aws_secret_key:   Se muestra 1 sola vez al crear la llave anterior.
+#   - region:           Predeterminado "us-east-1".
+# ══════════════════════════════════════════════════════════════════
+
+# ── Credenciales IAM ──────────────────────────────────────────────
+aws_access_key = "AKIAXXXXXXXXXXXXXXX"
+aws_secret_key = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# ── Región AWS ────────────────────────────────────────────────────
+region = "us-east-1"
+
+# ── Clave SSH pública (Para acceso a los Nodos) ──────────────────
+# Copia aquí el contenido exacto de tu llave pública (ej. ~/.ssh/benchmark_aws.pub)
+# Si no tienes llave, genérala con: ssh-keygen -t rsa -b 4096 -f ~/.ssh/benchmark_aws -N ""
+ssh_public_key = "ssh-rsa AAAA... usuario@local"

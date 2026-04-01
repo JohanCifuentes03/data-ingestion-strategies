@@ -4,14 +4,38 @@
 #
 # Combina: setup, setup_minimal, teardown, clean, doctor, reset
 #
-# Uso:
+# Uso (modo local — default):
 #   ./scripts/manage.sh up        # Levantar infraestructura
 #   ./scripts/manage.sh build     # Compilar jobs Java
 #   ./scripts/manage.sh status     # Ver estado de servicios
 #   ./scripts/manage.sh clean      # Limpiar Kafka, PostgreSQL, checkpoints
 #   ./scripts/manage.sh down      # Bajar contenedores
 #   ./scripts/manage.sh reset     # Reset completo (borra todo)
+#
+# Uso (modo distribuido AWS):
+#   MODE=distributed ./scripts/manage.sh up     # Pre-flight check + instrucciones
+#   MODE=distributed ./scripts/manage.sh status # Estado de las 4 VMs remotas
 # ═══════════════════════════════════════════════════════════════════
+
+# ── Modo de ejecución ────────────────────────────────────────────
+# local      : todo en Docker Compose en esta máquina (default)
+# distributed: 4 VMs reales en AWS gestionadas via IaC
+MODE=${MODE:-local}
+
+if [ "$MODE" = "distributed" ]; then
+    # Cargar IPs generadas por terraform apply
+    OUTPUTS_ENV="$(dirname "$0")/../infra/terraform/outputs.env"
+    if [ -f "$OUTPUTS_ENV" ]; then
+        # shellcheck source=/dev/null
+        source "$OUTPUTS_ENV"
+        # Variable crítica: hace que el broker anuncie su IP privada AWS
+        # en lugar de 'kafka:9092' (que solo funciona dentro de Docker)
+        export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${CLOUD_VM_BROKER_IP}:9092"
+        export KAFKA_BOOTSTRAP_SERVERS="${CLOUD_VM_BROKER_IP}:9092"
+    else
+        echo "[manage] WARN: outputs.env no encontrado. Ejecuta: cd infra/terraform && terraform apply"
+    fi
+fi
 
 set -euo pipefail
 
