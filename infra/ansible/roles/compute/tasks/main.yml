@@ -113,6 +113,16 @@
   changed_when: "'Started' in compute_up.stdout or 'Created' in compute_up.stdout"
   tags: [docker]
 
+# ── 4b. Levantar cAdvisor para métricas de recursos ─────────────
+- name: "Iniciar cAdvisor para métricas de CPU/memoria"
+  shell: |
+    cd {{ repo_dest }}
+    docker compose -f docker/cadvisor.yml up -d 2>&1
+  become_user: ubuntu
+  register: cadvisor_up
+  changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"
+  tags: [docker, metrics]
+
 - name: "Esperar que Spark Master esté disponible (máx 60s)"
   uri:
     url: "http://localhost:{{ spark_master_webui_port }}"

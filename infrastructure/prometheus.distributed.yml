@@ -1,0 +1,87 @@
+# ══════════════════════════════════════════════════════════════════
+# infrastructure/prometheus.distributed.yml
+# Configuración Prometheus para modo distribuido AWS
+#
+# GENERADO AUTOMÁTICAMENTE - NO EDITAR MANUALMENTE
+# Este archivo fue renderizado desde prometheus.distributed.yml.j2
+# con las IPs privadas de las VMs EC2:
+#   VM-1 (node-producers): 10.0.1.10
+#   VM-2 (node-broker):    10.0.1.20
+#   VM-3 (node-compute):   10.0.1.30
+#   VM-4 (node-sink):      10.0.1.40
+# ══════════════════════════════════════════════════════════════════
+
+global:
+  scrape_interval:     5s
+  evaluation_interval: 5s
+  external_labels:
+    environment: 'distributed'
+    experiment:  'tesis-benchmark'
+
+scrape_configs:
+
+  # ── Generator (VM-1: node-producers) ──────────────────────────
+  # Exporta: generator_events_total, generator_events_rate,
+  # generator_warmup_active, generator_payload_bytes_avg
+  - job_name: generator
+    static_configs:
+      - targets: ['10.0.1.10:8000']
+        labels:
+          nodo: 'node-producers'
+          vm_ip: '10.0.1.10'
+
+  # ── Probe de disponibilidad (VM-1: node-producers) ─────────────
+  # Exporta: probe_latency_ms_hist, probe_events_visible_total
+  - job_name: probe
+    static_configs:
+      - targets: ['10.0.1.10:8001']
+        labels:
+          nodo: 'node-producers'
+          vm_ip: '10.0.1.10'
+
+  # ── Kafka Exporter (VM-2: node-broker) ─────────────────────────
+  # Exporta: kafka_consumergroup_lag, kafka_topic_partitions,
+  # kafka_brokers, kafka_produced_messages_total
+  - job_name: kafka
+    static_configs:
+      - targets: ['10.0.1.20:9308']
+        labels:
+          nodo: 'node-broker'
+          vm_ip: '10.0.1.20'
+
+  # ── cAdvisor — CPU y memoria de contenedores (todos los nodos) ─
+  # Exporta: container_cpu_usage_seconds_total, container_memory_rss
+  # Se scrapeará en los 4 nodos para métricas de recursos completas
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - '10.0.1.30:8083'
+          - '10.0.1.20:8083'
+          - '10.0.1.10:8083'
+        labels:
+          job: 'cadvisor'
+      # cadvisor en VM-4 (sink) está en localhost desde el POV de Prometheus
+      - targets: ['10.0.1.40:8083']
+        labels:
+          nodo: 'node-sink'
+          vm_ip: '10.0.1.40'
+
+  # ── Flink Metrics (VM-3: node-compute) ─────────────────────────
+  # 9249: JobManager metrics
+  # 9250: TaskManager metrics
+  # Exporta: flink_jobmanager_numRunningJobs, flink_taskmanager_*
+  - job_name: flink_jobmanager
+    static_configs:
+      - targets: ['10.0.1.30:9249']
+        labels:
+          nodo: 'node-compute'
+          componente: 'jobmanager'
+          vm_ip: '10.0.1.30'
+
+  - job_name: flink_taskmanager
+    static_configs:
+      - targets: ['10.0.1.30:9250']
+        labels:
+          nodo: 'node-compute'
+          componente: 'taskmanager'
+          vm_ip: '10.0.1.30'

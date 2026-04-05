@@ -1,0 +1,47 @@
+# ══════════════════════════════════════════════════════════════════
+# docker/cadvisor.yml — Container Resource Metrics (All VMs)
+#
+# PROPÓSITO: cAdvisor para exportar métricas de CPU, memoria, red e I/O
+# de todos los contenedores Docker en cada VM del cluster distribuido.
+#
+# USO: Incluir junto con el compose principal de cada VM:
+#   docker compose -f docker/base.yml -f docker/broker.yml -f docker/cadvisor.yml up -d
+#
+# PUERTO: 8083 (expuesto en todas las VMs para scraping por Prometheus)
+#
+# MÉTRICAS EXPORTADAS:
+#   - container_cpu_usage_seconds_total
+#   - container_memory_rss
+#   - container_network_receive_bytes_total
+#   - container_network_transmit_bytes_total
+#   - container_fs_reads_bytes_total
+#   - container_fs_writes_bytes_total
+# ══════════════════════════════════════════════════════════════════
+
+include:
+  - path: ./base.yml
+
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    container_name: tesis-cadvisor
+    networks:
+      - benchmark-net
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro
+    ports:
+      - "8083:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

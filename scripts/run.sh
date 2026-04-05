@@ -200,9 +200,37 @@ fi
 
 ensure_services() {
     log "Verificando servicios..."
-    if ! docker compose ps kafka postgres 2>/dev/null | grep -q "Up"; then
-        warn "Servicios no estan levantados. Ejecuta ./scripts/manage.sh up primero."
-        exit 1
+    if [ "${MODE:-local}" = "distributed" ]; then
+        # En modo distribuido, verificamos servicios remotamente via SSH
+        local ssh_key="${SSH_KEY:-$HOME/.ssh/benchmark_aws}"
+        local ssh_user="${SSH_USER:-ubuntu}"
+        local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+        local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+        
+        if [ -z "$broker_ip" ] || [ -z "$compute_ip" ]; then
+            warn "IPs de VMs no configuradas. Ejecuta: source infra/terraform/outputs.env"
+            exit 1
+        fi
+        
+        # Verificar Kafka en broker
+        if ! ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "${ssh_user}@${broker_ip}" "docker ps | grep -q tesis-kafka" 2>/dev/null; then
+            warn "Kafka no esta corriendo en ${broker_ip}"
+            exit 1
+        fi
+        
+        # Verificar Spark en compute
+        if ! ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "${ssh_user}@${compute_ip}" "docker ps | grep -q tesis-spark-master" 2>/dev/null; then
+            warn "Spark no esta corriendo en ${compute_ip}"
+            exit 1
+        fi
+    else
+        # Modo local: verificar docker compose local
+        if ! docker compose ps kafka postgres 2>/dev/null | grep -q "Up"; then
+            warn "Servicios no estan levantados. Ejecuta ./scripts/manage.sh up primero."
+            exit 1
+        fi
     fi
     log "Servicios verificados"
 }
@@ -219,7 +247,28 @@ POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
 RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
 FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-1}
 FLINK_DETACHED=${FLINK_DETACHED:-false}
-PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+
+# ── Prometheus URL y modo de acceso ──
+# En modo distribuido, usamos SSH para acceder a Prometheus (puerto 9090 no está expuesto públicamente)
+OUTPUTS_ENV="$ROOT_DIR/infra/terraform/outputs.env"
+if [ "${MODE:-local}" = "distributed" ]; then
+    if [ -f "$OUTPUTS_ENV" ]; then
+        # shellcheck source=/dev/null
+        source "$OUTPUTS_ENV"
+        # Prometheus se accede via SSH, usamos localhost dentro de la VM
+        PROMETHEUS_URL="http://localhost:9090"
+        PROMETHEUS_SSH_HOST="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+        PROMETHEUS_SSH_KEY="${SSH_KEY:-$HOME/.ssh/benchmark_aws}"
+        PROMETHEUS_SSH_USER="${SSH_USER:-ubuntu}"
+    else
+        warn "outputs.env no encontrado en $OUTPUTS_ENV — Prometheus metrics may not be collected"
+        PROMETHEUS_URL="http://localhost:9090"
+        PROMETHEUS_SSH_HOST=""
+    fi
+else
+    PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+    PROMETHEUS_SSH_HOST=""
+fi
 
 # ═══════════════════════════════════════════════════════════════════
 # PROMETHEUS SNAPSHOT
@@ -243,44 +292,48 @@ collect_prometheus_snapshot() {
 
     log "Recolectando snapshot de Prometheus -> $out_file (ventana=${prom_window})"
 
-    if ! curl -sf "${PROMETHEUS_URL}/-/healthy" >/dev/null 2>&1; then
-        warn "Prometheus no disponible en ${PROMETHEUS_URL} -- omitiendo snapshot"
+    # Helper function to execute curl command (locally or via SSH)
+    prom_curl() {
+        local url="$1"
+        if [ -n "${PROMETHEUS_SSH_HOST:-}" ]; then
+            ssh -i "$PROMETHEUS_SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+                "${PROMETHEUS_SSH_USER}@${PROMETHEUS_SSH_HOST}" \
+                "curl -sf '$url'" 2>/dev/null
+        else
+            curl -sf "$url" 2>/dev/null
+        fi
+    }
+
+    # Check Prometheus health
+    if ! prom_curl "${PROMETHEUS_URL}/-/healthy" >/dev/null 2>&1; then
+        warn "Prometheus no disponible en ${PROMETHEUS_URL} (SSH=${PROMETHEUS_SSH_HOST:-none}) -- omitiendo snapshot"
         return 0
     fi
 
     query_prometheus() {
         local promql="$1"
         local eval_time="$2"
-        "$PYTHON_BIN" - "$PROMETHEUS_URL" "$promql" "$eval_time" <<'PY' 2>/dev/null || echo "NaN"
-import json
-import sys
-import urllib.parse
-import urllib.request
-
-def run(base_url, query, eval_time):
-    params = {'query': query}
-    if eval_time:
-        params['time'] = eval_time
-    url = f"{base_url}/api/v1/query?{urllib.parse.urlencode(params)}"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            payload = json.load(response)
-    except Exception:
-        print('NaN')
-        return
-
-    values = payload.get('data', {}).get('result', [])
-    if values:
-        print(values[0]['value'][1])
+        local encoded_query
+        encoded_query=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$promql'''))" 2>/dev/null)
+        local url="${PROMETHEUS_URL}/api/v1/query?query=${encoded_query}"
+        if [ -n "$eval_time" ]; then
+            url="${url}&time=${eval_time}"
+        fi
+        local response
+        response=$(prom_curl "$url" 2>/dev/null) || { echo "NaN"; return; }
+        # Extract the value from JSON response
+        echo "$response" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    result = data.get('data', {}).get('result', [])
+    if result:
+        print(result[0]['value'][1])
     else:
         print('NaN')
-
-if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print('NaN')
-    else:
-        run(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
-PY
+except:
+    print('NaN')
+" 2>/dev/null || echo "NaN"
     }
 
     query_or_zero() {
@@ -297,8 +350,11 @@ PY
 
     echo "strategy,scenario,run_id,metric,value,unit" >"$out_file"
 
-    local cpu_query="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[${prom_window}])) / ${duration}"
-    local mem_query="avg_over_time(container_memory_rss{job=\"cadvisor\",id=~\"/docker/[0-9a-f]+\"}[${prom_window}])"
+    # Container filter: match Docker containers by name prefix "tesis-" (our project containers)
+    # The id format varies by cgroup driver: /docker/<id> (cgroupfs) or /system.slice/docker-<id>.scope (systemd)
+    local container_filter='name=~"tesis-.*"'
+    local cpu_query="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",${container_filter}}[${prom_window}])) / ${duration}"
+    local mem_query="sum(avg_over_time(container_memory_rss{job=\"cadvisor\",${container_filter}}[${prom_window}]))"
     local prod_query="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\"}[${prom_window}])) / ${duration}"
     local kafka_lag_query='max_over_time(kafka_consumergroup_lag{topic="events"}['"${prom_window}"'])'
 

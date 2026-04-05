@@ -81,6 +81,16 @@
   changed_when: "'Successfully built' in probe_build.stdout or 'FINISHED' in probe_build.stdout"
   tags: [docker]
 
+# ── 3. Levantar cAdvisor para métricas de recursos ─────────────
+- name: "Iniciar cAdvisor para métricas de CPU/memoria"
+  shell: |
+    cd {{ repo_dest }}
+    docker compose -f docker/cadvisor.yml up -d 2>&1
+  become_user: ubuntu
+  register: cadvisor_up
+  changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"
+  tags: [docker, metrics]
+
 - name: "Nodo producer listo (esperando scripts de experimento)"
   debug:
     msg: >

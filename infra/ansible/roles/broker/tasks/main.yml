@@ -65,6 +65,16 @@
   changed_when: "'Started' in broker_up.stdout or 'Created' in broker_up.stdout"
   tags: [docker]
 
+# ── 2b. Levantar cAdvisor para métricas de recursos ─────────────
+- name: "Iniciar cAdvisor para métricas de CPU/memoria"
+  shell: |
+    cd {{ repo_dest }}
+    docker compose -f docker/cadvisor.yml up -d 2>&1
+  become_user: ubuntu
+  register: cadvisor_up
+  changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"
+  tags: [docker, metrics]
+
 # ── 3. Esperar healthcheck de Kafka ────────────────────────────
 - name: "Esperar que Kafka esté disponible (máx 90s)"
   shell: |
