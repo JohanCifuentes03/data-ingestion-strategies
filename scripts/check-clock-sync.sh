@@ -62,10 +62,10 @@ else
 fi
 
 NODES=(
-    "${CLOUD_VM_PRODUCER_IP:-}"
-    "${CLOUD_VM_BROKER_IP:-}"
-    "${CLOUD_VM_COMPUTE_IP:-}"
-    "${CLOUD_VM_SINK_IP:-}"
+    "${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    "${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+    "${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    "${CLOUD_VM_SINK_PUBLIC_IP:-}"
 )
 
 NODE_NAMES=(
