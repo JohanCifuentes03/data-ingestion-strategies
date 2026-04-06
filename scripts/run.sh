@@ -15,6 +15,15 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
+# Ensure all docker compose commands target the refactored stack.
+if [ -f "$ROOT_DIR/.env" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$ROOT_DIR/.env"
+    set +a
+fi
+export COMPOSE_FILE="$ROOT_DIR/infra/docker/compose/docker-compose.yml"
+
 RESULTS_BASE="$ROOT_DIR/results"
 PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
 PROBE_HEADER="event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id"

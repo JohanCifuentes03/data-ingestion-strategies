@@ -1,0 +1,36 @@
+# Build artifacts
+**/build/
+**/.gradle/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Results
+results/
+results-distributed/
+
+# Documentation
+docs/
+*.md
+
+# Environment
+.env
+.venv/
+venv/
+
+# Terraform state
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate*
+infra/terraform/*.tfvars
+
+# Ansible generated
+infra/ansible/inventory.ini

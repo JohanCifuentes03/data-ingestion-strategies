@@ -1,0 +1,94 @@
+# ══════════════════════════════════════════════════════════════════
+# docker/broker.yml — Message Broker (VM-2: node-broker)
+#
+# Servicios: zookeeper + kafka + kafka-exporter
+#
+# MODO DISTRIBUIDO (VM-2, IP: 10.0.1.20):
+#   source infra/terraform/outputs.env
+#   docker compose -f docker/base.yml -f docker/broker.yml up -d
+#
+# Variable crítica: KAFKA_ADVERTISED_LISTENERS debe contener la IP
+# privada de esta VM para que clientes externos (Spark en VM-3,
+# generator en VM-1) puedan conectarse al broker.
+#
+# En modo distribuido, Ansible configura automáticamente:
+#   KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://10.0.1.20:9092
+# ══════════════════════════════════════════════════════════════════
+
+include:
+  - path: ./base.yml
+
+services:
+  # ── ZooKeeper ─────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    restart: unless-stopped
+    container_name: tesis-zookeeper
+    networks:
+      - benchmark-net
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "*"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+
+  # ── Kafka Broker ───────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    restart: unless-stopped
+    container_name: tesis-kafka
+    networks:
+      - benchmark-net
+    depends_on:
+      zookeeper:
+        condition: service_started
+    environment:
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID:-1}
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      # CRÍTICO en modo distribuido: debe ser la IP pública o privada
+      # de esta VM (10.0.1.20). Ansible inyecta este valor en .env.
+      # En modo local, kafka:9092 funciona dentro de la red Docker.
+      KAFKA_ADVERTISED_LISTENERS: ${KAFKA_ADVERTISED_LISTENERS:-PLAINTEXT://${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}}
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-12}
+      KAFKA_DEFAULT_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Optimizaciones para alto throughput
+      KAFKA_LOG_RETENTION_HOURS: 4
+      KAFKA_LOG_SEGMENT_BYTES: 536870912  # 512 MB
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka Exporter (métricas → Prometheus) ─────────────────────
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    restart: unless-stopped
+    container_name: tesis-kafka-exporter
+    networks:
+      - benchmark-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - "--kafka.server=kafka:9092"
+      - "--web.listen-address=:9308"
+    ports:
+      - "9308:9308"

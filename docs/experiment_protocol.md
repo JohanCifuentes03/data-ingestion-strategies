@@ -1,384 +1,451 @@
-# Protocolo Experimental
+# Experiment Protocol
 
-Este documento describe el procedimiento paso a paso para ejecutar el banco de
-pruebas de la tesis. Cada corrida sigue un protocolo riguroso para garantizar
-**reproducibilidad** y **validez estadística**.
+## 1. Research Questions
 
----
+This benchmark investigates the following research questions:
 
-## 1. Prerrequisitos
+### RQ1: Latency Characteristics
+**How does ingestion strategy affect end-to-end latency under varying workload intensities?**
 
-- [ ] Docker Desktop con ≥ 8 GB de RAM asignados (recomendado: 12 GB para `extreme-load`).
-- [ ] Docker Compose v2 instalado.
-- [ ] Java 17+ (Gradle wrapper incluido).
-- [ ] Python 3.10+ con pip (para `export_metrics.py` y `analyze.py`).
-- [ ] WSL2 habilitado en Windows (para los scripts Bash).
-- [ ] Clonar el repositorio y copiar `.env.example` a `.env`.
+- **Hypothesis**: Stream processing (Flink) will exhibit the lowest latency (milliseconds), followed by micro-batch (seconds), and batch (minutes)
+- **Metrics**: p50, p90, p99, p99.9 latency
+- **Variables**: Strategy (batch/microbatch/streaming), Load (low/medium/high)
 
-## 2. Preparación (una sola vez)
+### RQ2: Throughput Scalability
+**How does throughput scale with increasing load for each strategy?**
 
+- **Hypothesis**: Batch processing will achieve the highest peak throughput, but micro-batch and streaming will maintain more consistent throughput under load
+- **Metrics**: Events per second (sink throughput), Kafka consumer lag
+- **Variables**: Strategy, Load intensity
+
+### RQ3: Resource Efficiency
+**What is the resource cost (CPU, memory) per event processed for each strategy?**
+
+- **Hypothesis**: Batch will have the best amortized resource efficiency, but streaming will have the most predictable resource usage
+- **Metrics**: CPU-seconds per 1K events, Memory-GB-seconds per 1K events
+- **Variables**: Strategy, Load
+
+### RQ4: Fault Recovery
+**How quickly do strategies recover from broker or compute node failures?**
+
+- **Hypothesis**: Streaming (Flink) will recover fastest due to fine-grained checkpointing, followed by micro-batch, then batch
+- **Metrics**: Recovery time (time to restore 85% of baseline throughput)
+- **Variables**: Strategy, Fault type (broker/compute)
+
+## 2. Experimental Design
+
+### 2.1 Workload Characteristics
+
+#### Event Schema
+```json
+{
+  "event_id": "UUID v4",
+  "produced_at": "unix timestamp (ms)",
+  "payload": "string (variable size)"
+}
+```
+
+#### Load Profiles
+
+| Profile | Event Rate | Payload Size | Schema | Duration |
+|---------|------------|--------------|--------|----------|
+| **Low** | 2,000 events/s | 512 bytes | IoT sensor | 60 min |
+| **Medium** | 10,000 events/s | 512 bytes | Financial tick | 60 min |
+| **High** | 50,000 events/s | 1024 bytes | Log stream | 60 min |
+
+**Rationale**: 
+- Low: Typical IoT deployment
+- Medium: High-frequency trading, monitoring systems
+- High: Stress test, log aggregation
+
+#### Warmup and Cool-down
+- **Warmup**: 10 minutes at target load (JVM warmup, cache warmup)
+- **Measurement**: 60 minutes at stable load
+- **Cool-down**: 5 minutes (flush remaining events)
+
+### 2.2 Metrics Collected
+
+#### Primary Metrics
+
+**1. End-to-End Latency**
+- **Definition**: `latency = visible_at - produced_at`
+- **Where**: `visible_at` set by PostgreSQL on INSERT (ensures consistency)
+- **Collection**: Availability probe polls PostgreSQL every 100ms
+- **Output**: CSV with per-event latency samples
+
+**2. Throughput**
+- **Sink Throughput**: Events written to PostgreSQL per second
+- **Producer Throughput**: Events sent to Kafka per second
+- **Collection**: Prometheus metrics, scraped every 15s
+
+**3. Resource Usage**
+- **CPU**: `container_cpu_usage_seconds_total` (cAdvisor)
+- **Memory**: `container_memory_rss` (cAdvisor)
+- **Network**: `container_network_transmit_bytes_total`, `container_network_receive_bytes_total`
+- **Collection**: Prometheus, aggregated per strategy container
+
+#### Secondary Metrics
+
+**4. Consumer Lag**
+- **Definition**: Kafka offset difference (committed vs. high watermark)
+- **Collection**: Kafka Exporter → Prometheus
+
+**5. Checkpoint Overhead** (Flink only)
+- **Duration**: Time to complete checkpoint
+- **Size**: Checkpoint state size in bytes
+- **Collection**: Flink metrics API
+
+**6. Fault Recovery Time**
+- **Definition**: Time from fault injection to throughput restoration (≥85% baseline)
+- **Collection**: Fault injection script + Prometheus query
+
+### 2.3 Experimental Conditions
+
+#### Hardware Specifications
+
+**Local Mode** (Docker Compose):
+- **Machine**: 16GB RAM, 8 CPU cores (Intel/AMD x86_64 or Apple M-series)
+- **OS**: Ubuntu 22.04 / macOS 13+ / Windows 11 WSL2
+- **Docker**: Version 20.10+, 12GB RAM allocated
+
+**Distributed Mode** (AWS EC2):
+- **Broker VM**: t3.medium (2 vCPU, 4GB RAM) - Kafka, ZooKeeper
+- **Compute VM**: t3.large (2 vCPU, 8GB RAM) - Spark, Flink
+- **Sink VM**: t3.medium (2 vCPU, 4GB RAM) - PostgreSQL, Prometheus
+- **Producer VM**: t3.small (2 vCPU, 2GB RAM) - Generator, Probe
+- **Region**: us-east-1 (or configurable)
+- **Network**: Default VPC, same availability zone
+
+#### Software Versions (Pinned)
+
+| Component | Version | Rationale |
+|-----------|---------|-----------|
+| Apache Spark | 3.5.0 | Latest stable with Structured Streaming improvements |
+| Apache Flink | 1.18.1 | Latest LTS with improved checkpointing |
+| Apache Kafka | 7.5.3 (CP) | Confluent Platform with metrics exporter |
+| PostgreSQL | 15 | Latest stable with performance improvements |
+| Python | 3.11 | Latest stable for analysis tools |
+| Java | 17 (OpenJDK) | LTS version, required by Spark 3.5+ |
+
+#### Configuration Parameters
+
+**Batch**:
+```properties
+spark.executor.memory=2g
+spark.executor.cores=2
+spark.dynamicAllocation.enabled=false
+```
+
+**Micro-batch**:
+```properties
+spark.sql.streaming.checkpointLocation=/opt/spark/checkpoints
+trigger.interval=5 seconds
+spark.sql.streaming.stateStore.maintenanceInterval=60s
+```
+
+**Streaming**:
+```properties
+parallelism.default=4
+state.checkpoints.dir=file:///opt/flink/checkpoints
+execution.checkpointing.interval=10s
+execution.checkpointing.mode=EXACTLY_ONCE
+```
+
+## 3. Procedure
+
+### 3.1 Setup Phase
+
+**Local Mode**:
 ```bash
-# 1. Compilar los JARs de los tres jobs
-./gradlew buildJobs          # Linux / macOS / WSL2
-.\gradlew.bat buildJobs      # Windows PowerShell
+# 1. Clone repository
+git clone <repo-url> && cd data-ingestion-strategies
 
-# 2. Construir imágenes Docker y levantar la infraestructura
-./scripts/manage.sh up
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with desired parameters
 
-# 3. Verificar que todos los servicios estén saludables
-./scripts/manage.sh status
+# 3. Build images
+make build
 
-# 4. Crear entorno virtual Python e instalar dependencias
-python -m venv analysis/.venv
-# En Windows:
-analysis\.venv\Scripts\pip install -r analysis\requirements.txt
-# En Linux/macOS:
-analysis/.venv/bin/pip install -r analysis/requirements.txt
+# 4. Start infrastructure
+make up
 ```
 
-## 3. Protocolo por corrida
-
-Cada corrida experimental consta de 5 fases:
-
-```mermaid
-graph LR
-    A[CLEAN] --> B[WARMUP<br/>30 s]
-    B --> C[RUN<br/>5 min default]
-    C --> D[COOLDOWN<br/>30 s]
-    D --> E[EXPORT<br/>CSV]
-```
-
-### 3.1 CLEAN
-- Borrar el tópico `events` de Kafka y recrearlo (12 particiones).
-- Truncar la tabla `events` en PostgreSQL.
-- Limpiar checkpoints de Spark.
-- Resetear el CSV del probe a solo la cabecera.
-- **Script:** `./scripts/manage.sh clean`
-
-### 3.2 WARMUP (30 segundos)
-- El generador comienza a producir eventos; los primeros 30 s
-  se marcan como "warmup" (`generator_warmup_active = 1`).
-- Propósito: estabilizar la JVM (JIT compiler), llenar caches L1/L2,
-  inicializar conexiones JDBC y dejar que el consumer lag alcance estado estacionario.
-- **El script `analyze.py` filtra estos 30 s automáticamente** (parámetro `--warmup-ms 30000`)
-  de todos los runs de estrategias no-batch (streaming y microbatch).
-- Para Batch, el warmup está estructuralmente incorporado en la fase de acumulación.
-- **Configuración:** `WARMUP_SECONDS=30` (por defecto en `experiment.sh`).
-
-### 3.3 RUN (duración configurable, default 5 min)
-- Producción sostenida a la tasa definida por el escenario.
-- El generador usa múltiples threads (1 por cada 20k ev/s) para
-  mantener tasas altas de forma sostenida.
-- El probe registra latencias en `results/latency_samples.csv`.
-- **Configuración:** `RUN_DURATION_SECONDS=300` (default) o `--duration` en `experiment.sh`.
-
-### 3.4 COOLDOWN (30 segundos)
-- Esperar a que los buffers se drenen (Flink JDBC Sink, Kafka producer queue).
-- No se producen nuevos eventos.
-- **30 s garantiza un checkpoint completo de Flink** (intervalo de checkpoint = 10 s).
-
-### 3.5 EXPORT
-- Copiar `latency_samples.csv` al directorio de la corrida (`results/<strategy>/<scenario>/<run_id>/`).
-
-
-## 4. Ejecución manual (corrida individual)
-
+**Distributed Mode**:
 ```bash
-# Batch
-./scripts/run.sh batch low-load run_1
-
-# Micro-batch (trigger 5 segundos)
-./scripts/run.sh microbatch medium-load run_1 "5 seconds"
-
-# Streaming
-./scripts/run.sh streaming high-load run_1
-
-# Variables de entorno opcionales
-RUN_DURATION_SECONDS=600 ./scripts/run.sh batch high-load run_1
-FLINK_DETACHED=true ./scripts/run.sh streaming burst run_1
-```
-
-## 5. Ejecución automatizada (experimento completo)
-
-```bash
-# Todas las estrategias, todos los escenarios estándar, 5 repeticiones
-./scripts/experiment.sh
-
-# Experimento rápido (1 rep, 3 min por corrida):
-./scripts/experiment.sh --quick
-
-# Solo streaming, escenarios extremos, 3 repeticiones
-./scripts/experiment.sh --strategies streaming --scenarios "high-load extreme-load" --reps 3
-
-# Todas las estrategias, trigger de 10s para micro-batch, ventana de export 10m
-./scripts/experiment.sh --trigger "10 seconds" --window 10m
-
-# Override de schema para todos los runs
-./scripts/experiment.sh --schema financial_tick
-
-# Especificar warmup y cooldown explícitamente
-./scripts/experiment.sh --warmup 30 --cooldown 30
-
-# Inyectar fallos después de los runs estándar (mide fault recovery time)
-./scripts/experiment.sh --fault-inject
-
-# Medir eficiencia de escalado horizontal (1→2→3 Spark workers)
-./scripts/experiment.sh --scaling-test
-
-# Experimento completo con fault injection y scaling test
-./scripts/experiment.sh --fault-inject --scaling-test
-```
-
-## 6. Matriz experimental estándar (tesis)
-
-| Estrategia | Escenarios | Repeticiones | Total corridas |
-|-----------|-----------|-------------|----------------|
-| Batch | low, medium, high, burst | 5 | 20 |
-| Micro-batch | low, medium, high, burst | 5 | 20 |
-| Streaming | low, medium, high, burst | 5 | 20 |
-| **Subtotal** | | | **60** |
-| Batch | extreme-load, mixed-payload | 3 | 6 |
-| Micro-batch | extreme-load, mixed-payload | 3 | 6 |
-| Streaming | extreme-load, mixed-payload | 3 | 6 |
-| **Total completo** | | | **78** |
-
-### Variables controladas
-
-| Variable | Valor fijo | Justificación |
-|----------|-----------|---------------|
-| Particiones Kafka | 12 | Soporte de paralelismo hasta extreme-load |
-| Factor de replicación | 1 | Entorno single-node; elimina overhead de réplica |
-| Payload base | 512 B | Representativo de eventos IoT/telemetría |
-| Sink | PostgreSQL 15 | Único sink para las 3 estrategias (fair comparison) |
-| Workers Spark | 1 (4 cores, 2 GB) | Control de recursos; consistente con Flink |
-| TaskSlots Flink | 4 | Equivalente en paralelismo a Spark |
-| Checkpointing Flink | 10 s, exactly-once | Configuración de producción realista |
-| Trigger micro-batch | 5 s (default) | Balance latencia/eficiencia documentado en literatura |
-| Warmup excluido | 30 s por run | Filtrado automático en `analyze.py` (post-procesamiento) |
-| Cooldown | 30 s | Margen sobre intervalo de checkpoint Flink (10 s) |
-
-## 7. Fase de Análisis
-
-Una vez completadas las corridas, se consolidan y generan las gráficas estadísticas.
-
-### 7.1 Generación de gráficas y estadísticas
-
-```bash
-# Windows
-analysis\.venv\Scripts\python.exe analysis\analyze.py
-
-# Linux / macOS / WSL2
-analysis/.venv/bin/python analysis/analyze.py
-
-# Parámetros opcionales
-analysis/.venv/bin/python analysis/analyze.py \
-    --results-dir ./results \
-    --output ./results/figures
-```
-
-### 7.2 Gráficas generadas (`results/figures/`) — 9 charts
-
-| # | Archivo | Descripción | Fuente |
-|---|---------|-------------|--------|
-| 01 | `01_boxplot_latencia_e2e.png` | Boxplot anotado de Latencia E2E con p50/p95/p99/IQR/CV% | `latency_samples.csv` |
-| 02 | `02_throughput_dual.png` | Throughput E2E vs escritura al Sink (barras duales, ev/s) | `latency_samples.csv` + Prometheus |
-| 03 | `03_fault_recovery.png` | Tiempo de recuperación ante fallos (barras horizontales, media ± std) | `fault_recovery.csv` |
-| 04 | `04_scaling_efficiency.png` | Eficiencia de escalado 1→2→3 workers (% de ideal) | runs `scaling_*w` |
-| 05 | `05_resource_utilization.png` | Scatter CPU cores vs MB/evento por estrategia × run | `prometheus_snapshot.csv` |
-| 06 | `06_kafka_lag.png` | Kafka Consumer Lag con umbral crítico de 10.000 mensajes | `prometheus_snapshot.csv` |
-| 07 | `07_tabla_resumen.csv/.png` | Tabla completa: p50/p95/p99/IQR/CV%/Min/Max | `latency_samples.csv` |
-| 08 | `08_heatmap_escalabilidad.png` | Heatmap latencia p95: degradación por carga y estrategia | `latency_samples.csv` |
-| 09 | `09_ranking_table.csv/.png` | Ranking objetivo (pesos: p95=35%, tput=30%, recovery=20%, CV=15%) | todos |
-
-### 7.3 Protocolo de inyección de fallos (Fault Recovery)
-
-**Propósito:** Medir cuánto tarda cada estrategia en recuperar el 85% del throughput base tras un fallo de contenedor.
-
-**Procedimiento:**
-
-```bash
-# Ejecutar para una estrategia y escenario específico
-./scripts/fault_inject.sh streaming medium-load
-
-# O automáticamente para todas las estrategias via experiment.sh:
-./scripts/experiment.sh --fault-inject --fault-scenario medium-load
-```
-
-**Pasos internos de `fault_inject.sh`:**
-1. Medir throughput base (polling de 30 s) desde el probe (`/results/latency_samples.csv`).
-2. Matar el contenedor target (`docker stop tesis-ingestion-<strategy>-*`).
-3. Esperar recuperación espontánea (Docker restart policy: `unless-stopped`).
-4. Medir tiempo hasta que throughput ≥ 85% del base (timeout: 120 s).
-5. Guardar resultado en `results/fault_recovery.csv`:
-
-```csv
-strategy,scenario,run_id,recovery_time_s,status
-streaming,medium-load,fault_1,15.2,recovered
-```
-
-**Valores de estado posibles:** `recovered` | `timeout` | `data_loss`.
-
-### 7.4 Protocolo de eficiencia de escalado (Scaling Efficiency)
-
-**Propósito:** Medir si el throughput aumenta linealmente al añadir workers Spark.
-
-**Procedimiento:**
-
-```bash
-# Ejecutar scaling test (requiere perfil Docker Compose "scaling"):
-./scripts/experiment.sh --scaling-test
-```
-
-**Pasos internos:**
-1. Desactivar `spark-worker-2` y `spark-worker-3`.
-2. Para N = 1, 2, 3 workers:
-   - Activar los workers adicionales con `docker compose --profile scaling up -d spark-worker-N`.
-   - Esperar 10 s de registro en Spark master.
-   - Ejecutar run de 2 min en `low-load` con `run_id = scaling_Nw`.
-   - Copiar `latency_samples.csv` a `results/<strategy>/low-load/scaling_Nw/`.
-3. `analyze.py` calcula: `Eficiencia(N) = (tput_N / tput_1) / N × 100%`.
-
-Los workers adicionales se definen con el perfil Docker Compose `scaling` en `docker-compose.yml` y no se activan en corridas normales.
-
-### 7.5 Recolección de métricas Prometheus
-
-Al finalizar cada run, `run.sh` llama automáticamente a `collect_prometheus_snapshot()` que:
-- Consulta `localhost:9090/api/v1/query` con las siguientes métricas PromQL:
-  - `sum(rate(container_cpu_usage_seconds_total{name=~"tesis-ingestion-.*"}[2m]))` → CPU total
-  - `sum(container_memory_rss{name=~"tesis-ingestion-.*"})` → Memoria RSS
-  - `rate(kafka_produced_messages_total[2m])` → Throughput producido
-  - `rate(sink_rows_written_total[2m])` → Throughput sink
-  - `sum(kafka_consumergroup_lag{topic="events"})` → Consumer lag
-  - Histograma de latencia del probe (si expuesto)
-- Guarda el resultado en `results/<strategy>/<scenario>/<run_id>/prometheus_snapshot.csv`.
-- Si Prometheus no está disponible, genera un warning y omite el snapshot sin abortar el run.
-
-**Verificar que Prometheus está activo:**
-```bash
-./scripts/manage.sh status
-# Debe mostrar: ✅ Prometheus:9090
-```
-
-### 7.6 Interpretación de la tabla de significancia
-
-- **H (KW)**: estadístico de Kruskal-Wallis. Valores altos indican diferencias mayores.
-- **p-valor**: < 0.05 indica diferencias estadísticamente significativas entre las 3 estrategias.
-- **p-valor (Bonf.)**: p-valor ajustado por corrección Bonferroni para comparaciones pairwise.
-- Las diferencias encontradas tienen alta significancia (p → 0) dada la magnitud de las muestras.
-
-### 7.7 Filtro de warmup (metodología)
-
-El script excluye automáticamente los primeros **30 segundos** de cada run para estrategias
-streaming y microbatch, basado en el timestamp `produced_at` de cada evento:
-
-- **Streaming / Microbatch:** Se filtran eventos con `produced_at < run_start + 30 000 ms`.
-  Esto elimina latencias anómalas durante la inicialización JVM (JIT compiler).
-- **Batch:** Exento del filtro — su warmup es estructural (toda la fase de acumulación
-  ocurre antes de que el job de Spark ejecute, por lo que los datos ya reflejan
-  el estado estacionario del sistema cuando ingresan a PostgreSQL).
-
----
-
-## 8. Modo distribuido (AWS)
-
-El protocolo experimental puede ejecutarse en modo distribuido donde cada capa del
-stack reside en una instancia dedicada EC2 de AWS. Los **procedimientos
-de medición y análisis son idénticos** al modo local; solo cambian el entorno de
-despliegue y algunos comandos de orquestación.
-
-### 8.1 Prerrequisitos adicionales (modo distribuido)
-
-- [ ] Terraform ≥ 1.5 instalado en la máquina local.
-- [ ] Ansible ≥ 2.14 instalado en la máquina local.
-- [ ] Credenciales AWS programáticas configuradas en `terraform.tfvars`.
-- [ ] Par de claves SSH en `~/.ssh/oci_rsa` y `~/.ssh/oci_rsa.pub`.
-- [ ] `infra/terraform/terraform.tfvars` completado con OCIDs reales.
-  Ver instrucciones en `infra/terraform/terraform.tfvars.example`.
-
-```bash
-# Generar SSH key si no existe
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/oci_rsa -N ""
-cat ~/.ssh/oci_rsa.pub  # copiar en terraform.tfvars → ssh_public_key
-```
-
-### 8.2 Preparación (una sola vez)
-
-```bash
-# 1. Crear infraestructura AWS (~3 min)
+# 1. Provision AWS infrastructure
 cd infra/terraform
-terraform init && terraform apply
-# Genera: infra/ansible/inventory.ini y infra/terraform/outputs.env
+terraform init
+terraform apply
 
-# 2. Provisionar las 4 VMs: Docker, chrony, git clone, compilación (~10 min)
+# 2. Deploy services via Ansible
+source outputs.env
 cd ../ansible
-ansible-playbook -i inventory.ini site.yml
-
-# 3. Pre-flight check completo (SSH + servicios + NTP)
-bash scripts/up.sh
+ansible-playbook -i inventory.ini playbook.yml
 ```
 
-### 8.3 Diferencias con el modo local
+### 3.2 Execution Phase
 
-| Aspecto | Modo local | Modo distribuido |
-|---|---|---|
-| Infraestructura | 1 máquina, Docker Compose | 4 instancias EC2, cada una con su compose file |
-| Compose file | `docker-compose.yml` (raíz) | `docker/broker.yml`, `docker/compute.yml`, etc. |
-| `KAFKA_ADVERTISED_LISTENERS` | `PLAINTEXT://kafka:9092` | `PLAINTEXT://10.0.1.20:9092` |
-| `POSTGRES_HOST` | `postgres` (nombre Docker) | `10.0.1.40` (IP privada VM-4) |
-| Clock skew | N/A (mismo host) | Verificado con `check-clock-sync.sh` antes de cada experimento |
-| Resultados | `./results/` local | `./results-distributed/` (copiados via scp desde VM-4) |
-| Análisis | `analyze.py` | `analyze.py --results-dir results-distributed/` |
+For each combination of (strategy, load):
 
-### 8.4 Ejecución del experimento
+**1. Pre-experiment Cleanup**
+```bash
+# Truncate PostgreSQL events table
+docker exec tesis-postgres psql -U benchmark -c "TRUNCATE TABLE events;"
+
+# Reset Kafka topic
+docker exec tesis-kafka kafka-topics --delete --topic events
+docker exec tesis-kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1
+
+# Clear probe results
+rm -f results/latency_samples.csv
+```
+
+**2. Start Services**
+```bash
+# Ensure all services are healthy
+docker ps --filter "health=healthy"
+
+# Start probe (background)
+docker compose up -d probe
+
+# Start generator with warmup
+docker compose up -d generator
+```
+
+**3. Warmup Period** (10 minutes)
+- Generator runs at target load
+- Processing job starts consuming
+- Wait for metrics to stabilize
+
+**4. Measurement Period** (60 minutes)
+- Continue at target load
+- Probe records latency samples
+- Prometheus scrapes metrics every 15s
+
+**5. Cool-down Period** (5 minutes)
+- Stop generator
+- Allow jobs to drain Kafka queue
+- Ensure all events written to PostgreSQL
+
+**6. Data Collection**
+```bash
+# Export latency samples
+docker cp tesis-probe:/results/latency_samples.csv \
+    results/<strategy>/<load>/<run_id>/
+
+# Export Prometheus metrics
+curl -X POST http://localhost:9090/api/v1/admin/tsdb/snapshot
+# Copy snapshot to results directory
+
+# Export resource metrics
+docker stats --no-stream > results/<strategy>/<load>/<run_id>/resource_usage.txt
+```
+
+### 3.3 Fault Injection (Optional)
+
+For RQ4, inject controlled failures:
 
 ```bash
-# Pre-flight: verifica IPs, SSH, servicios y NTP
-bash scripts/up.sh
+# During measurement period (after 30 min):
+./scripts/fault_inject.sh <strategy> <load> run_fault_1
 
-# Smoke test (~5 min)
-MODE=distributed bash scripts/experiment.sh --smoke
-
-# Experimento rápido (3 × 2 escenarios × 1 rep, ~30 min)
-MODE=distributed bash scripts/experiment.sh --quick
-
-# Experimento estándar completo (~2-3 horas)
-MODE=distributed bash scripts/experiment.sh
-
-# Con fault injection y scaling test
-MODE=distributed bash scripts/experiment.sh --fault-inject --scaling-test
+# Script will:
+# 1. Record baseline throughput
+# 2. Kill target container (e.g., spark-master)
+# 3. Wait for auto-restart
+# 4. Measure time to restore 85% throughput
 ```
 
-### 8.5 Recolección y análisis
+### 3.4 Cleanup Phase
 
+**Local Mode**:
 ```bash
-# 1. Copiar resultados desde VM-4 al directorio local
-bash scripts/collect-results.sh
-# Destino: ./results-distributed/
-
-# 2. Análisis estadístico: las 9 gráficas + Kruskal-Wallis + Bonferroni
-analysis/.venv/bin/python analysis/analyze.py \
-    --results-dir results-distributed/
-
-# 3. DESTRUIR las VMs para no gastar saldo AWS
-cd infra/terraform && terraform destroy
+make down
 ```
 
-### 8.6 Protocolo de sincronización NTP
+**Distributed Mode**:
+```bash
+# Collect remote results
+./scripts/collect-results.sh
 
-La validez de la métrica `latencia = visible_at − produced_at` depende de que
-VM-1 (`produced_at`) y VM-4 (`visible_at`) tengan relojes sincronizados.
+# Destroy AWS infrastructure
+cd infra/terraform
+terraform destroy -auto-approve
+```
 
-**Mecanismo:**
-1. Ansible configura chrony con `server 169.254.169.254 iburst prefer` en todos los nodos
-   (Amazon Time Sync, latencia ~0.1 ms).
-2. `scripts/up.sh` ejecuta `check-clock-sync.sh` como parte del pre-flight.
-3. `experiment.sh` ejecuta `check-clock-sync.sh` antes del primer run en modo distribuido.
-4. Si el offset de cualquier nodo supera **5 ms**, el experimento se aborta automáticamente.
+## 4. Data Analysis
 
-**Interpretación de resultados:** Los offsets < 5 ms son estadísticamente despreciables:
-- Batch: p50 en el orden de segundos (ratio señal/ruido > 1000×)
-- Micro-batch: p50 típicamente en decenas de ms (ratio > 10×)
-- Streaming: p50 en 20–60 ms (ratio > 4×)
+### 4.1 Preprocessing
 
-Los logs de sincronización se guardan en `results/clock_offsets_YYYYMMDD_HHmmSS.csv`
-como evidencia metodológica para la documentación de la tesis.
+**Outlier Detection**: 
+- Method: Interquartile Range (IQR)
+- Rule: Remove latency samples < Q1 - 1.5×IQR or > Q3 + 1.5×IQR
+- Justification: Network spikes, GC pauses, non-representative
+- **Threshold**: Remove if >5% of samples are outliers (indicates systematic issue)
+
+**Missing Data**: 
+- Probe downtime: Discard entire run
+- Prometheus gaps: Linear interpolation if gap <60s, otherwise discard
+
+**Timestamp Alignment**:
+- All timestamps converted to Unix epoch milliseconds
+- Timezone: UTC
+- Clock skew: Verified via NTP sync (<10ms drift)
+
+### 4.2 Statistical Methods
+
+#### Latency Analysis
+
+**Percentiles**: 
+- Calculate p50, p90, p95, p99, p99.9 using NumPy's `percentile()` function
+- **Justification**: Non-parametric, no distribution assumptions
+
+**Comparison**: 
+- **Test**: Mann-Whitney U test (non-parametric)
+- **Hypothesis**: H0: Distribution of latency for Strategy A = Strategy B
+- **Significance**: α = 0.05
+- **Multiple Comparisons**: Bonferroni correction (α' = α / n_comparisons)
+
+**Effect Size**:
+- Cohen's d for quantifying difference magnitude
+- Interpretation: d < 0.5 (small), 0.5-0.8 (medium), >0.8 (large)
+
+#### Throughput Analysis
+
+**Time Series**:
+- Prometheus metrics aggregated to 1-minute windows
+- Moving average (window=5 min) to smooth noise
+
+**Scalability**:
+- Linear regression: throughput ~ load intensity
+- R² to assess linearity
+- Residual analysis to check assumptions
+
+#### Resource Efficiency
+
+**Normalized Cost**:
+```
+cost_per_1k_events = (CPU_seconds × CPU_cost + Memory_GB_seconds × Memory_cost) / (events_processed / 1000)
+```
+
+Where:
+- CPU_cost: $0.0416 per vCPU-hour (AWS t3.medium on-demand)
+- Memory_cost: $0.0052 per GB-hour
+
+#### Fault Recovery
+
+**Recovery Time**:
+- Baseline: Average throughput over 10 min before fault
+- Recovery: First 5-minute window where throughput ≥ 85% baseline
+- **Metric**: Time from fault injection to recovery start
+
+### 4.3 Visualization
+
+All charts follow publication-ready standards:
+- **Font**: 11pt Times New Roman (or Computer Modern for LaTeX)
+- **DPI**: 300 for PDF export
+- **Colors**: Colorblind-friendly palette (seaborn "colorblind")
+- **Legends**: Outside plot area, no frame
+- **Grid**: Light gray, alpha=0.3
+- **Axis Labels**: Include units (e.g., "Latency (ms)", "Throughput (events/s)")
+
+**Chart Types**:
+1. **Latency Heatmap**: Strategy × Load, color = p99 latency
+2. **Latency CDF**: Cumulative distribution for each strategy
+3. **Percentile Comparison**: Bar chart (p50, p90, p99) grouped by strategy
+4. **Throughput vs. Time**: Line chart, moving average
+5. **Throughput vs. Latency Scatter**: Trade-off visualization
+6. **Resource Usage**: Stacked area chart (CPU, memory)
+7. **Cost Efficiency Matrix**: Strategy × Load, color = $/1K events
+8. **Fault Recovery**: Timeline with annotations
+9. **Load Profile**: Event rate over time
+
+## 5. Reproducibility Checklist
+
+See [experiment-checklist.md](reproducibility/experiment-checklist.md) for complete checklist.
+
+**Key Items**:
+- [ ] Environment specifications documented
+- [ ] Software versions pinned
+- [ ] Configuration files version-controlled
+- [ ] Random seed set (if applicable)
+- [ ] Clock synchronization verified (NTP)
+- [ ] Disk space sufficient (>50GB for results)
+- [ ] Network latency measured (distributed mode)
+
+## 6. Threats to Validity
+
+### 6.1 Internal Validity
+
+| Threat | Mitigation |
+|--------|------------|
+| **JVM Warmup** | 10-minute warmup period, discard initial metrics |
+| **GC Pauses** | Measured as part of real-world performance, not controlled |
+| **Resource Contention** | Docker resource limits, cgroup isolation |
+| **Network Variability** | Multiple runs, report mean ± std dev |
+| **Disk I/O** | SSD required, measure I/O wait time |
+
+### 6.2 External Validity
+
+**Generalizability Limitations**:
+- Synthetic workload (not production traces)
+- Simple schema (no nested JSON, complex types)
+- Single-region deployment (no geo-distribution)
+- No security overhead (authentication, encryption)
+
+**Applicability**:
+- ✅ Applies to: Simple event ingestion, OLTP workloads, <100K events/s
+- ⚠️ Limited applicability to: Complex stateful processing, OLAP queries, extreme scale
+
+### 6.3 Construct Validity
+
+**Metric Validity**:
+- **Latency**: ✅ Directly measures data availability (strong construct validity)
+- **Throughput**: ✅ Standard industry metric
+- **Cost**: ⚠️ AWS pricing only, may not reflect other cloud providers
+
+**Confounds**:
+- PostgreSQL write latency affects all strategies equally (fair comparison)
+- Docker overhead consistent across strategies
+
+### 6.4 Conclusion Validity
+
+**Statistical Power**:
+- Sample size: >10K latency samples per run (adequate for percentile estimation)
+- Replications: 3 runs per (strategy, load) combination
+- Significance tests: Bonferroni-corrected for multiple comparisons
+
+**Assumptions**:
+- Mann-Whitney U test: No distribution assumption required (non-parametric)
+- Linear regression: Residuals checked for normality, heteroscedasticity
+
+## 7. Ethical Considerations
+
+- **Cost**: AWS usage capped at $120 to avoid excessive spending
+- **Environmental Impact**: Minimize experiment duration, tear down resources immediately
+- **Open Science**: Results, raw data, and code published for verification
+
+## 8. References
+
+### Methodology
+
+1. Wohlin, C., et al. (2012). *Experimentation in Software Engineering*. Springer.
+2. Juristo, N., & Moreno, A. M. (2001). *Basics of Software Engineering Experimentation*. Springer.
+3. Basili, V. R., et al. (1986). "The Goal Question Metric Approach." *Encyclopedia of Software Engineering*.
+
+### Statistical Methods
+
+4. Field, A. (2013). *Discovering Statistics Using IBM SPSS Statistics*. SAGE Publications.
+5. Wilcox, R. R. (2016). *Introduction to Robust Estimation and Hypothesis Testing*. Academic Press.
+
+### Data Engineering
+
+6. Kleppmann, M. (2017). *Designing Data-Intensive Applications*. O'Reilly Media.
+7. Narkhede, N., et al. (2017). *Kafka: The Definitive Guide*. O'Reilly Media.
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2026-04-05  
+**Approved by**: [Thesis Advisor Name]

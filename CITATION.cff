@@ -1,0 +1,59 @@
+# This CITATION.cff file was generated for the thesis project.
+# See https://citation-file-format.github.io/ for the specification.
+
+cff-version: 1.2.0
+title: "Comparative Analysis of Data Ingestion Strategies: Batch, Micro-batch, and Streaming Processing"
+message: "If you use this software or benchmark results, please cite it as below."
+type: software
+authors:
+  - family-names: "Cifuentes"
+    given-names: "Johan"
+    affiliation: "Universidad"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"  # Add your ORCID if available
+repository-code: "https://github.com/username/data-ingestion-strategies"
+url: "https://github.com/username/data-ingestion-strategies"
+abstract: >-
+  A reproducible benchmark framework for comparing data ingestion strategies
+  (Batch, Micro-batch, and Streaming) using Apache Spark and Apache Flink.
+  This project measures end-to-end latency, throughput, resource utilization,
+  and fault recovery time across various load scenarios.
+keywords:
+  - data-ingestion
+  - apache-spark
+  - apache-flink
+  - streaming
+  - batch-processing
+  - micro-batch
+  - benchmark
+  - distributed-systems
+  - thesis
+license: MIT
+version: 1.0.0
+date-released: 2026-04-05
+
+# Preferred citation for academic papers
+preferred-citation:
+  type: thesis
+  authors:
+    - family-names: "Cifuentes"
+      given-names: "Johan"
+  title: "Comparative Analysis of Data Ingestion Strategies for Real-Time Data Processing"
+  year: 2026
+  institution:
+    name: "Universidad"
+  # thesis-type: "Master's thesis"  # Uncomment and adjust as needed
+
+# References to related work
+references:
+  - type: software
+    title: "Apache Spark"
+    version: "3.5.8"
+    url: "https://spark.apache.org/"
+  - type: software
+    title: "Apache Flink"
+    version: "1.18.1"
+    url: "https://flink.apache.org/"
+  - type: software
+    title: "Apache Kafka"
+    version: "7.5.3"
+    url: "https://kafka.apache.org/"

@@ -4,3 +4,9 @@ include("common")
 include("batch")
 include("microbatch")
 include("streaming")
+
+// Update project directories to new structure
+project(":common").projectDir = file("src/jobs/common")
+project(":batch").projectDir = file("src/jobs/batch")
+project(":microbatch").projectDir = file("src/jobs/microbatch")
+project(":streaming").projectDir = file("src/jobs/streaming")

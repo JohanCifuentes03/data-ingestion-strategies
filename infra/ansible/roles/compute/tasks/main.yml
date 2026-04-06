@@ -1,31 +1,25 @@
 ---
-# ══════════════════════════════════════════════════════════════════
-# infra/ansible/roles/compute/tasks/main.yml — Nodo compute (VM-3)
-#
-# Responsabilidades:
-#   1. Instalar Java 17 (necesario para compilar los jobs)
-#   2. Crear .env apuntando al broker
-#   3. Compilar los JARs con Gradle wrapper
-#   4. Levantar docker/compute.yml (Spark + Flink)
-# ══════════════════════════════════════════════════════════════════
-
-# ── 1. Instalar Java 17 (requerido por Gradle) ──────────────────
 - name: "Instalar Java 17 (OpenJDK)"
   apt:
     name: openjdk-17-jdk-headless
     state: present
   tags: [packages]
 
+- name: "Detectar JAVA_HOME dinamicamente"
+  shell: "readlink -f $(which java) | sed 's|/bin/java$||'"
+  register: java_home_detect
+  changed_when: false
+  tags: [packages]
+
 - name: "Configurar JAVA_HOME en el entorno del sistema"
   copy:
     dest: /etc/profile.d/java.sh
     content: |
-      export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
+      export JAVA_HOME={{ java_home_detect.stdout }}
       export PATH=$JAVA_HOME/bin:$PATH
     mode: '0644'
   tags: [packages]
 
-# ── 2. Crear .env con variables del nodo compute ────────────────
 - name: "Crear .env apuntando al broker y sink correctos"
   copy:
     dest: "{{ repo_dest }}/.env"
@@ -34,41 +28,32 @@
     mode: '0600'
     content: |
       COMPOSE_PROJECT_NAME=tesis-ingestion
-      # ── PostgreSQL ──────────────────────────────────────────────
       POSTGRES_USER={{ postgres_user }}
       POSTGRES_PASSWORD={{ postgres_password }}
       POSTGRES_DB={{ postgres_db }}
       POSTGRES_PORT={{ postgres_port }}
-      # ── Kafka ───────────────────────────────────────────────────
       KAFKA_BROKER_ID={{ kafka_broker_id }}
       KAFKA_PORT=9092
       KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{{ vm_broker_ip }}:9092
       KAFKA_BOOTSTRAP_SERVERS={{ vm_broker_ip }}:9092
       KAFKA_NUM_PARTITIONS={{ kafka_num_partitions }}
       KAFKA_REPLICATION_FACTOR={{ kafka_replication_factor }}
-      # ── Spark: el master se identifica por hostname de esta VM ──
       SPARK_MASTER_HOST=spark-master
       SPARK_MASTER_PORT={{ spark_master_port }}
       SPARK_MASTER_WEBUI_PORT={{ spark_master_webui_port }}
       SPARK_WORKER_CORES={{ spark_worker_cores }}
       SPARK_WORKER_MEMORY={{ spark_worker_memory }}
-      # URL que usan run.sh y los scripts para spark-submit remoto
       SPARK_MASTER_URL=spark://{{ vm_compute_ip }}:{{ spark_master_port }}
-      # ── Flink ───────────────────────────────────────────────────
       FLINK_JOBMANAGER_HOST=flink-jobmanager
       FLINK_PARALLELISM={{ flink_parallelism }}
       FLINK_TASKMANAGER_MEMORY={{ flink_taskmanager_memory }}
-      # URL que usan run.sh para submit remoto de Flink
       FLINK_REST_URL=http://{{ vm_compute_ip }}:8081
-      # ── Generator ───────────────────────────────────────────────
       GENERATOR_EVENT_RATE={{ generator_event_rate }}
       GENERATOR_PAYLOAD_BYTES={{ generator_payload_bytes }}
       GENERATOR_SCENARIO={{ generator_scenario }}
       GENERATOR_RUN_DURATION_SECONDS={{ generator_run_duration }}
       GENERATOR_WARMUP_SECONDS={{ generator_warmup }}
-      # ── Probe ────────────────────────────────────────────────────
       PROBE_POLL_INTERVAL_MS={{ probe_poll_interval_ms }}
-      # ── Modo distribuido ─────────────────────────────────────────
       MODE=distributed
       OCI_VM_PRODUCER_IP={{ vm_producers_ip }}
       OCI_VM_BROKER_IP={{ vm_broker_ip }}
@@ -76,7 +61,6 @@
       OCI_VM_SINK_IP={{ vm_sink_ip }}
   tags: [config]
 
-# ── 3. Compilar jobs Java con Gradle wrapper ────────────────────
 - name: "Hacer gradlew ejecutable"
   file:
     path: "{{ repo_dest }}/gradlew"
@@ -86,24 +70,23 @@
 - name: "Compilar jobs Java (gradlew build -x test)"
   shell: |
     cd {{ repo_dest }}
-    export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
+    export JAVA_HOME={{ java_home_detect.stdout }}
     ./gradlew build -x test 2>&1
   become_user: ubuntu
   register: gradle_build
   changed_when: "'BUILD SUCCESSFUL' in gradle_build.stdout"
   failed_when: "'BUILD FAILED' in gradle_build.stdout"
-  timeout: 600  # 10 minutos — primera compilación descarga dependencias
+  timeout: 600
   environment:
-    JAVA_HOME: /usr/lib/jvm/java-17-openjdk-arm64
+    JAVA_HOME: "{{ java_home_detect.stdout }}"
   tags: [build]
 
-- name: "Compilación exitosa"
+- name: "Compilacion exitosa"
   debug:
-    msg: "JARs compilados correctamente en batch/build/libs/, microbatch/build/libs/, streaming/build/libs/"
+    msg: "JARs compilados en batch/build/libs/, microbatch/build/libs/, streaming/build/libs/"
   when: "'BUILD SUCCESSFUL' in gradle_build.stdout"
   tags: [build]
 
-# ── 4. Levantar el stack de cómputo ────────────────────────────
 - name: "Iniciar Spark y Flink"
   shell: |
     cd {{ repo_dest }}
@@ -113,8 +96,7 @@
   changed_when: "'Started' in compute_up.stdout or 'Created' in compute_up.stdout"
   tags: [docker]
 
-# ── 4b. Levantar cAdvisor para métricas de recursos ─────────────
-- name: "Iniciar cAdvisor para métricas de CPU/memoria"
+- name: "Iniciar cAdvisor"
   shell: |
     cd {{ repo_dest }}
     docker compose -f docker/cadvisor.yml up -d 2>&1
@@ -123,7 +105,7 @@
   changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"
   tags: [docker, metrics]
 
-- name: "Esperar que Spark Master esté disponible (máx 60s)"
+- name: "Esperar que Spark Master este disponible (max 60s)"
   uri:
     url: "http://localhost:{{ spark_master_webui_port }}"
     status_code: 200

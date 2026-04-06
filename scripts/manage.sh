@@ -43,6 +43,9 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 LIB_DIR="$ROOT_DIR/lib"
 cd "$ROOT_DIR"
 
+# Docker Compose command with proper paths
+DC="docker compose --env-file .env -f infra/docker/compose/docker-compose.yml"
+
 # Colores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -90,24 +93,21 @@ cmd_up() {
         fi
     fi
 
-    # Copiar JARs a ubicaciones esperadas
-    mkdir -p "$ROOT_DIR/batch/build/libs" "$ROOT_DIR/microbatch/build/libs" "$ROOT_DIR/streaming/build/libs"
-    cp "$LIB_DIR"/batch-job.jar "$ROOT_DIR/batch/build/libs/" 2>/dev/null || true
-    cp "$LIB_DIR"/microbatch-job.jar "$ROOT_DIR/microbatch/build/libs/" 2>/dev/null || true
-    cp "$LIB_DIR"/streaming-job.jar "$ROOT_DIR/streaming/build/libs/" 2>/dev/null || true
+    # NOTE: With Docker-only builds, this step is no longer needed
+    # Jobs are built inside Docker images via multi-stage Dockerfiles
 
     # Construir imágenes
     log "Construyendo imágenes Docker..."
-    docker compose build generator probe
+    $DC build generator probe
 
     # Levantar servicios
     log "Levantando servicios..."
-    docker compose up -d
+    $DC up -d
 
     # Esperar Kafka
     log "Esperando a Kafka..."
     for i in $(seq 1 30); do
-        if docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+        if $DC exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
             log "Kafka disponible"
             break
         fi
@@ -115,7 +115,7 @@ cmd_up() {
     done
 
     # Crear tópico
-    docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
+    $DC exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
 
     log "Infraestructura lista!"
     echo ""
@@ -140,31 +140,26 @@ cmd_build() {
         gradle buildJobs
     fi
     
-    # Copiar a lib/
-    mkdir -p "$LIB_DIR"
-    cp "$ROOT_DIR/batch/build/libs/batch-job.jar" "$LIB_DIR/" 2>/dev/null || true
-    cp "$ROOT_DIR/microbatch/build/libs/microbatch-job.jar" "$LIB_DIR/" 2>/dev/null || true
-    cp "$ROOT_DIR/streaming/build/libs/streaming-job.jar" "$LIB_DIR/" 2>/dev/null || true
-    
-    log "Jobs compilados y copiados a lib/"
+    # NOTE: Jobs are now in src/jobs/ and built via Docker multi-stage
+    log "Jobs compilados (se usarán las imágenes Docker multi-stage)"
 }
 
 cmd_status() {
     log "Estado de servicios:"
-    docker compose ps
+    $DC ps
     
     echo ""
     log "Verificando endpoints..."
     
     # Kafka
-    if docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+    if $DC exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
         echo "  ✅ Kafka:9092"
     else
         echo "  ❌ Kafka:9092"
     fi
     
     # PostgreSQL
-    if docker compose exec -T postgres pg_isready -U benchmark >/dev/null 2>&1; then
+    if $DC exec -T postgres pg_isready -U benchmark >/dev/null 2>&1; then
         echo "  ✅ PostgreSQL:5432"
     else
         echo "  ❌ PostgreSQL:5432"
@@ -197,12 +192,12 @@ cmd_clean() {
     log "Limpiando entorno para escenario: $SCENARIO"
     
     # Limpiar tópico Kafka
-    docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
-    docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
+    $DC exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
+    $DC exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
     log "Tópico 'events' recreado"
     
     # Limpiar PostgreSQL
-    docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    $DC exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
     log "Tabla 'events' truncada"
     
     # Limpiar checkpoints
@@ -214,7 +209,7 @@ cmd_clean() {
 
 cmd_down() {
     log "Bajando contenedores..."
-    docker compose down
+    $DC down
     log "Contenedores detenidos"
 }
 
@@ -230,7 +225,7 @@ cmd_reset() {
     fi
     
     log "Deteniendo contenedores y eliminando volúmenes..."
-    docker compose --profile scaling down -v --remove-orphans 2>/dev/null || true
+    $DC --profile scaling down -v --remove-orphans 2>/dev/null || true
     
     log "Eliminando imágenes generadas..."
     docker rmi tesis-ingestion-generator tesis-ingestion-probe 2>/dev/null || true

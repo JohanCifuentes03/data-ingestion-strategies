@@ -1,437 +1,444 @@
-# Arquitectura del Banco de Pruebas
+# System Architecture
 
-## 1. Objetivo
+## 1. Introduction
 
-Medir la **latencia de disponibilidad** y el **throughput de ingesta** de tres estrategias bajo condiciones de alta demanda operativa, comparando estadísticamente sus resultados con tests de significancia.
+This document provides a comprehensive architectural overview of the data ingestion benchmark system, including design decisions, implementation details, and theoretical foundations.
 
-| # | Estrategia | Motor | Modo de ingesta |
-|---|-----------|-------|--------------------|
-| 1 | Batch      | Spark 3.5        | Lectura completa de Kafka → escritura Append a PostgreSQL |
-| 2 | Micro-batch| Spark Structured Streaming + Kafka | Trigger periódico (1/5/10 s) con `foreachBatch` |
-| 3 | Streaming  | Flink 1.18 + Kafka | Flujo continuo exactly-once con JDBC Sink |
+### 1.1 Motivation
 
-**Métrica principal:** `visible_at − produced_at`
-- `produced_at` = `System.currentTimeMillis()` en el generador al crear el evento.
-- `visible_at` = `DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT` en PostgreSQL al hacer INSERT.
-- Esta definición garantiza que la medición es **uniforme** para las 3 estrategias.
+Modern data systems must process events at scale with varying latency requirements. Three dominant paradigms exist:
 
----
+1. **Batch Processing**: High-throughput historical analysis (MapReduce, Apache Spark)
+2. **Micro-batch Streaming**: Balance between latency and throughput (Spark Structured Streaming)
+3. **True Streaming**: Low-latency event-at-a-time processing (Apache Flink, Apache Storm)
 
-## 2. Diagrama de componentes
+This benchmark quantifies the trade-offs between these approaches using a controlled experimental setup.
 
-```mermaid
-flowchart LR
-    subgraph Workload
-        GEN["Generador multi-thread<br/>(Python, Kafka Producer)<br/>IoT / Financial / Health schemas"]
-    end
+### 1.2 Scope
 
-    subgraph Broker
-        K["Kafka<br/>(12 particiones, RF=1)"]
-    end
+**In Scope**:
+- End-to-end latency measurement (producer → sink)
+- Throughput analysis under varying load
+- Resource efficiency (CPU, memory, network)
+- Fault recovery behavior
 
-    subgraph Compute
-        SB["Spark Batch<br/>(spark-submit one-shot)"]
-        SM["Spark Structured Streaming<br/>(micro-batch trigger)"]
-        FL["Flink Streaming<br/>(exactly-once checkpointing)"]
-    end
+**Out of Scope**:
+- Complex stateful operations (joins, sessionization)
+- Multi-datacenter deployments
+- Security and authentication mechanisms
+- Cost optimization strategies
 
-    subgraph Sink
-        PG["PostgreSQL 15<br/>(tabla events)"]
-    end
+## 2. Reference Architecture
 
-    subgraph Observabilidad
-        PROBE["Sonda de disponibilidad<br/>(Python, polling PG)"]
-    end
-
-    GEN -->|"produce JSON events (lz4)"| K
-    K --> SB
-    K --> SM
-    K --> FL
-
-    SB -->|"JDBC batch append"| PG
-    SM -->|"JDBC foreachBatch"| PG
-    FL -->|"JDBC Sink (batch 500)"| PG
-
-    PG --> PROBE
-    GEN -->|"/metrics (generator_events_total, etc)"| PROM["Prometheus"]
-```
-
----
-
-## 3. Flujo experimental por estrategia
-
-### 3.1 Spark Batch
-
-```mermaid
-sequenceDiagram
-    participant G as Generator
-    participant K as Kafka
-    participant SB as Spark Batch
-    participant PG as PostgreSQL
-    participant P as Probe
-
-    G->>K: produce(event_id, produced_at, schema_fields, payload)
-    Note over G,K: Acumula eventos durante ventana
-    SB->>K: spark.read().format("kafka").load()
-    SB->>PG: writeBatch() via JdbcEventWriter (ON CONFLICT DO NOTHING)
-    Note over PG: visible_at = DEFAULT NOW()
-    P->>PG: SELECT WHERE visible_at > last_seen LIMIT 1000
-    PG-->>P: rows (event_id, produced_at, visible_at, ...)
-    Note over P: latency = visible_at − produced_at → CSV
-```
-
-*Nota: Para garantizar una comparación justa, el script `run.sh` (estrategia batch) incluye una fase de **acumulación** previa de `RUN_DURATION_SECONDS` antes de lanzar el job de Spark, asegurando que el lote procese el mismo volumen de datos que las estrategias de streaming.*
-
-### 3.2 Spark Structured Streaming (Micro-batch)
-
-```mermaid
-sequenceDiagram
-    participant G as Generator
-    participant K as Kafka
-    participant SM as Spark SS
-    participant PG as PostgreSQL
-    participant P as Probe
-
-    G->>K: produce(event_id, produced_at, schema_fields, payload)
-    loop Cada trigger interval (1s/5s/10s)
-        SM->>K: readStream micro-batch
-        SM->>PG: foreachBatch → jdbc(append)
-        Note over PG: visible_at = DEFAULT NOW()
-    end
-    P->>PG: SELECT WHERE visible_at > last_seen
-    PG-->>P: rows → CSV
-```
-
-### 3.3 Flink Streaming
-
-```mermaid
-sequenceDiagram
-    participant G as Generator
-    participant K as Kafka
-    participant FL as Flink
-    participant PG as PostgreSQL
-    participant P as Probe
-
-    G->>K: produce(event_id, produced_at, schema_fields, payload)
-    FL->>K: KafkaSource (continuous)
-    FL->>FL: map(Jackson::parse) → rebalance()
-    FL->>PG: JdbcSink (batch=500, interval=50ms) + ON CONFLICT
-    Note over PG: visible_at = DEFAULT NOW()
-    P->>PG: SELECT WHERE visible_at > last_seen
-    PG-->>P: rows → CSV
-```
-
----
-
-## 4. Robustez y Consistencia
-
-El benchmark implementa varias mejoras críticas para asegurar la validez de los datos:
-
-- **Parseo Robusto (Jackson)**: Se eliminó el parseo basado en expresiones regulares en favor de `Jackson Databind` para manejar correctamente el esquema JSON y evitar corrupciones en payloads complejos.
-- **Escritura Idempotente**: Tanto Spark Batch como Flink utilizan estrategias `ON CONFLICT (event_id) DO NOTHING` para permitir re-intentos de jobs sin duplicar datos ni fallar por llaves duplicadas.
-- **Cierre Elegante y Drain Time**: Los jobs de *Spark Structured Streaming* y *Flink* reciben administrativamente un margen (+20 segundos) adicional de tiempo de vida tras detenerse la generación de eventos, logrando drenar todos los mensajes de Kafka retenidos por backpressure. Sumado a terminaciones por `CompletableFuture`, esto minimiza drásticamente la pérdida experimental de los últimos micro-lotes.
-
----
-
-## 4. Modelo de datos
-
-```sql
-CREATE TABLE events (
-    event_id    UUID        PRIMARY KEY,
-    produced_at BIGINT      NOT NULL,               -- ms epoch (generador)
-    visible_at  BIGINT      NOT NULL DEFAULT (...)   -- ms epoch (PostgreSQL)
-    payload     TEXT        NOT NULL,
-    strategy    VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    scenario    VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    run_id      VARCHAR(64) NOT NULL DEFAULT 'unset'
-);
-
-CREATE INDEX idx_events_visible_at ON events (visible_at);
-CREATE INDEX idx_events_run        ON events (strategy, scenario, run_id);
-```
-
-**Fórmula de latencia:**
-```
-latencia_disponibilidad (ms) = visible_at − produced_at
-```
-
----
-
-## 5. Escenarios de carga
-
-| Escenario | Tasa base | Payload | Pico | Schema default | Duración |
-|-----------|-----------|---------|------|----------------|----------|
-| `low-load` | 2.000/s | 512 B | — | iot_sensor | 20 min |
-| `medium-load` | 10.000/s | 512 B | — | financial_tick | 20 min |
-| `high-load` | 30.000/s | 512 B | — | health_monitor | 20 min |
-| `burst` | 10.000/s | 512 B | 50.000/s por 60s cada 5 min | financial_tick | 20 min |
-| `extreme-load` | 100.000/s | 512 B | — | iot_sensor | 30 min |
-| `mixed-payload` | 10.000/s | 512/4096/65536 B (rotativo) | — | iot_sensor | 20 min |
-
-Cada escenario se repite **5 veces** siguiendo el protocolo:
-`clean → warmup (30s) → run (duración) → cooldown (10s) → export`.
-
----
-
-## 6. Schemas de eventos
-
-### iot_sensor
-```json
-{
-  "event_id": "uuid-v4",
-  "produced_at": 1709500000000,
-  "schema": "iot_sensor",
-  "device_id": "sensor-0042",
-  "temperature_c": 22.4,
-  "humidity_pct": 58.1,
-  "pressure_hpa": 1013.5,
-  "battery_v": 3.72,
-  "status": "ok",
-  "payload": "<random alphanumeric>"
-}
-```
-
-### financial_tick
-```json
-{
-  "event_id": "uuid-v4",
-  "produced_at": 1709500000000,
-  "schema": "financial_tick",
-  "symbol": "BTC-USD",
-  "exchange": "binance",
-  "price": 61234.50,
-  "bid": 61230.12,
-  "ask": 61238.90,
-  "volume": 0.42,
-  "trade_id": "uuid-v4",
-  "payload": "<random alphanumeric>"
-}
-```
-
-### health_monitor
-```json
-{
-  "event_id": "uuid-v4",
-  "produced_at": 1709500000000,
-  "schema": "health_monitor",
-  "patient_id": "P-8821",
-  "device_model": "AppleWatch9",
-  "heart_rate_bpm": 78,
-  "spo2_pct": 98.2,
-  "steps_delta": 5,
-  "alert": false,
-  "location": "home",
-  "payload": "<random alphanumeric>"
-}
-```
-
----
-
-## 7. Métricas recolectadas — 6 KPIs esenciales
-
-| # | KPI | Definición formal | Fuente | Unidad |
-|---|-----|-------------------|--------|--------|
-| 1 | **Latencia E2E** | `visible_at − produced_at` (percentiles p50/p95/p99 + IQR + CV%) | `latency_samples.csv` | ms |
-| 2 | **Throughput E2E vs Sink** | `N_eventos / (visible_at_max − produced_at_min)` vs `tput_sink_eps` | `latency_samples.csv` + `prometheus_snapshot.csv` | eventos/s |
-| 3 | **Fault Recovery Time** | Tiempo desde kill del contenedor hasta recuperar 85% del throughput base | `fault_recovery.csv` | s |
-| 4 | **Scaling Efficiency** | `(tput_N / tput_1) / N × 100%` medido en 1→2→3 Spark workers | `results/*/scaling_*w/` | % |
-| 5 | **Resource Utilization** | CPU total (cores) + memoria RSS por evento (MB/evento) | `prometheus_snapshot.csv` → cAdvisor | cores / MB/ev |
-| 6 | **Kafka Consumer Lag** | `sum(kafka_consumergroup_lag{topic="events"})` al final de cada run | `prometheus_snapshot.csv` → kafka-exporter | mensajes |
-
-Los datos fuente son:
-- `results/<strategy>/<scenario>/<run>/latency_samples.csv` — muestra por evento
-- `results/<strategy>/<scenario>/<run>/prometheus_snapshot.csv` — snapshot Prometheus al cierre del run
-- `results/fault_recovery.csv` — tiempos de recuperación ante fallos inyectados
-
----
-
-## 8. Análisis estadístico
-
-Por cada escenario se ejecutan:
-- **Kruskal-Wallis H test** (no paramétrico): ¿son las distribuciones de latencia de las 3 estrategias estadísticamente diferentes?
-- **Mann-Whitney U pairwise** con **corrección Bonferroni**: comparaciones por pares con p-valores ajustados.
-
-### Gráficas generadas (9 total)
-
-| # | Archivo | Descripción | Datos fuente |
-|---|---------|-------------|--------------|
-| 01 | `01_boxplot_latencia_e2e.png` | Boxplot anotado de latencia E2E con p50/p95/p99/IQR/CV% por estrategia × escenario | `latency_samples.csv` |
-| 02 | `02_throughput_dual.png` | Barras duales: Throughput E2E vs escritura al Sink (eventos/s) | `latency_samples.csv` + `prometheus_snapshot.csv` |
-| 03 | `03_fault_recovery.png` | Barras horizontales de tiempo de recuperación ante fallos (media ± std) | `fault_recovery.csv` |
-| 04 | `04_scaling_efficiency.png` | Eficiencia de escalado horizontal 1→2→3 workers (% de ideal) | `results/*/scaling_*w/` |
-| 05 | `05_resource_utilization.png` | Scatter CPU cores vs MB/evento por run y estrategia | `prometheus_snapshot.csv` |
-| 06 | `06_kafka_lag.png` | Consumer Lag promedio con umbral crítico de 10.000 mensajes | `prometheus_snapshot.csv` |
-| 07 | `07_tabla_resumen.csv/.png` | Tabla completa: p50/p95/p99/IQR/CV%/Min/Max por estrategia × escenario | `latency_samples.csv` |
-| 08 | `08_heatmap_escalabilidad.png` | Heatmap de latencia p95 por estrategia × escenario | `latency_samples.csv` |
-| 09 | `09_ranking_table.csv/.png` | Ranking objetivo multi-criterio normalizado (pesos: p95=35%, tput=30%, recovery=20%, CV=15%) | todos |
-
----
-
-## 9. Servicios Docker Compose
-
-| Servicio | Imagen | Puerto | Rol |
-|----------|--------|--------|-----|
-| `zookeeper` | confluentinc/cp-zookeeper:7.5.3 | 2181 | Coordinación Kafka |
-| `kafka` | confluentinc/cp-kafka:7.5.3 | 9092 | Broker de eventos (12 particiones) |
-| `kafka-exporter` | danielqsj/kafka-exporter:v1.7.0 | 9308 | Métricas Kafka para Prometheus |
-| `spark-master` | apache/spark:3.5.8-java17 | 7077, 8080 | Coordinador Spark |
-| `spark-worker-1` | apache/spark:3.5.8-java17 | — | Ejecutor (4 cores, 2 GB) |
-| `spark-worker-2` | apache/spark:3.5.8-java17 | — | Ejecutor adicional (profile: scaling) |
-| `spark-worker-3` | apache/spark:3.5.8-java17 | — | Ejecutor adicional (profile: scaling) |
-| `flink-jobmanager` | flink:1.18.1-scala_2.12-java17 | 8081, 9249 | Coordinador Flink (2 GB) |
-| `flink-taskmanager` | flink:1.18.1-scala_2.12-java17 | 9250 | Ejecutor (4 slots, 2 GB) |
-| `postgres` | postgres:15 | 5432 | Sink (tabla events) |
-| `generator` | python:3.11-slim (custom) | 8000 | Generador multi-thread |
-| `probe` | python:3.11-slim (custom) | 8001 | Sonda de disponibilidad |
-| `prometheus` | prom/prometheus:v2.51.0 | 9090 | Almacenamiento de métricas de series temporales |
-| `cadvisor` | gcr.io/cadvisor/cadvisor:v0.49.1 | 8083 | Métricas de recursos de contenedores |
-
-### Flujo de observabilidad
+### 2.1 High-Level Overview
 
 ```mermaid
 flowchart LR
-    GEN["generator\n:8000/metrics"] -->|scrape 5s| PROM["Prometheus\n:9090"]
-    PROBE["probe\n:8001/metrics"] -->|scrape 5s| PROM
-    KE["kafka-exporter\n:9308/metrics"] -->|scrape 5s| PROM
-    CA["cAdvisor\n:8083/metrics"] -->|scrape 5s| PROM
-    PROM -->|"/api/v1/query al cierre del run"| SNAP["prometheus_snapshot.csv"]
-    SNAP --> ANA["analyze.py\n(charts 02,05,06)"]
+    GEN[Generator\nSynthetic workload] -->|events topic| K[(Kafka Broker)]
+
+    K --> SB[Batch Engine\nSpark batch run]
+    K --> SM[Micro-batch Engine\nStructured Streaming]
+    K --> FS[Streaming Engine\nApache Flink]
+
+    SB --> DB[(PostgreSQL)]
+    SM --> DB
+    FS --> DB
+
+    DB --> PB[Probe\nVisibility sampler]
+
+    subgraph OBS[Observability]
+      PM[(Prometheus)]
+      CA[cAdvisor]
+      KE[Kafka Exporter]
+    end
+
+    K -.-> KE
+    KE -.-> PM
+    CA -.-> PM
+    SB -.-> PM
+    SM -.-> PM
+    FS -.-> PM
+    DB -.-> PM
+    PB -.-> PM
 ```
-
-### Flujo de inyección de fallos
-
-```
-fault_inject.sh <strategy> <scenario>
-  1. Registra throughput base durante 30 s
-  2. Mata el contenedor target (docker stop)
-  3. Espera recuperación espontánea (Docker restart policy: unless-stopped)
-  4. Mide tiempo hasta que throughput >= 85% del base
-  5. Guarda recovery_time_s en results/fault_recovery.csv
-```
-
----
-
-## 10. Estructura de resultados
-
-```
-results/
-├── latency_samples.csv             # CSV acumulado del probe (todos los runs)
-├── fault_recovery.csv              # Tiempos de recuperación ante fallos
-├── figures/                        # 9 gráficas generadas por analyze.py
-│   ├── 01_boxplot_latencia_e2e.png
-│   ├── 02_throughput_dual.png
-│   ├── 03_fault_recovery.png
-│   ├── 04_scaling_efficiency.png
-│   ├── 05_resource_utilization.png
-│   ├── 06_kafka_lag.png
-│   ├── 07_tabla_resumen.csv
-│   ├── 07_tabla_resumen.png
-│   ├── 08_heatmap_escalabilidad.png
-│   ├── 09_ranking_table.csv
-│   ├── 09_ranking_table.png
-│   └── statistical_tests.csv
-├── batch/
-│   ├── low-load/
-│   │   ├── run_1/
-│   │   │   ├── latency_samples.csv
-│   │   │   └── prometheus_snapshot.csv
-│   │   ├── run_2/ ... run_5/
-│   │   └── scaling_1w/ scaling_2w/ scaling_3w/  # solo con --scaling-test
-│   ├── medium-load/ ...
-│   ├── high-load/ ...
-│   └── burst/ ...
-├── microbatch/ ...
-└── streaming/ ...
-```
-
----
-
-## 11. Topología distribuida (modo AWS)
-
-El benchmark soporta un modo distribuido donde las 4 capas funcionales se despliegan
-en instancias EC2 x86_64 dedicadas en AWS, replicando condiciones de
-producción reales. Este modo permite validar la arquitectura bajo condiciones de
-red físicamente separada, donde `produced_at` y `visible_at` provienen de relojes
-de hardware distintos sincronizados via Amazon Time Sync Service.
-
-### 11.1 Diagrama de componentes distribuidos
 
 ```mermaid
 flowchart TB
-    subgraph AWS["Amazon Web Services — VPC 10.0.0.0/16 / subnet 10.0.1.0/24"]
-
-        subgraph VM1["VM-1: node-producers (10.0.1.10 · 1 OCPU / 4 GB)"]
-            GEN["Generador\nPython multi-thread"]
-            PROBE["Sonda de disponibilidad\nPython, polling PG"]
-        end
-
-        subgraph VM2["VM-2: node-broker (10.0.1.20 · 2 OCPU / 12 GB)"]
-            ZK["ZooKeeper :2181"]
-            KF["Kafka :9092 (12 particiones)"]
-            KE["kafka-exporter :9308"]
-        end
-
-        subgraph VM3["VM-3: node-compute (10.0.1.30 · 4 OCPU / 16 GB)"]
-            SM["Spark Master :7077 / UI:8080"]
-            SW["Spark Worker (4 cores, 2 GB)"]
-            FJ["Flink JobManager :8081 / metrics:9249"]
-            FT["Flink TaskManager :9250 (4 slots)"]
-        end
-
-        subgraph VM4["VM-4: node-sink (10.0.1.40 · 1 OCPU / 8 GB)"]
-            PG["PostgreSQL 15 :5432"]
-            PROM["Prometheus :9090"]
-            CA["cAdvisor :8083"]
-        end
+    subgraph SYS[System Layers]
+      L1[Workload Layer\nGenerator]
+      L2[Transport Layer\nKafka]
+      L3[Compute Layer\nBatch, Micro-batch, Stream]
+      L4[Persistence Layer\nPostgreSQL]
+      L5[Measurement Layer\nProbe + Prometheus]
     end
 
-    GEN -->|"produce JSON lz4\n10.0.1.20:9092"| KF
-    KF --> SM
-    KF --> FJ
-    SM --> SW
-
-    SW -->|"JDBC batch append\n10.0.1.40:5432"| PG
-    FT -->|"JDBC Sink batch 500\n10.0.1.40:5432"| PG
-
-    PG -->|"SELECT WHERE visible_at > last"| PROBE
-
-    GEN -->|"/metrics :8000"| PROM
-    PROBE -->|"/metrics :8001"| PROM
-    KE -->|"/metrics :9308"| PROM
-    CA -->|"/metrics :8083"| PROM
-    FJ -->|"metrics :9249"| PROM
-    FT -->|"metrics :9250"| PROM
-
-    ZK --- KF
+    L1 --> L2 --> L3 --> L4 --> L5
 ```
 
-### 11.2 Asignación de servicios por VM
+### 2.2 Data Flow
 
-| VM | Nombre | IP Privada | OCPU | RAM | Compose file | Servicios |
-|---|---|---|---|---|---|---|
-| VM-1 | node-producers | 10.0.1.10 | 1 | 4 GB | `docker/producer.yml` | generator, probe |
-| VM-2 | node-broker | 10.0.1.20 | 2 | 12 GB | `docker/broker.yml` | zookeeper, kafka, kafka-exporter |
-| VM-3 | node-compute | 10.0.1.30 | 4 | 16 GB | `docker/compute.yml` | spark-master, spark-worker, flink-jobmanager, flink-taskmanager |
-| VM-4 | node-sink | 10.0.1.40 | 1 | 8 GB | `docker/sink.yml` | postgres, prometheus, cadvisor |
+```mermaid
+sequenceDiagram
+    participant G as Generator
+    participant K as Kafka
+    participant E as Engine (Spark/Flink)
+    participant D as PostgreSQL
+    participant P as Probe
 
-### 11.3 Variables críticas del modo distribuido
+    G->>K: Produce(event_id, produced_at, payload)
+    K->>E: Consume partition records
+    E->>D: INSERT ... ON CONFLICT DO NOTHING
+    Note over D: visible_at assigned on insert
+    P->>D: Poll new rows
+    D-->>P: event_id, produced_at, visible_at
+    P->>P: latency = visible_at - produced_at
+```
 
-| Variable | Valor en modo distribuido | Impacto si es incorrecto |
-|---|---|---|
-| `KAFKA_ADVERTISED_LISTENERS` | `PLAINTEXT://10.0.1.20:9092` | **Crítica:** Spark y generator no pueden conectar al broker |
-| `KAFKA_BOOTSTRAP_SERVERS` | `10.0.1.20:9092` | Generator y probe no producen/leen eventos |
-| `POSTGRES_HOST` | `10.0.1.40` | Jobs Spark/Flink y probe no pueden escribir/leer resultados |
-| `SPARK_MASTER_URL` | `spark://10.0.1.30:7077` | spark-submit falla |
-| `FLINK_REST_URL` | `http://10.0.1.30:8081` | Submit de jobs Flink falla |
+1. **Event Generation**: Producer generates events with UUID, timestamp, and payload
+2. **Message Brokering**: Kafka buffers events across 12 partitions
+3. **Processing**: Strategy-specific engine consumes, processes, and writes to PostgreSQL
+4. **Sink Persistence**: PostgreSQL records `visible_at` timestamp on INSERT
+5. **Latency Measurement**: Probe continuously queries PostgreSQL for new events
+6. **Metrics Collection**: Prometheus scrapes metrics from all components
 
-### 11.4 Consideración de clock skew (validez experimental)
+### 2.3 Event Schema
 
-La métrica `latencia = visible_at − produced_at` involucra dos relojes físicos
-distintos (VM-1 y VM-4). El offset NTP se controla así:
+```json
+{
+  "event_id": "uuid-v4",
+  "produced_at": "unix-timestamp-ms",
+  "payload": "string (configurable size)"
+}
+```
 
-- **Mecanismo:** chrony apunta al NTP interno de AWS `169.254.169.123` (latencia ~0.1 ms)
-- **Offset residual típico:** < 1 ms → despreciable frente a p50 de batch (segundos)
-  y p50 de streaming (20–60 ms)
-- **Umbral de seguridad experimentalmente definido:** 5 ms
-- **Verificación automática:** `check-clock-sync.sh` bloquea el experimento si cualquier
-  nodo supera el umbral y registra el log en `results/clock_offsets_YYYYMMDD_HHmmSS.csv`
+**Sink Schema** (PostgreSQL):
+```sql
+CREATE TABLE events (
+    event_id UUID PRIMARY KEY,
+    produced_at BIGINT NOT NULL,
+    visible_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000),
+    payload TEXT,
+    strategy VARCHAR(20),
+    scenario VARCHAR(50),
+    run_id VARCHAR(100)
+);
+```
+
+**Key Design Decision**: `visible_at` is set by PostgreSQL's `DEFAULT` to ensure consistent measurement point across all strategies.
+
+## 3. Implementation Details
+
+### 3.1 Batch Processing (Apache Spark)
+
+#### Theoretical Model
+
+Batch processing follows the **MapReduce** paradigm:
+
+1. **Read**: Load all accumulated events from Kafka
+2. **Map**: Parse JSON, add metadata columns
+3. **Shuffle**: Repartition for parallel writes
+4. **Reduce**: JDBC batch inserts to PostgreSQL
+
+**Latency Model**:
+```
+L_batch = T_accumulation + T_scheduling + T_read + T_process + T_write
+```
+
+Where:
+- `T_accumulation`: Time events wait in Kafka (configurable)
+- `T_scheduling`: Spark job submission overhead (~2-5s)
+- `T_read`: Kafka read time (depends on volume)
+- `T_process`: Parsing + transformation (negligible)
+- `T_write`: JDBC batch insert time
+
+#### Implementation
+
+**File**: `src/jobs/batch/SparkBatchJob.java`
+
+**Key Code**:
+```java
+Dataset<Row> kafkaDataset = spark.read()
+    .format("kafka")
+    .option("kafka.bootstrap.servers", kafkaBootstrap)
+    .option("subscribe", topic)
+    .option("startingOffsets", "earliest")
+    .option("endingOffsets", "latest")
+    .load();
+
+parsed.foreachPartition(rows -> {
+    List<Event> batch = new ArrayList<>();
+    rows.forEachRemaining(row -> batch.add(parseEvent(row)));
+    JdbcEventWriter.writeBatch(jdbcUrl, jdbcProps, batch, "batch", scenario, runId);
+});
+```
+
+**Configuration Trade-offs**:
+- `executor.memory`: Higher = more parallelism, but more resource cost
+- `executor.cores`: More cores = faster processing, but diminishing returns
+- `batch.size`: Larger batches = higher throughput, but higher latency
+
+**Expected Performance**:
+- **Latency**: Minutes (depends on accumulation window)
+- **Throughput**: 50K-100K events/s
+- **Resource**: High memory during processing, idle between batches
+
+### 3.2 Micro-batch Processing (Spark Structured Streaming)
+
+#### Theoretical Model
+
+Micro-batch streaming uses **mini-batches** with configurable triggers:
+
+1. **Trigger**: Every N seconds, process accumulated micro-batch
+2. **Read**: Fetch new Kafka offsets since last checkpoint
+3. **Process**: Same as batch, but on smaller dataset
+4. **Write**: JDBC batch insert
+5. **Checkpoint**: Save Kafka offsets for fault tolerance
+
+**Latency Model**:
+```
+L_microbatch = (T_trigger / 2) + T_process + T_write + T_checkpoint
+```
+
+Where:
+- `T_trigger / 2`: Average wait time (0 to trigger interval)
+- `T_checkpoint`: State persistence overhead (~100-500ms)
+
+#### Implementation
+
+**File**: `src/jobs/microbatch/SparkStructuredJob.java`
+
+**Key Code**:
+```java
+Dataset<Row> stream = spark.readStream()
+    .format("kafka")
+    .option("kafka.bootstrap.servers", kafkaBootstrap)
+    .option("subscribe", topic)
+    .option("startingOffsets", "latest")
+    .load();
+
+StreamingQuery query = parsed.writeStream()
+    .foreachBatch((batchDF, batchId) -> {
+        batchDF.foreachPartition(rows -> {
+            JdbcEventWriter.writeBatch(...);
+        });
+    })
+    .trigger(Trigger.ProcessingTime(triggerInterval))
+    .option("checkpointLocation", checkpointDir)
+    .start();
+```
+
+**Configuration Trade-offs**:
+- `trigger.interval`: Lower = lower latency, but higher overhead
+- `maxOffsetsPerTrigger`: Limits batch size to prevent overload
+- `checkpointLocation`: Required for fault tolerance, adds I/O cost
+
+**Expected Performance**:
+- **Latency**: Seconds (configurable, typically 5s trigger)
+- **Throughput**: 20K-50K events/s
+- **Resource**: Constant CPU/memory (slightly higher than batch)
+
+### 3.3 Stream Processing (Apache Flink)
+
+#### Theoretical Model
+
+True streaming processes events **one-at-a-time** with event-time semantics:
+
+1. **Consume**: Kafka consumer fetches events immediately
+2. **Deserialize**: Parse JSON to Event POJO
+3. **Process**: Apply transformation functions
+4. **Sink**: JDBC connection pool for writes
+5. **Checkpoint**: Periodic snapshot of state (Chandy-Lamport algorithm)
+
+**Latency Model**:
+```
+L_stream = T_kafka_poll + T_deserialize + T_network + T_sink + T_checkpoint_amortized
+```
+
+Where:
+- `T_kafka_poll`: Kafka consumer fetch latency (~1-5ms)
+- `T_checkpoint_amortized`: Distributed snapshot overhead, amortized over many events
+
+#### Implementation
+
+**File**: `src/jobs/streaming/FlinkStreamingJob.java`
+
+**Key Code**:
+```java
+DataStream<Event> events = env
+    .addSource(new FlinkKafkaConsumer<>(topic, deserializer, kafkaProps))
+    .uid("kafka-source");
+
+events
+    .addSink(JdbcSink.sink(
+        "INSERT INTO events(...) VALUES (...) ON CONFLICT DO NOTHING",
+        (ps, event) -> {
+            ps.setObject(1, event.getEventId());
+            ps.setLong(2, event.getProducedAt());
+            // ...
+        },
+        jdbcOptions
+    ))
+    .uid("postgres-sink");
+
+env.execute("FlinkStreamingJob-" + scenario);
+```
+
+**Configuration Trade-offs**:
+- `parallelism`: Higher = more throughput, but coordination overhead
+- `checkpointInterval`: Lower = faster recovery, but higher I/O cost
+- `sink.bufferFlush`: Batching at sink level for better throughput
+
+**Expected Performance**:
+- **Latency**: Milliseconds (100-500ms)
+- **Throughput**: 10K-30K events/s (single-node)
+- **Resource**: Constant CPU/memory with checkpoint spikes
+
+### 3.4 Fault Tolerance Mechanisms
+
+| Strategy | Mechanism | Recovery Time | Data Loss Risk |
+|----------|-----------|---------------|----------------|
+| **Batch** | Idempotent writes (ON CONFLICT) | N/A (rerun job) | None (at-least-once) |
+| **Micro-batch** | Checkpoint + WAL | ~30s | None (exactly-once with checkpoints) |
+| **Stream** | Chandy-Lamport snapshots | ~10s | None (exactly-once with 2PC sink) |
+
+**Implementation Note**: All strategies use `ON CONFLICT (event_id) DO NOTHING` for idempotency.
+
+## 4. Infrastructure Components
+
+### 4.1 Message Broker (Apache Kafka)
+
+**Version**: 7.5.3 (Confluent Platform)
+
+**Configuration**:
+- **Partitions**: 12 (allows parallelism up to 12 consumers)
+- **Replication Factor**: 1 (local), 3 (distributed)
+- **Retention**: 7 days
+- **Compression**: None (to measure raw throughput)
+
+**Metrics Exposed**:
+- `kafka_server_brokertopicmetrics_messagesinpersec`
+- `kafka_server_brokertopicmetrics_bytesinpersec`
+- `kafka_consumergroup_lag`
+
+### 4.2 Sink (PostgreSQL)
+
+**Version**: 15
+
+**Schema Optimizations**:
+- **Primary Key**: `event_id` (UUID) prevents duplicates
+- **Index**: `visible_at` for efficient probe queries
+- **No Foreign Keys**: Minimize write latency
+
+**Configuration**:
+```sql
+max_connections = 100
+shared_buffers = 256MB
+effective_cache_size = 1GB
+maintenance_work_mem = 64MB
+checkpoint_completion_target = 0.9
+wal_buffers = 16MB
+```
+
+### 4.3 Monitoring (Prometheus + cAdvisor)
+
+**Prometheus**: Time-series database for metrics
+- **Scrape Interval**: 15s
+- **Retention**: 7 days
+- **Targets**: Kafka, Spark, Flink, PostgreSQL, cAdvisor
+
+**cAdvisor**: Container resource metrics
+- **Metrics**: `container_cpu_usage_seconds_total`, `container_memory_rss`
+- **Export**: Per-container CPU, memory, network, I/O
+
+## 5. Design Decisions
+
+### 5.1 Why These Technologies?
+
+| Component | Rationale | Alternatives Considered |
+|-----------|-----------|------------------------|
+| **Kafka** | Industry standard, high throughput, durable | RabbitMQ (lower throughput), Pulsar (immature) |
+| **Spark** | Unified batch + streaming API, mature | Hadoop MR (deprecated), Beam (abstraction overhead) |
+| **Flink** | True streaming with low latency | Storm (less mature), Samza (Kafka-specific) |
+| **PostgreSQL** | SQL, ACID, measurable insert timestamp | Cassandra (no exact timestamps), MongoDB (eventual consistency) |
+
+### 5.2 Measurement Methodology
+
+**Key Design**: PostgreSQL's `visible_at DEFAULT` ensures all strategies are measured consistently:
+
+```
+Latency = visible_at - produced_at
+```
+
+**Why not measure at application level?**
+- Application timestamps can be affected by buffering, batching, and network delays
+- PostgreSQL timestamp represents **actual data availability** for downstream consumers
+
+### 5.3 Docker vs. Native Deployment
+
+**Decision**: Docker containers with Docker Compose
+
+**Rationale**:
+- **Reproducibility**: Pinned versions, consistent across environments
+- **Isolation**: No version conflicts with host system
+- **Portability**: Same setup for local and distributed modes
+
+**Trade-off**: ~5-10% performance overhead vs. native, acceptable for comparative benchmark
+
+## 6. Limitations and Threats to Validity
+
+### 6.1 Internal Validity
+
+**Confounding Variables**:
+- JVM warmup: Mitigated with 10-minute warmup period
+- Garbage collection: Not controlled, measured as part of "real-world" performance
+- Network latency: Minimized in local mode, measured in distributed mode
+
+### 6.2 External Validity
+
+**Generalizability**:
+- ✅ **Workload**: Synthetic but representative (IoT sensors, financial ticks)
+- ⚠️ **Scale**: Single-node local, 3-node distributed (not "big data" scale)
+- ⚠️ **Operations**: Simple INSERT (no complex joins, aggregations)
+
+**Applicability**: Results apply to:
+- Simple event ingestion pipelines
+- OLTP-style workloads
+- Systems with <100K events/s throughput
+
+**Not applicable to**:
+- Complex stateful stream processing (windowed joins)
+- OLAP-style analytical queries
+- Extreme scale (millions of events/s)
+
+### 6.3 Construct Validity
+
+**Metric Appropriateness**:
+- **Latency**: ✅ Directly measures data availability
+- **Throughput**: ✅ Industry-standard metric
+- **Resource Usage**: ⚠️ CPU/memory alone don't capture all costs (network, disk I/O)
+
+## 7. References
+
+### Academic Papers
+
+1. Zaharia, M., et al. (2016). "Apache Spark: A Unified Engine for Big Data Processing." *Communications of the ACM*, 59(11), 56-65.
+
+2. Carbone, P., et al. (2015). "Apache Flink: Stream and Batch Processing in a Single Engine." *IEEE Data Engineering Bulletin*, 38(4), 28-38.
+
+3. Kreps, J., Narkhede, N., & Rao, J. (2011). "Kafka: A Distributed Messaging System for Log Processing." *NetDB*.
+
+4. Marz, N., & Warren, J. (2015). *Big Data: Principles and Best Practices of Scalable Real-time Data Systems*. Manning Publications. (Lambda Architecture)
+
+5. Kreps, J. (2014). "Questioning the Lambda Architecture." O'Reilly Radar. (Kappa Architecture)
+
+### Technical Documentation
+
+- [Apache Spark Documentation](https://spark.apache.org/docs/latest/)
+- [Apache Flink Documentation](https://flink.apache.org/docs/stable/)
+- [Confluent Kafka Documentation](https://docs.confluent.io/)
+- [PostgreSQL Performance Tuning](https://www.postgresql.org/docs/current/performance-tips.html)
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2026-04-05  
