@@ -51,7 +51,7 @@
 - name: "Construir imagen del generator"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/producer.yml build generator 2>&1
+    docker compose --env-file .env -f infra/docker/compose/producer.yml build generator 2>&1
   become_user: ubuntu
   register: gen_build
   changed_when: "'Successfully built' in gen_build.stdout or 'FINISHED' in gen_build.stdout"
@@ -60,7 +60,7 @@
 - name: "Construir imagen del probe"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/producer.yml build probe 2>&1
+    docker compose --env-file .env -f infra/docker/compose/producer.yml build probe 2>&1
   become_user: ubuntu
   register: probe_build
   changed_when: "'Successfully built' in probe_build.stdout or 'FINISHED' in probe_build.stdout"
@@ -69,7 +69,8 @@
 - name: "Iniciar cAdvisor para metricas de CPU/memoria"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/cadvisor.yml up -d 2>&1
+    docker rm -f tesis-cadvisor >/dev/null 2>&1 || true
+    docker compose --env-file .env -f infra/docker/compose/monitoring.yml up -d 2>&1
   become_user: ubuntu
   register: cadvisor_up
   changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"

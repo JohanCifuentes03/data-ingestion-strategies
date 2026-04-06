@@ -42,8 +42,8 @@ services:
       - "${SPARK_MASTER_PORT:-7077}:${SPARK_MASTER_PORT:-7077}"
       - "${SPARK_MASTER_WEBUI_PORT:-8080}:${SPARK_MASTER_WEBUI_PORT:-8080}"
     volumes:
-      - ../batch/build/libs:/opt/spark/jobs/batch:ro
-      - ../microbatch/build/libs:/opt/spark/jobs/microbatch:ro
+      - ../../../src/jobs/batch/build/libs:/opt/spark/jobs/batch:ro
+      - ../../../src/jobs/microbatch/build/libs:/opt/spark/jobs/microbatch:ro
       - spark-checkpoints:/opt/spark/checkpoints
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -sf http://localhost:${SPARK_MASTER_WEBUI_PORT:-8080} > /dev/null"]
@@ -145,7 +145,7 @@ services:
       - "8081:8081"
       - "9249:9249"
     volumes:
-      - ../streaming/build/libs:/opt/flink/usrlib:ro
+      - ../../../src/jobs/streaming/build/libs:/opt/flink/usrlib:ro
 
   # ── Flink TaskManager ──────────────────────────────────────────
   flink-taskmanager:
@@ -169,4 +169,4 @@ services:
     ports:
       - "9250:9250"
     volumes:
-      - ../streaming/build/libs:/opt/flink/usrlib:ro
+      - ../../../src/jobs/streaming/build/libs:/opt/flink/usrlib:ro

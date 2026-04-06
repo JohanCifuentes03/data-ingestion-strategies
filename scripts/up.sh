@@ -55,10 +55,10 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-echo -e "  ${GREEN}✓${NC} VM-1 node-producers : ${OCI_VM_PRODUCER_IP}"
-echo -e "  ${GREEN}✓${NC} VM-2 node-broker    : ${OCI_VM_BROKER_IP}"
-echo -e "  ${GREEN}✓${NC} VM-3 node-compute   : ${OCI_VM_COMPUTE_IP}"
-echo -e "  ${GREEN}✓${NC} VM-4 node-sink      : ${OCI_VM_SINK_IP}"
+echo -e "  ${GREEN}✓${NC} VM-1 node-producers : ${CLOUD_VM_PRODUCER_IP}"
+echo -e "  ${GREEN}✓${NC} VM-2 node-broker    : ${CLOUD_VM_BROKER_IP}"
+echo -e "  ${GREEN}✓${NC} VM-3 node-compute   : ${CLOUD_VM_COMPUTE_IP}"
+echo -e "  ${GREEN}✓${NC} VM-4 node-sink      : ${CLOUD_VM_SINK_IP}"
 echo ""
 
 # ── Paso 2: Verificar conectividad SSH ──────────────────────────
@@ -67,10 +67,10 @@ SSH_KEY=${CLOUD_SSH_KEY_PATH:-~/.ssh/benchmark_aws}
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=8 -o BatchMode=yes"
 
 declare -A NODE_MAP=(
-    ["node-producers"]="${OCI_VM_PRODUCER_PUBLIC_IP:-$OCI_VM_PRODUCER_IP}"
-    ["node-broker"]="${OCI_VM_BROKER_PUBLIC_IP:-$OCI_VM_BROKER_IP}"
-    ["node-compute"]="${OCI_VM_COMPUTE_PUBLIC_IP:-$OCI_VM_COMPUTE_IP}"
-    ["node-sink"]="${OCI_VM_SINK_PUBLIC_IP:-$OCI_VM_SINK_IP}"
+    ["node-producers"]="${CLOUD_VM_PRODUCER_PUBLIC_IP:-$CLOUD_VM_PRODUCER_IP}"
+    ["node-broker"]="${CLOUD_VM_BROKER_PUBLIC_IP:-$CLOUD_VM_BROKER_IP}"
+    ["node-compute"]="${CLOUD_VM_COMPUTE_PUBLIC_IP:-$CLOUD_VM_COMPUTE_IP}"
+    ["node-sink"]="${CLOUD_VM_SINK_PUBLIC_IP:-$CLOUD_VM_SINK_IP}"
 )
 
 for NODE_NAME in "${!NODE_MAP[@]}"; do
@@ -106,16 +106,16 @@ check_service() {
     fi
 }
 
-check_service "$OCI_VM_COMPUTE_IP" \
-    "http://${OCI_VM_COMPUTE_PUBLIC_IP:-$OCI_VM_COMPUTE_IP}:8080" \
+check_service "$CLOUD_VM_COMPUTE_IP" \
+    "http://${CLOUD_VM_COMPUTE_PUBLIC_IP:-$CLOUD_VM_COMPUTE_IP}:8080" \
     "Spark Master UI  (VM-3:8080)"
 
-check_service "$OCI_VM_COMPUTE_IP" \
-    "http://${OCI_VM_COMPUTE_PUBLIC_IP:-$OCI_VM_COMPUTE_IP}:8081" \
+check_service "$CLOUD_VM_COMPUTE_IP" \
+    "http://${CLOUD_VM_COMPUTE_PUBLIC_IP:-$CLOUD_VM_COMPUTE_IP}:8081" \
     "Flink REST UI    (VM-3:8081)"
 
-check_service "$OCI_VM_SINK_IP" \
-    "http://${OCI_VM_SINK_PUBLIC_IP:-$OCI_VM_SINK_IP}:9090/-/healthy" \
+check_service "$CLOUD_VM_SINK_IP" \
+    "http://${CLOUD_VM_SINK_PUBLIC_IP:-$CLOUD_VM_SINK_IP}:9090/-/healthy" \
     "Prometheus       (VM-4:9090)"
 echo ""
 

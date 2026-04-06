@@ -24,7 +24,8 @@ services:
   # ── Generator (productor Kafka multi-thread) ───────────────────
   generator:
     build:
-      context: ../generator
+      context: ../../..
+      dockerfile: infra/docker/images/generator.Dockerfile
     restart: "no"
     container_name: tesis-generator
     networks:
@@ -44,12 +45,13 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ../results:/results
+      - ../../../results:/results
 
   # ── Probe (sonda de disponibilidad PostgreSQL) ─────────────────
   probe:
     build:
-      context: ../probe
+      context: ../../..
+      dockerfile: infra/docker/images/probe.Dockerfile
     restart: "no"
     container_name: tesis-probe
     networks:
@@ -70,4 +72,4 @@ services:
     volumes:
       # Los resultados se persisten en el host para que collect-results.sh
       # pueda copiarlos via scp al finale del experimento
-      - ../results:/results
+      - ../../../results:/results

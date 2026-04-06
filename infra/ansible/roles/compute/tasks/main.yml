@@ -83,14 +83,15 @@
 
 - name: "Compilacion exitosa"
   debug:
-    msg: "JARs compilados en batch/build/libs/, microbatch/build/libs/, streaming/build/libs/"
+    msg: "JARs compilados en src/jobs/batch/build/libs/, src/jobs/microbatch/build/libs/, src/jobs/streaming/build/libs/"
   when: "'BUILD SUCCESSFUL' in gradle_build.stdout"
   tags: [build]
 
 - name: "Iniciar Spark y Flink"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/compute.yml up -d 2>&1
+    docker rm -f tesis-spark-master tesis-spark-worker-1 tesis-spark-worker-2 tesis-spark-worker-3 tesis-flink-jobmanager tesis-flink-taskmanager >/dev/null 2>&1 || true
+    docker compose --env-file .env -f infra/docker/compose/compute.yml up -d 2>&1
   become_user: ubuntu
   register: compute_up
   changed_when: "'Started' in compute_up.stdout or 'Created' in compute_up.stdout"
@@ -99,7 +100,8 @@
 - name: "Iniciar cAdvisor"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/cadvisor.yml up -d 2>&1
+    docker rm -f tesis-cadvisor >/dev/null 2>&1 || true
+    docker compose --env-file .env -f infra/docker/compose/monitoring.yml up -d 2>&1
   become_user: ubuntu
   register: cadvisor_up
   changed_when: "'Started' in cadvisor_up.stdout or 'Created' in cadvisor_up.stdout"

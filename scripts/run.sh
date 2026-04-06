@@ -24,6 +24,37 @@ if [ -f "$ROOT_DIR/.env" ]; then
 fi
 export COMPOSE_FILE="$ROOT_DIR/infra/docker/compose/docker-compose.yml"
 
+MODE=${MODE:-local}
+SSH_KEY=${SSH_KEY:-$HOME/.ssh/benchmark_aws}
+SSH_USER=${SSH_USER:-ubuntu}
+
+remote_compose() {
+    local host="$1"
+    local compose_file="$2"
+    local compose_args="$3"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${SSH_USER}@${host}" \
+        "cd ~/data-ingestion-strategies && docker compose --env-file .env -f ${compose_file} ${compose_args}"
+}
+
+remote_shell() {
+    local host="$1"
+    local command="$2"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${SSH_USER}@${host}" "${command}"
+}
+
+sync_probe_csv_from_producer() {
+    if [ "$MODE" != "distributed" ]; then
+        return
+    fi
+    local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    [ -z "$producer_ip" ] && return
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/results/latency_samples.csv" \
+        "$PROBE_GLOBAL" >/dev/null 2>&1 || true
+}
+
 RESULTS_BASE="$ROOT_DIR/results"
 PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
 PROBE_HEADER="event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id"
@@ -94,7 +125,12 @@ start_generator_for_scenario() {
         export GENERATOR_EVENT_RATE="$GENERATOR_DEFAULT_RATE"
         export GENERATOR_PAYLOAD_BYTES="$GENERATOR_DEFAULT_PAYLOAD"
         export GENERATOR_EVENT_SCHEMA="$GENERATOR_DEFAULT_SCHEMA"
-        docker compose up -d --no-deps --force-recreate generator
+        if [ "$MODE" = "distributed" ]; then
+            local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+            remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps --force-recreate generator"
+        else
+            docker compose up -d --no-deps --force-recreate generator
+        fi
     )
 }
 
@@ -104,7 +140,13 @@ clear_checkpoint_dir() {
         return
     fi
     log "Limpiando checkpoint Spark (${subdir})"
-    docker compose exec -T spark-master sh -c "rm -rf /opt/spark/checkpoints/${subdir} && mkdir -p /opt/spark/checkpoints/${subdir}" 2>/dev/null || true
+    if [ "$MODE" = "distributed" ]; then
+        local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
+            "exec -T spark-master sh -c 'rm -rf /opt/spark/checkpoints/${subdir} && mkdir -p /opt/spark/checkpoints/${subdir}'" >/dev/null 2>&1 || true
+    else
+        docker compose exec -T spark-master sh -c "rm -rf /opt/spark/checkpoints/${subdir} && mkdir -p /opt/spark/checkpoints/${subdir}" 2>/dev/null || true
+    fi
 }
 
 start_run_timer() {
@@ -120,7 +162,15 @@ reset_probe_csv() {
     # Resetear via el container del probe para evitar errores de permisos.
     # El probe escribe continuamente en /results/latency_samples.csv (montado
     # desde el host), por lo que el archivo puede estar bloqueado/en uso.
-    if docker compose exec -T probe sh -c \
+    if [ "$MODE" = "distributed" ]; then
+        local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+        if remote_compose "$producer_ip" "infra/docker/compose/producer.yml" \
+            "exec -T probe sh -c \"echo '${PROBE_HEADER}' > /results/latency_samples.csv\"" 2>/dev/null; then
+            log "Probe CSV reseteado (via container remoto)"
+        else
+            warn "No se pudo resetear probe CSV remoto"
+        fi
+    elif docker compose exec -T probe sh -c \
         "echo '${PROBE_HEADER}' > /results/latency_samples.csv" 2>/dev/null; then
         log "Probe CSV reseteado (via container)"
     else
@@ -211,8 +261,6 @@ ensure_services() {
     log "Verificando servicios..."
     if [ "${MODE:-local}" = "distributed" ]; then
         # En modo distribuido, verificamos servicios remotamente via SSH
-        local ssh_key="${SSH_KEY:-$HOME/.ssh/benchmark_aws}"
-        local ssh_user="${SSH_USER:-ubuntu}"
         local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
         local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
         
@@ -222,15 +270,13 @@ ensure_services() {
         fi
         
         # Verificar Kafka en broker
-        if ! ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "${ssh_user}@${broker_ip}" "docker ps | grep -q tesis-kafka" 2>/dev/null; then
+        if ! remote_shell "$broker_ip" "docker ps | grep -q tesis-kafka" 2>/dev/null; then
             warn "Kafka no esta corriendo en ${broker_ip}"
             exit 1
         fi
         
         # Verificar Spark en compute
-        if ! ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "${ssh_user}@${compute_ip}" "docker ps | grep -q tesis-spark-master" 2>/dev/null; then
+        if ! remote_shell "$compute_ip" "docker ps | grep -q tesis-spark-master" 2>/dev/null; then
             warn "Spark no esta corriendo en ${compute_ip}"
             exit 1
         fi
@@ -420,16 +466,28 @@ PY
 run_batch() {
     ensure_services
 
+    local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+
     log "Ejecutando BATCH: scenario=$SCENARIO run_id=$RUN_ID duration=${RUN_DURATION_SECONDS}s"
 
     # Limpiar antes
     log "Limpiando entorno y deteniendo jobs previos..."
-    docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
-    docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
-    
-    docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
-    docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
-    docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "restart flink-jobmanager flink-taskmanager" >/dev/null 2>&1 || true
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "exec -T spark-master sh -c 'pkill -f spark || true'" >/dev/null 2>&1 || true
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092" >/dev/null 2>&1 || true
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists" >/dev/null 2>&1 || true
+        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+    else
+        docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
+        docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
+        docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
+        docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
+        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    fi
     reset_probe_csv
     start_run_timer
 
@@ -455,11 +513,19 @@ run_batch() {
     done
 
     # Detener generator
-    docker compose stop generator
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "stop generator" >/dev/null 2>&1 || true
+    else
+        docker compose stop generator
+    fi
 
     # Ejecutar Spark Batch
     log "Ejecutando Spark Batch..."
-    MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
+    else
+        MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.batch.SparkBatchJob \
         --master spark://spark-master:${MASTER_PORT} \
         /opt/spark/jobs/batch/batch-job.jar \
@@ -471,10 +537,12 @@ run_batch() {
         --postgres.user=${POSTGRES_USER_NAME} \
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
         --run.duration.seconds=${RUN_DURATION_SECONDS}
+    fi
 
     end_run_timer
     RUN_DIR="${ROOT_DIR}/results/batch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
+    sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 
@@ -487,16 +555,28 @@ run_batch() {
 run_microbatch() {
     ensure_services
 
+    local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+
     log "Ejecutando MICROBATCH: scenario=$SCENARIO run_id=$RUN_ID trigger=$TRIGGER_INTERVAL"
 
     # Limpiar antes
     log "Limpiando entorno y deteniendo jobs previos..."
-    docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
-    docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
-    
-    docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
-    docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
-    docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "restart flink-jobmanager flink-taskmanager" >/dev/null 2>&1 || true
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "exec -T spark-master sh -c 'pkill -f spark || true'" >/dev/null 2>&1 || true
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092" >/dev/null 2>&1 || true
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists" >/dev/null 2>&1 || true
+        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+    else
+        docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
+        docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
+        docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
+        docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
+        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    fi
     reset_probe_csv
     clear_checkpoint_dir "microbatch"
     start_run_timer
@@ -508,7 +588,11 @@ run_microbatch() {
     # Iniciar generator y microbatch
     start_generator_for_scenario "$SCENARIO"
 
-    MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=${TRIGGER_INTERVAL} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
+    else
+        MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.microbatch.SparkStructuredJob \
         --master spark://spark-master:${MASTER_PORT} \
         /opt/spark/jobs/microbatch/microbatch-job.jar \
@@ -522,13 +606,19 @@ run_microbatch() {
         --postgres.user=${POSTGRES_USER_NAME} \
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
         --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))
+    fi
 
     # Detener generator
-    docker compose stop generator
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "stop generator" >/dev/null 2>&1 || true
+    else
+        docker compose stop generator
+    fi
 
     RUN_DIR="${ROOT_DIR}/results/microbatch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
+    sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 
@@ -541,13 +631,24 @@ run_microbatch() {
 run_streaming() {
     ensure_services
 
+    local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+
     log "Ejecutando STREAMING: scenario=$SCENARIO run_id=$RUN_ID"
 
     # Limpiar antes
     log "Limpiando entorno..."
-    docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
-    docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
-    docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092" >/dev/null 2>&1 || true
+        remote_compose "$broker_ip" "infra/docker/compose/broker.yml" "exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists" >/dev/null 2>&1 || true
+        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+    else
+        docker compose exec -T kafka kafka-topics --delete --topic events --bootstrap-server localhost:9092 2>/dev/null || true
+        docker compose exec -T kafka kafka-topics --create --topic events --partitions 12 --replication-factor 1 --bootstrap-server localhost:9092 --if-not-exists 2>/dev/null || true
+        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+    fi
     reset_probe_csv
     start_run_timer
 
@@ -556,14 +657,27 @@ run_streaming() {
     echo "────────────────────────────────────────────────────────────"
 
     # Reiniciar Flink para estado limpio
-    docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "restart flink-jobmanager flink-taskmanager" >/dev/null 2>&1
+    else
+        docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1
+    fi
 
     # Esperar Flink
     log "Esperando Flink..."
     for i in $(seq 1 45); do
-        JM_STATE=$(docker inspect tesis-ingestion-flink-jobmanager-1 --format '{{.State.Status}}' 2>/dev/null || echo "missing")
+        if [ "$MODE" = "distributed" ]; then
+            JM_STATE=$(remote_shell "$compute_ip" "docker inspect tesis-flink-jobmanager --format '{{.State.Status}}'" 2>/dev/null || echo "missing")
+        else
+            JM_STATE=$(docker inspect tesis-ingestion-flink-jobmanager-1 --format '{{.State.Status}}' 2>/dev/null || echo "missing")
+        fi
         if [ "$JM_STATE" = "running" ]; then
-            if docker compose exec -T flink-jobmanager sh -c "grep -qi ':1F91 ' /proc/net/tcp6 2>/dev/null || grep -qi ':1F91 ' /proc/net/tcp 2>/dev/null"; then
+            if [ "$MODE" = "distributed" ]; then
+                if remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "exec -T flink-jobmanager sh -c 'grep -qi :1F91 /proc/net/tcp6 2>/dev/null || grep -qi :1F91 /proc/net/tcp 2>/dev/null'"; then
+                    log "Flink listo"
+                    break
+                fi
+            elif docker compose exec -T flink-jobmanager sh -c "grep -qi ':1F91 ' /proc/net/tcp6 2>/dev/null || grep -qi ':1F91 ' /proc/net/tcp 2>/dev/null"; then
                 log "Flink listo"
                 break
             fi
@@ -583,7 +697,11 @@ run_streaming() {
         FLINK_DETACH_FLAG="-d"
     fi
 
-    MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
+            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers ${CLOUD_VM_BROKER_IP}:9092 --kafka.topic events --postgres.url jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
+    else
+        MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
         ${FLINK_DETACH_FLAG} \
         -c org.tesis.streaming.FlinkStreamingJob \
         -p ${FLINK_PARALLELISM_VALUE} \
@@ -596,13 +714,19 @@ run_streaming() {
         --postgres.user ${POSTGRES_USER_NAME} \
         --postgres.password ${POSTGRES_PASSWORD_VALUE} \
         --run.duration.seconds $((RUN_DURATION_SECONDS + 20))
+    fi
 
     # Detener generator
-    docker compose stop generator
+    if [ "$MODE" = "distributed" ]; then
+        remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "stop generator" >/dev/null 2>&1 || true
+    else
+        docker compose stop generator
+    fi
 
     RUN_DIR="${ROOT_DIR}/results/streaming/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
+    sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
 

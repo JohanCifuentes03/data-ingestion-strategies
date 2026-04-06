@@ -1,0 +1,63 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    environment: distributed
+    experiment: tesis-benchmark
+
+scrape_configs:
+  - job_name: generator
+    static_configs:
+      - targets: ['{{ vm_producers_ip }}:8000']
+        labels:
+          nodo: node-producers
+          vm_ip: '{{ vm_producers_ip }}'
+
+  - job_name: probe
+    static_configs:
+      - targets: ['{{ vm_producers_ip }}:8001']
+        labels:
+          nodo: node-producers
+          vm_ip: '{{ vm_producers_ip }}'
+
+  - job_name: kafka
+    static_configs:
+      - targets: ['{{ vm_broker_ip }}:9308']
+        labels:
+          nodo: node-broker
+          vm_ip: '{{ vm_broker_ip }}'
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:8083']
+        labels:
+          nodo: node-compute
+          vm_ip: '{{ vm_compute_ip }}'
+      - targets: ['{{ vm_broker_ip }}:8083']
+        labels:
+          nodo: node-broker
+          vm_ip: '{{ vm_broker_ip }}'
+      - targets: ['{{ vm_producers_ip }}:8083']
+        labels:
+          nodo: node-producers
+          vm_ip: '{{ vm_producers_ip }}'
+      - targets: ['{{ vm_sink_ip }}:8083']
+        labels:
+          nodo: node-sink
+          vm_ip: '{{ vm_sink_ip }}'
+
+  - job_name: flink_jobmanager
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:9249']
+        labels:
+          nodo: node-compute
+          componente: jobmanager
+          vm_ip: '{{ vm_compute_ip }}'
+
+  - job_name: flink_taskmanager
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:9250']
+        labels:
+          nodo: node-compute
+          componente: taskmanager
+          vm_ip: '{{ vm_compute_ip }}'

@@ -151,7 +151,7 @@
     repo:    "{{ repo_url }}"
     dest:    "{{ repo_dest }}"
     version: "{{ repo_branch }}"
-    force:   no
+    force:   yes
     update:  yes
   become_user: ubuntu
   when: repo_stat.stat.exists

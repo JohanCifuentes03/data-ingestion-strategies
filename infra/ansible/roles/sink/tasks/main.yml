@@ -48,23 +48,19 @@
 
 - name: "Renderizar template prometheus.distributed.yml.j2 con IPs reales"
   template:
-    src: "{{ repo_dest }}/infra/config/prometheus/prometheus.distributed.yml.j2"
+    src: "prometheus.distributed.yml.j2"
     dest: "{{ repo_dest }}/infra/config/prometheus/prometheus.local.yml"
     owner: ubuntu
     group: ubuntu
     mode: '0644'
     backup: yes
-  vars:
-    vm_producers_ip: "{{ vm_producers_ip }}"
-    vm_broker_ip:    "{{ vm_broker_ip }}"
-    vm_compute_ip:   "{{ vm_compute_ip }}"
-    vm_sink_ip:      "{{ vm_sink_ip }}"
   tags: [config, prometheus]
 
 - name: "Iniciar PostgreSQL, Prometheus y cAdvisor"
   shell: |
     cd {{ repo_dest }}
-    docker compose -f docker/sink.yml up -d 2>&1
+    docker rm -f tesis-postgres tesis-prometheus tesis-cadvisor >/dev/null 2>&1 || true
+    docker compose --env-file .env -f infra/docker/compose/sink.yml up -d 2>&1
   become_user: ubuntu
   register: sink_up
   changed_when: "'Started' in sink_up.stdout or 'Created' in sink_up.stdout"

@@ -42,9 +42,9 @@ fi
 source "$ENV_FILE"
 
 SSH_KEY=${CLOUD_SSH_KEY_PATH:-~/.ssh/benchmark_aws}
-SSH_USER=${OCI_SSH_USER:-ubuntu}
+SSH_USER=${CLOUD_SSH_USER:-ubuntu}
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
-REMOTE="${SSH_USER}@${OCI_VM_SINK_IP}"
+REMOTE="${SSH_USER}@${CLOUD_VM_SINK_PUBLIC_IP}"
 REMOTE_RESULTS="~/data-ingestion-strategies/results/"
 LOCAL_DEST="$SCRIPT_DIR/results-distributed"
 
