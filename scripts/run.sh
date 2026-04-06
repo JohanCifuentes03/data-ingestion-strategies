@@ -16,6 +16,7 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
 # Ensure all docker compose commands target the refactored stack.
+REQUESTED_MODE=${MODE:-local}
 if [ -f "$ROOT_DIR/.env" ]; then
     set -a
     # shellcheck source=/dev/null
@@ -24,7 +25,7 @@ if [ -f "$ROOT_DIR/.env" ]; then
 fi
 export COMPOSE_FILE="$ROOT_DIR/infra/docker/compose/docker-compose.yml"
 
-MODE=${MODE:-local}
+MODE=$REQUESTED_MODE
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/benchmark_aws}
 SSH_USER=${SSH_USER:-ubuntu}
 
@@ -127,7 +128,8 @@ start_generator_for_scenario() {
         export GENERATOR_EVENT_SCHEMA="$GENERATOR_DEFAULT_SCHEMA"
         if [ "$MODE" = "distributed" ]; then
             local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
-            remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps --force-recreate generator"
+            remote_shell "$producer_ip" "docker rm -f tesis-generator >/dev/null 2>&1 || true"
+            remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
         fi
@@ -164,8 +166,20 @@ reset_probe_csv() {
     # desde el host), por lo que el archivo puede estar bloqueado/en uso.
     if [ "$MODE" = "distributed" ]; then
         local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
-        if remote_compose "$producer_ip" "infra/docker/compose/producer.yml" \
-            "exec -T probe sh -c \"echo '${PROBE_HEADER}' > /results/latency_samples.csv\"" 2>/dev/null; then
+        remote_shell "$producer_ip" "mkdir -p ~/data-ingestion-strategies/results && sudo -n chown -R ubuntu:ubuntu ~/data-ingestion-strategies/results >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "chmod 777 ~/data-ingestion-strategies/results >/dev/null 2>&1 || true; touch ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true; chmod 666 ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "docker rm -f tesis-probe >/dev/null 2>&1 || true"
+        remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps probe" >/dev/null 2>&1 || true
+        local ok=false
+        for _ in $(seq 1 6); do
+            if remote_compose "$producer_ip" "infra/docker/compose/producer.yml" \
+                "exec -T probe sh -c \"echo '${PROBE_HEADER}' > /results/latency_samples.csv\"" 2>/dev/null; then
+                ok=true
+                break
+            fi
+            sleep 2
+        done
+        if [ "$ok" = true ]; then
             log "Probe CSV reseteado (via container remoto)"
         else
             warn "No se pudo resetear probe CSV remoto"

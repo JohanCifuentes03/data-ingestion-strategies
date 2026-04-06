@@ -67,11 +67,11 @@
     mode: '0755'
   tags: [build]
 
-- name: "Compilar jobs Java (gradlew build -x test)"
+- name: "Compilar jobs Java (gradlew buildJobs)"
   shell: |
     cd {{ repo_dest }}
     export JAVA_HOME={{ java_home_detect.stdout }}
-    ./gradlew build -x test 2>&1
+    ./gradlew buildJobs 2>&1
   become_user: ubuntu
   register: gradle_build
   changed_when: "'BUILD SUCCESSFUL' in gradle_build.stdout"
