@@ -74,9 +74,9 @@ if ! ssh $SSH_OPTS -i "$SSH_KEY" "$REMOTE" "echo OK" > /dev/null 2>&1; then
 fi
 echo -e "${GREEN}✓${NC} Conectividad SSH OK"
 
-# Crear directorio destino local
+# Crear directorio destino local limpio para evitar mezclar corridas viejas
+rm -rf "$LOCAL_DEST" 2>/dev/null || true
 mkdir -p "$LOCAL_DEST"
-rm -rf "$LOCAL_DEST/results" 2>/dev/null || true
 
 # Copiar resultados
 echo ""

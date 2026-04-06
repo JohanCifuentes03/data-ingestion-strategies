@@ -258,10 +258,16 @@ python -m benchmark.analysis.analyzer --results-dir results/
 python -m benchmark.validation.validator --results-dir results/
 ```
 
-Charts are exported in multiple formats:
-- **PNG**: Quick preview
-- **PDF**: LaTeX inclusion (300 DPI, publication-ready)
-- **SVG**: Editable vector graphics
+Figures are exported in publication-ready formats:
+- **PNG**: Quick preview for notebooks/slides
+- **PDF**: Thesis and paper inclusion (vector quality)
+
+Current compact figure set (thesis-focused):
+- `latency_distribution_boxplot.*`: latency distribution with p50/p95/p99 annotations
+- `generated_vs_sink_throughput.*`: generated throughput vs sink-visible throughput
+- `resource_efficiency_scatter.*`: CPU vs memory-per-event efficiency by run
+- `kafka_consumer_lag.*`: lag/backpressure by strategy and scenario
+- `latency_summary_table.*`: summary table (CSV + figure)
 
 ## 🐛 Known Limitations
 

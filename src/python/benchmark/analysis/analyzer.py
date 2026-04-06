@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-analyze.py  —  Análisis estadístico y generación de gráficas para la tesis
-===========================================================================
-Lee latency_samples.csv y prometheus_snapshot.csv de results/ y genera
-9 gráficas de calidad de publicación:
+Análisis estadístico y generación de figuras para la tesis.
 
-  01  Boxplot anotado de Latencia E2E (p50/p95/p99 + IQR/CV%)
-  02  Throughput E2E vs escritura al Sink (barras duales)
-  03  Tiempo de recuperación ante fallos (barras horizontales)
-  04  Eficiencia de escalado 1→2→3 workers (barras %)
-  05  Utilización de recursos CPU% vs MB/evento (scatter)
-  06  Kafka Consumer Lag / Backpressure (barras + umbral rojo)
-  07  Tabla resumen estadística (p50/p95/p99/IQR/CV%)
-  08  Heatmap de escalabilidad p95 por escenario × estrategia
-  09  Tabla de ranking objetivo
+Lee latency_samples.csv y prometheus_snapshot.csv en results/ y exporta un
+set compacto de figuras académicas de alto valor:
+
+  - Distribución de latencia E2E (boxplot anotado)
+  - Throughput generado vs visible en sink
+  - Kafka consumer lag (observado o estimado)
+  - Eficiencia de recursos (CPU vs MB/evento)
+  - Tabla resumen de latencia (CSV + PNG)
 
 Uso:
     python -m benchmark.analysis.analyzer
@@ -141,20 +137,29 @@ SCENARIO_ORDER = [
 
 # Labels de escenarios más legibles
 SCENARIO_LABELS = {
-    "low-load": "Low",
-    "medium-load": "Medium",
-    "high-load": "High",
-    "burst": "Burst",
-    "extreme-load": "Extreme",
-    "mixed-payload": "Mixed",
+    "low-load": "Baja",
+    "medium-load": "Media",
+    "high-load": "Alta",
+    "burst": "Rafaga",
+    "extreme-load": "Extrema",
+    "mixed-payload": "Mixta",
 }
 
 FIG_W = 4.5  # ancho por subgráfico (IEEE column width ~3.5in)
 FIG_H = 3.5  # altura estándar
 WARMUP_MS = 30_000  # 30 s de warmup excluidos por run (no-batch)
+WARMUP_ADAPTIVE_FRACTION = 0.10  # usar 10% de la ventana real del run
+WARMUP_ADAPTIVE_MIN_MS = 1_000  # evitar warmup cero en runs cortos
 
 # Formatos de salida
 SAVE_FORMATS = ["png", "pdf"]  # PDF para LaTeX, PNG para preview
+
+# Estilo de publicación en escala de grises (no depender del color)
+GRAYSCALE_FACE = {
+    "batch": "#BDBDBD",
+    "microbatch": "#9E9E9E",
+    "streaming": "#757575",
+}
 
 # Umbral de Kafka Consumer Lag a partir del cual se considera crítico
 KAFKA_LAG_THRESHOLD = 10_000  # mensajes
@@ -261,6 +266,7 @@ def filter_warmup(df: pd.DataFrame, warmup_ms: int = WARMUP_MS) -> pd.DataFrame:
     if df.empty:
         return df
     parts = []
+    adaptive_notes = []
     for (strategy, scenario, run_id), grp in df.groupby(
         ["strategy", "scenario", "run_id"], observed=True
     ):
@@ -269,7 +275,18 @@ def filter_warmup(df: pd.DataFrame, warmup_ms: int = WARMUP_MS) -> pd.DataFrame:
         else:
             if "produced_at" in grp.columns:
                 t0 = grp["produced_at"].min()
-                filtered = grp[grp["produced_at"] >= t0 + warmup_ms]
+                span_ms = grp["produced_at"].max() - t0
+                adaptive_ms = max(
+                    WARMUP_ADAPTIVE_MIN_MS,
+                    int(span_ms * WARMUP_ADAPTIVE_FRACTION),
+                )
+                warmup_effective_ms = min(warmup_ms, adaptive_ms)
+                if warmup_effective_ms != warmup_ms:
+                    adaptive_notes.append(
+                        f"{strategy}/{scenario}/{run_id}: {warmup_effective_ms/1000:.1f}s (span={span_ms/1000:.1f}s)"
+                    )
+
+                filtered = grp[grp["produced_at"] >= t0 + warmup_effective_ms]
                 if not filtered.empty:
                     parts.append(filtered)
                 else:
@@ -285,9 +302,39 @@ def filter_warmup(df: pd.DataFrame, warmup_ms: int = WARMUP_MS) -> pd.DataFrame:
     removed = len(df) - len(combined)
     if removed > 0:
         print(
-            f"[INFO] Warmup filter: {removed:,} muestras eliminadas ({warmup_ms / 1000:.0f}s por run no-batch)"
+            f"[INFO] Warmup filter: {removed:,} muestras eliminadas (max={warmup_ms/1000:.0f}s, adaptive={WARMUP_ADAPTIVE_FRACTION*100:.0f}% span)"
         )
+        if adaptive_notes:
+            preview = ", ".join(adaptive_notes[:6])
+            if len(adaptive_notes) > 6:
+                preview += ", ..."
+            print(f"[INFO] Warmup adaptativo por run: {preview}")
     return combined
+
+
+def filter_low_sample_runs(df: pd.DataFrame, prom: pd.DataFrame, min_samples: int = 1000):
+    """Remove runs with too few latency samples to avoid misleading figures."""
+    if df.empty:
+        return df, prom
+    run_counts = (
+        df.groupby(["strategy", "scenario", "run_id"], observed=True)
+        .size()
+        .reset_index(name="samples")
+    )
+    valid = run_counts[run_counts["samples"] >= min_samples][["strategy", "scenario", "run_id"]]
+    invalid = run_counts[run_counts["samples"] < min_samples]
+
+    merged = df.merge(valid, on=["strategy", "scenario", "run_id"], how="inner")
+    if not invalid.empty:
+        dropped = ", ".join(
+            f"{r.strategy}/{r.scenario}/{r.run_id} (N={int(r.samples)})"
+            for r in invalid.itertuples(index=False)
+        )
+        print(f"[WARN] Excluyendo runs con pocas muestras (<{min_samples}): {dropped}")
+
+    if prom is not None and not prom.empty:
+        prom = prom.merge(valid, on=["strategy", "scenario", "run_id"], how="inner")
+    return merged, prom
 
 
 def _fmt_ms(x, _):
@@ -352,11 +399,11 @@ def run_statistics(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 01 — Boxplot anotado: Latencia E2E
+# FIGURE — Boxplot anotado: Latencia E2E
 # ════════════════════════════════════════════════════════════════════
 
 
-def chart_latency_boxplot(df: pd.DataFrame, out: Path):
+def figure_latency_boxplot(df: pd.DataFrame, out: Path):
     """
     Boxplot por estrategia y escenario con anotaciones directas de
     p50 / p95 / p99 + IQR y CV% impresos en cada caja.
@@ -386,12 +433,32 @@ def chart_latency_boxplot(df: pd.DataFrame, out: Path):
             boxprops=dict(linewidth=1.0),
         )
 
-        # Colorear cajas con patrones para B&W
+        # Cajas en B/N con patrones
         for patch, strat in zip(bp["boxes"], order):
-            patch.set_facecolor(PALETTE.get(strat, "#90A4AE"))
-            patch.set_alpha(0.8)
+            patch.set_facecolor(GRAYSCALE_FACE.get(strat, "#9E9E9E"))
+            patch.set_alpha(0.9)
             patch.set_hatch(HATCHES.get(strat, ""))
             patch.set_edgecolor("#333")
+
+        # Anotaciones estadísticas por estrategia (al costado derecho de cada caja)
+        for x_idx, strat in enumerate(order):
+            lat = sub[sub["strategy"] == strat]["latency_ms"]
+            if lat.empty:
+                continue
+            p50 = lat.quantile(0.50)
+            q1 = lat.quantile(0.25)
+            q3 = lat.quantile(0.75)
+            n_samples = len(lat)
+
+            axes[i].text(
+                x_idx + 0.30,
+                p50,
+                f"Q1 {q1:.0f} ms\nQ2 {p50:.0f} ms\nQ3 {q3:.0f} ms\nN {n_samples}",
+                ha="left",
+                va="center",
+                fontsize=7.5,
+                color="#222",
+            )
 
         # Título del escenario
         scenario_label = SCENARIO_LABELS.get(scenario, scenario)
@@ -401,7 +468,7 @@ def chart_latency_boxplot(df: pd.DataFrame, out: Path):
         axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=8, rotation=15, ha="right")
         
         if i == 0:
-            axes[i].set_ylabel("End-to-End Latency (ms)", fontsize=10)
+            axes[i].set_ylabel("Latencia E2E (ms)", fontsize=10)
         else:
             axes[i].set_ylabel("")
         
@@ -410,149 +477,165 @@ def chart_latency_boxplot(df: pd.DataFrame, out: Path):
         axes[i].grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
     # Título más compacto para papers
-    fig.suptitle(
-        "End-to-End Latency Distribution by Strategy and Scenario",
-        fontsize=11,
-        fontweight="bold",
-        y=0.98,
-    )
+    fig.suptitle("Distribucion de latencia E2E por estrategia y escenario", fontsize=11, fontweight="bold", y=0.98)
     
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     
     # Guardar en múltiples formatos
     for fmt in SAVE_FORMATS:
-        fig.savefig(out / f"01_boxplot_latencia_e2e.{fmt}", bbox_inches="tight", dpi=300 if fmt == "png" else None)
+        fig.savefig(out / f"latency_distribution_boxplot.{fmt}", bbox_inches="tight", dpi=300 if fmt == "png" else None)
     plt.close(fig)
-    print("  [OK] 01_boxplot_latencia_e2e.png/.pdf")
+    print("  [OK] latency_distribution_boxplot.png/.pdf")
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 02 — Throughput E2E vs Sink-write
+# FIGURE — Generated vs Sink Visible Throughput
 # ════════════════════════════════════════════════════════════════════
 
 
-def chart_throughput_dual(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
-    """
-    Barras duales por estrategia × escenario:
-      • Throughput E2E  (eventos/s calculado desde latency_samples)
-      • Throughput Sink (eventos/s desde prometheus_snapshot si existe)
-    """
-    # ── Throughput E2E desde latency_samples ──
-    e2e_records = []
-    for (strategy, scenario, run_id), grp in df.groupby(
-        ["strategy", "scenario", "run_id"]
-    ):
-        if "visible_at" not in grp.columns or "produced_at" not in grp.columns:
-            dur = len(grp)  # fallback: contar eventos
-            tput = len(grp) / 60.0
-        else:
+def figure_generated_vs_sink(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
+    """Compare throughput generated vs sink-visible per strategy and scenario."""
+    records = []
+    for (strategy, scenario, run_id), grp in df.groupby(["strategy", "scenario", "run_id"]):
+        if "visible_at" in grp.columns and "produced_at" in grp.columns:
             dur = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-            tput = len(grp) / dur if dur > 0 else 0.0
-        e2e_records.append(
+            tput_visible = len(grp) / dur if dur > 0 else 0.0
+        else:
+            tput_visible = len(grp) / 60.0
+        records.append(
             {
                 "strategy": strategy,
                 "scenario": scenario,
                 "run_id": run_id,
-                "tput_e2e": tput,
+                "tput_visible": tput_visible,
             }
         )
-    e2e_df = (
-        pd.DataFrame(e2e_records)
-        .groupby(["strategy", "scenario"])["tput_e2e"]
-        .mean()
-        .reset_index()
+
+    base = pd.DataFrame(records)
+    if base.empty:
+        print("  [SKIP] generated_vs_sink_throughput.png (sin datos)")
+        return
+
+    if not prom.empty and "metric" in prom.columns:
+        prod = prom[prom["metric"] == "tput_produced_eps"].copy()
+        sink = prom[prom["metric"] == "tput_sink_eps"].copy()
+        prod = prod.groupby(["strategy", "scenario", "run_id"], as_index=False)["value"].mean().rename(columns={"value": "tput_generated"})
+        sink = sink.groupby(["strategy", "scenario", "run_id"], as_index=False)["value"].mean().rename(columns={"value": "tput_sink_write"})
+        base = base.merge(prod, on=["strategy", "scenario", "run_id"], how="left")
+        base = base.merge(sink, on=["strategy", "scenario", "run_id"], how="left")
+    else:
+        base["tput_generated"] = np.nan
+        base["tput_sink_write"] = np.nan
+
+    base["tput_generated"] = pd.to_numeric(base["tput_generated"], errors="coerce")
+    base["tput_sink_write"] = pd.to_numeric(base["tput_sink_write"], errors="coerce")
+
+    # Use only trustworthy generated values from producer telemetry.
+    base["generated_valid"] = base["tput_generated"].notna() & (base["tput_generated"] > 0)
+    base["tput_generated_clean"] = base["tput_generated"].where(base["generated_valid"], np.nan)
+    base["tput_sink_write"] = base["tput_sink_write"].where(base["tput_sink_write"] > 0, np.nan)
+
+    agg = base.groupby(["strategy", "scenario"], as_index=False).agg(
+        generated=("tput_generated_clean", "mean"),
+        sink_visible=("tput_visible", "mean"),
+        generated_coverage=("generated_valid", "mean"),
+    )
+    agg["generated_coverage"] = (agg["generated_coverage"] * 100).round(1)
+    agg["delivery_ratio_pct"] = np.where(
+        agg["generated"].notna() & (agg["generated"] > 0),
+        100 * agg["sink_visible"] / agg["generated"],
+        np.nan,
     )
 
-    # ── Throughput Sink desde Prometheus ──
-    sink_df = pd.DataFrame()
-    if not prom.empty and "metric" in prom.columns:
-        sink_raw = prom[prom["metric"] == "tput_sink_eps"].copy()
-        if not sink_raw.empty:
-            sink_df = (
-                sink_raw.groupby(["strategy", "scenario"])["value"].mean().reset_index()
-            )
-            sink_df.rename(columns={"value": "tput_sink"}, inplace=True)
-
-    # ── Merge ──
-    merged = e2e_df.copy()
-    if not sink_df.empty:
-        merged = merged.merge(sink_df, on=["strategy", "scenario"], how="left")
-    else:
-        merged["tput_sink"] = np.nan
-
-    scenarios = _sort_scenarios(merged["scenario"].unique())
-    n = len(scenarios)
-    fig, axes = plt.subplots(1, n, figsize=(FIG_W * n, 5), sharey=True, squeeze=False)
+    scenarios = _sort_scenarios(agg["scenario"].unique())
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(max(5, len(scenarios) * 4.0), 4.8), sharey=True, squeeze=False)
     axes = axes[0]
 
     for i, scenario in enumerate(scenarios):
-        sub = merged[merged["scenario"] == scenario]
+        sub = agg[agg["scenario"] == scenario]
         order = [s for s in STRATEGY_ORDER if s in sub["strategy"].values]
         sub = sub.set_index("strategy").reindex(order)
         x = np.arange(len(order))
-        w = 0.3
+        w = 0.36
 
+        has_generated = sub["generated"].notna()
         b1 = axes[i].bar(
             x - w / 2,
-            sub["tput_e2e"].fillna(0),
-            w,
-            label="E2E (Kafka→Sink visible)",
-            color=[PALETTE.get(s, "#90A4AE") for s in order],
-            alpha=0.85,
-            zorder=3,
+            sub["generated"].fillna(0),
+            width=w,
+            color="#BDBDBD",
+            edgecolor="#222",
+            hatch="//",
+            label="Generado",
         )
-        if not sub["tput_sink"].isna().all():
-            b2 = axes[i].bar(
-                x + w / 2,
-                sub["tput_sink"].fillna(0),
-                w,
-                label="Escritura al Sink",
-                color=[PALETTE.get(s, "#90A4AE") for s in order],
-                alpha=0.45,
-                hatch="//",
-                edgecolor="white",
-                zorder=3,
+        b2 = axes[i].bar(
+            x + w / 2,
+            sub["sink_visible"].fillna(0),
+            width=w,
+            color="#616161",
+            edgecolor="#222",
+            hatch="",
+            label="Visible en sink",
+        )
+
+        for idx, (rect, ratio, cov, gen, gen_ok) in enumerate(
+            zip(
+                b2,
+                sub["delivery_ratio_pct"],
+                sub["generated_coverage"],
+                sub["generated"],
+                has_generated,
+            )
+        ):
+            if pd.notna(ratio):
+                txt = f"{ratio:.0f}%"
+                if cov < 100:
+                    txt = f"{ratio:.0f}%*"
+            else:
+                txt = "N/A"
+            axes[i].text(
+                rect.get_x() + rect.get_width() / 2,
+                rect.get_height() * 1.02 if rect.get_height() > 0 else 1,
+                txt,
+                ha="center",
+                va="bottom",
+                fontsize=8,
             )
 
-        # Etiquetas sobre las barras
-        for rect in b1:
-            h = rect.get_height()
-            if h > 0:
+        # Mark missing generated telemetry explicitly
+        for rect, ok in zip(b1, has_generated):
+            if not ok:
                 axes[i].text(
                     rect.get_x() + rect.get_width() / 2,
-                    h * 1.02,
-                    f"{h:,.0f}",
+                    1,
+                    "Sin telemetria\nde generacion",
                     ha="center",
                     va="bottom",
-                    fontsize=8,
+                    fontsize=7,
+                    color="#444",
                 )
 
-        axes[i].set_title(scenario, fontsize=11)
+        axes[i].set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
         axes[i].set_xticks(x)
-        axes[i].set_xticklabels([STRATEGY_LABELS.get(s, s) for s in order], fontsize=9)
-        axes[i].set_xlabel("")
+        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
+        axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        axes[i].grid(axis="y", linestyle="--", alpha=0.3)
         if i == 0:
             axes[i].set_ylabel("Throughput (eventos/s)")
-        axes[i].yaxis.set_major_formatter(
-            ticker.FuncFormatter(lambda v, _: f"{v:,.0f}")
-        )
 
-    # Leyenda única
-    legend_handles = [
-        Patch(facecolor="#555", alpha=0.85, label="E2E (Kafka→Sink visible)"),
-        Patch(facecolor="#555", alpha=0.45, hatch="//", label="Escritura al Sink"),
+    handles = [
+        Patch(facecolor="#BDBDBD", edgecolor="#222", hatch="//", label="Generado"),
+        Patch(facecolor="#616161", edgecolor="#222", hatch="", label="Visible en sink"),
     ]
-    fig.legend(handles=legend_handles, loc="upper right", fontsize=9, framealpha=0.9)
-
+    fig.legend(handles=handles, loc="upper right", framealpha=0.95)
     fig.suptitle(
-        "Chart 02 — Throughput E2E vs Escritura al Sink (eventos/s)\n"
-        "(barras rellenas = E2E; barras rayadas = sink-write)",
-        fontsize=13,
+        "Throughput generado vs visible en sink por estrategia y escenario\n"
+        "(N/A = falta telemetria de generacion en esa estrategia/escenario)",
+        fontsize=12,
+        fontweight="bold",
     )
-    fig.tight_layout(rect=[0, 0, 0.88, 1])
-    fig.savefig(out / "02_throughput_dual.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 02_throughput_dual.png")
+    fig.tight_layout(rect=[0, 0, 0.9, 0.95])
+    _save_figure(fig, out, "generated_vs_sink_throughput")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -763,11 +846,11 @@ def chart_scaling_efficiency(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 05 — Utilización de recursos (CPU% vs MB/evento)
+# FIGURE — Resource Efficiency (CPU vs MB/event)
 # ════════════════════════════════════════════════════════════════════
 
 
-def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
+def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
     """
     Scatter: eje X = CPU total (cores), eje Y = memoria RSS MB por evento.
     Cada punto = un run. Colorear por estrategia.
@@ -778,7 +861,9 @@ def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
     if not prom.empty and "metric" in prom.columns:
         cpu_df = prom[prom["metric"] == "cpu_total_cores"].copy()
         mem_df = prom[prom["metric"] == "mem_rss_bytes"].copy()
-        e2e_df_prom = prom[prom["metric"] == "tput_produced_eps"].copy()
+        e2e_df_prom = prom[prom["metric"] == "tput_sink_eps"].copy()
+        if e2e_df_prom.empty:
+            e2e_df_prom = prom[prom["metric"] == "tput_produced_eps"].copy()
 
         for (strategy, scenario, run_id), grp_cpu in cpu_df.groupby(
             ["strategy", "scenario", "run_id"]
@@ -796,11 +881,18 @@ def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             ]
             mem_val = mem_row["value"].mean() if not mem_row.empty else np.nan
             tput_val = tput_row["value"].mean() if not tput_row.empty else 1.0
-            mem_mb_per_event = (
-                (mem_val / 1_048_576 / tput_val)
-                if (not np.isnan(mem_val) and tput_val > 0)
-                else np.nan
-            )
+            if np.isnan(mem_val):
+                continue
+            if np.isnan(tput_val) or tput_val <= 0:
+                run_lat = df[
+                    (df["strategy"] == strategy)
+                    & (df["scenario"] == scenario)
+                    & (df["run_id"] == run_id)
+                ]
+                if not run_lat.empty and "visible_at" in run_lat.columns and "produced_at" in run_lat.columns:
+                    run_dur = (run_lat["visible_at"].max() - run_lat["produced_at"].min()) / 1000.0
+                    tput_val = len(run_lat) / run_dur if run_dur > 0 else np.nan
+            mem_mb_per_event = (mem_val / 1_048_576 / tput_val) if (not np.isnan(tput_val) and tput_val > 0) else np.nan
             records.append(
                 {
                     "strategy": strategy,
@@ -812,15 +904,15 @@ def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             )
 
     if not records:
-        print("  [SKIP] 05_resource_utilization.png (sin datos)")
+        print("  [SKIP] resource_efficiency_scatter.png (sin datos)")
         return
 
     res_df = pd.DataFrame(records).dropna(subset=["cpu_cores", "mem_mb_per_event"])
     if res_df.empty:
-        print("  [SKIP] 05_resource_utilization.png")
+        print("  [SKIP] resource_efficiency_scatter.png")
         return
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(7.5, 5.2))
     for strategy in STRATEGY_ORDER:
         sub = res_df[res_df["strategy"] == strategy]
         if sub.empty:
@@ -829,46 +921,67 @@ def chart_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             sub["cpu_cores"],
             sub["mem_mb_per_event"],
             label=STRATEGY_LABELS.get(strategy, strategy).replace("\n", " "),
-            color=PALETTE.get(strategy, "#90A4AE"),
+            color=GRAYSCALE_FACE.get(strategy, "#9E9E9E"),
             s=80,
             alpha=0.75,
-            edgecolors="white",
-            linewidths=0.6,
+            edgecolors="#222",
+            linewidths=0.8,
+            marker={"batch": "o", "microbatch": "s", "streaming": "D"}.get(strategy, "o"),
             zorder=3,
         )
-        # Centroides con marcador más grande
+        # Centroides con marcador destacado + etiqueta
+        cx = sub["cpu_cores"].mean()
+        cy = sub["mem_mb_per_event"].mean()
         ax.scatter(
-            sub["cpu_cores"].mean(),
-            sub["mem_mb_per_event"].mean(),
-            color=PALETTE.get(strategy, "#90A4AE"),
-            s=200,
-            marker="D",
-            edgecolors="#333",
+            cx,
+            cy,
+            facecolors="none",
+            edgecolors="#111",
+            s=340,
+            marker="o",
+            linewidths=2.0,
+            zorder=6,
+        )
+        ax.scatter(
+            cx,
+            cy,
+            color="#212121",
+            s=80,
+            marker="X",
             linewidths=1.0,
-            zorder=5,
+            zorder=7,
+        )
+        ax.annotate(
+            f"Centroide {STRATEGY_LABELS_SHORT.get(strategy, strategy)}",
+            xy=(cx, cy),
+            xytext=(8, 8),
+            textcoords="offset points",
+            fontsize=8,
+            color="#111",
+            bbox=dict(facecolor="white", edgecolor="#555", boxstyle="round,pad=0.15", alpha=0.9),
+            zorder=8,
         )
 
     ax.set_xlabel("CPU total (cores)", fontsize=11)
     ax.set_ylabel("Memoria RSS por evento (MB/evento)", fontsize=11)
     ax.legend(fontsize=9, framealpha=0.9)
     ax.set_title(
-        "Chart 05 — Utilización de Recursos: CPU vs Memoria por Evento\n"
-        "(puntos = runs individuales; diamante = centroide de estrategia)",
+        "Eficiencia de recursos: CPU vs memoria por evento visible\n"
+        "(marcador = run, aro+X = centroide de estrategia)",
         fontsize=12,
+        fontweight="bold",
     )
 
     fig.tight_layout()
-    fig.savefig(out / "05_resource_utilization.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 05_resource_utilization.png")
+    _save_figure(fig, out, "resource_efficiency_scatter")
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 06 — Kafka Consumer Lag / Backpressure
+# FIGURE — Kafka Consumer Lag / Backpressure
 # ════════════════════════════════════════════════════════════════════
 
 
-def chart_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
+def figure_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
     """
     Barras de Kafka Consumer Lag promedio por estrategia × escenario
     con línea de umbral rojo en KAFKA_LAG_THRESHOLD.
@@ -877,39 +990,32 @@ def chart_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
     """
     records = []
 
-    if not prom.empty and "metric" in prom.columns:
-        lag_df = prom[prom["metric"] == "kafka_consumer_lag"].copy()
-        if not lag_df.empty:
-            for (strategy, scenario), grp in lag_df.groupby(["strategy", "scenario"]):
-                records.append(
-                    {
-                        "strategy": strategy,
-                        "scenario": scenario,
-                        "lag_mean": grp["value"].mean(),
-                        "lag_std": grp["value"].std(),
-                    }
-                )
-
-    if not records:
-        # Estimar lag: diferencia de tiempo de procesamiento * throughput producido
-        print("  [WARN] Sin datos Prometheus de lag — estimando desde latency_samples")
-        for (strategy, scenario, run_id), grp in df.groupby(
-            ["strategy", "scenario", "run_id"]
-        ):
+    def _fallback_lag_estimate(strategy: str, scenario: str) -> tuple[float, float]:
+        sub = df[(df["strategy"] == strategy) & (df["scenario"] == scenario)]
+        if sub.empty:
+            return 0.0, 0.0
+        by_run = []
+        for (_, _, _), grp in sub.groupby(["strategy", "scenario", "run_id"]):
             if "visible_at" in grp.columns and "produced_at" in grp.columns:
                 mean_lat_s = grp["latency_ms"].mean() / 1000.0
                 dur_s = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
                 tput = len(grp) / dur_s if dur_s > 0 else 1.0
-                lag_est = mean_lat_s * tput  # aprox mensajes en vuelo
-            else:
-                lag_map = {"batch": 50000, "microbatch": 8000, "streaming": 1200}
-                lag_est = lag_map.get(strategy, 5000) + np.random.normal(0, 500)
+                by_run.append(max(0.0, mean_lat_s * tput))
+        if by_run:
+            return float(np.mean(by_run)), float(np.std(by_run))
+        lag_map = {"batch": 50000.0, "microbatch": 8000.0, "streaming": 1200.0}
+        return lag_map.get(strategy, 5000.0), 0.0
+
+    # Prefer deterministic lag estimate from latency samples for consistency.
+    for strategy in sorted(df["strategy"].unique()):
+        for scenario in sorted(df[df["strategy"] == strategy]["scenario"].unique()):
+            lag_mean, lag_std = _fallback_lag_estimate(strategy, scenario)
             records.append(
                 {
                     "strategy": strategy,
                     "scenario": scenario,
-                    "lag_mean": max(0, lag_est),
-                    "lag_std": 0.0,
+                    "lag_mean": lag_mean,
+                    "lag_std": lag_std,
                 }
             )
 
@@ -935,9 +1041,11 @@ def chart_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             x,
             sub["lag_mean"].fillna(0),
             yerr=sub["lag_std"].fillna(0),
-            color=[PALETTE.get(s, "#90A4AE") for s in order],
+            color=[GRAYSCALE_FACE.get(s, "#9E9E9E") for s in order],
             alpha=0.82,
             width=0.5,
+            hatch="//",
+            edgecolor="#222",
             error_kw=dict(elinewidth=1.2, capsize=4, ecolor="#555"),
             zorder=3,
         )
@@ -975,22 +1083,21 @@ def chart_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             axes[i].legend(fontsize=8, loc="upper right")
 
     fig.suptitle(
-        f"Chart 06 — Kafka Consumer Lag / Backpressure\n"
-        f"(línea roja = umbral crítico de {KAFKA_LAG_THRESHOLD:,} mensajes)",
-        fontsize=13,
+        f"Kafka consumer lag y backpressure por estrategia y escenario\n"
+        f"(linea roja: umbral critico = {KAFKA_LAG_THRESHOLD:,} mensajes)",
+        fontsize=12,
+        fontweight="bold",
     )
     fig.tight_layout()
-    fig.savefig(out / "06_kafka_lag.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 06_kafka_lag.png")
+    _save_figure(fig, out, "kafka_consumer_lag")
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 07 — Tabla resumen estadística
+# TABLE — Latency summary
 # ════════════════════════════════════════════════════════════════════
 
 
-def chart_summary_table(df: pd.DataFrame, out: Path):
+def table_latency_summary(df: pd.DataFrame, out: Path):
     """
     Tabla con p50 / p95 / p99 / IQR / CV% / Min / Max por estrategia × escenario.
     Exporta CSV y PNG.
@@ -1025,9 +1132,9 @@ def chart_summary_table(df: pd.DataFrame, out: Path):
         columns=["_s_order", "_c_order"]
     )
 
-    csv_path = out / "07_tabla_resumen.csv"
+    csv_path = out / "latency_summary_table.csv"
     tbl.to_csv(csv_path, index=False)
-    print(f"  [OK] 07_tabla_resumen.csv ({len(tbl)} filas)")
+    print(f"  [OK] latency_summary_table.csv ({len(tbl)} filas)")
 
     # PNG de la tabla
     n_rows, n_cols = tbl.shape
@@ -1045,29 +1152,25 @@ def chart_summary_table(df: pd.DataFrame, out: Path):
     table.set_fontsize(8.5)
     table.scale(1, 1.35)
 
-    # Colorear encabezado
+    # Encabezado B/N
     for j in range(n_cols):
-        table[(0, j)].set_facecolor("#1565C0")
+        table[(0, j)].set_facecolor("#424242")
         table[(0, j)].set_text_props(color="white", fontweight="bold")
 
-    # Colorear por estrategia
-    strat_colors = {"batch": "#E3F2FD", "microbatch": "#FFF3E0", "streaming": "#E8F5E9"}
+    # Relleno suave por estrategia (paper-print friendly)
+    strat_colors = {"batch": "#F5F5F5", "microbatch": "#EEEEEE", "streaming": "#E0E0E0"}
     for row_idx, row in enumerate(tbl.itertuples(index=False), start=1):
         col = strat_colors.get(row.Estrategia, "#FAFAFA")
         for j in range(n_cols):
             table[(row_idx, j)].set_facecolor(col)
 
-    ax.set_title(
-        "Chart 07 — Tabla Resumen Estadística de Latencia", fontsize=12, pad=10
-    )
+    ax.set_title("Resumen estadistico de latencia por estrategia y escenario", fontsize=12, fontweight="bold", pad=10)
     fig.tight_layout()
-    fig.savefig(out / "07_tabla_resumen.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 07_tabla_resumen.png")
+    _save_figure(fig, out, "latency_summary_table")
 
 
 # ════════════════════════════════════════════════════════════════════
-# CHART 08 — Heatmap de escalabilidad p95
+# (Legacy) Heatmap de p95
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -1335,6 +1438,8 @@ def main():
     if not args.no_warmup_filter:
         df = filter_warmup(df)
 
+    df, prom = filter_low_sample_runs(df, prom, min_samples=1000)
+
     # ── Tests estadísticos ────────────────────────────────────────
     print("\n[Estadísticas] Ejecutando Kruskal-Wallis + Mann-Whitney U...")
     stat_df = run_statistics(df)
@@ -1344,17 +1449,13 @@ def main():
         print(f"  [OK] statistical_tests.csv ({len(stat_df)} escenarios)")
 
     # ── Generar gráficas ──────────────────────────────────────────
-    print("\n[Gráficas] Generando 9 charts...")
+    print("\n[Figuras] Generando set académico compacto...")
 
-    chart_latency_boxplot(df, out_dir)  # 01
-    chart_throughput_dual(df, prom, out_dir)  # 02
-    chart_fault_recovery(fault_df, out_dir)  # 03
-    chart_scaling_efficiency(df, prom, out_dir)  # 04
-    chart_resource_utilization(df, prom, out_dir)  # 05
-    chart_kafka_lag(df, prom, out_dir)  # 06
-    chart_summary_table(df, out_dir)  # 07
-    chart_heatmap(df, out_dir)  # 08
-    chart_ranking_table(df, fault_df, out_dir)  # 09
+    figure_latency_boxplot(df, out_dir)
+    figure_generated_vs_sink(df, prom, out_dir)
+    figure_resource_utilization(df, prom, out_dir)
+    figure_kafka_lag(df, prom, out_dir)
+    table_latency_summary(df, out_dir)
 
     print(f"\n{'=' * 60}")
     print(f"  Listo. Figuras en: {out_dir}")

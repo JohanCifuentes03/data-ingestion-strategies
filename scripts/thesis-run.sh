@@ -200,13 +200,20 @@ run_experiment distributed "$PROFILE"
 log "Collecting distributed outputs"
 make aws-collect
 
+# collect-results.sh normaliza a results-distributed/<strategy>/<scenario>/<run>/...
+# Mantener compatibilidad si existe una carpeta intermedia legacy `results/`.
+DIST_RESULTS_DIR="results-distributed"
+if [[ -d "results-distributed/results" ]]; then
+    DIST_RESULTS_DIR="results-distributed/results"
+fi
+
 if [[ "$SKIP_ANALYZE" = false ]]; then
-    log "Analyzing distributed results"
-    .venv/bin/python -m benchmark.analysis.analyzer --results-dir results-distributed --output results-distributed/figures
+    log "Analyzing distributed results (${DIST_RESULTS_DIR})"
+    .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$DIST_RESULTS_DIR" --output results-distributed/figures
 fi
 if [[ "$SKIP_VALIDATE" = false ]]; then
-    log "Validating distributed results"
-    .venv/bin/python -m benchmark.validation.validator --results-dir results-distributed
+    log "Validating distributed results (${DIST_RESULTS_DIR})"
+    .venv/bin/python -m benchmark.validation.validator --results-dir "$DIST_RESULTS_DIR"
 fi
 
 if [[ "$TEARDOWN" = true ]]; then
