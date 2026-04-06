@@ -10,7 +10,7 @@
         experiment-quick fault-inject scaling-test archive \
         provision distributed-deploy distributed-experiment distributed-teardown \
         aws-collect dev-compile test-integration validate logs reset \
-        local-experiment local-smoke
+        local-experiment local-smoke thesis-local thesis-distributed
 
 .DEFAULT_GOAL := help
 
@@ -62,7 +62,7 @@ help: ## Mostrar esta ayuda
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(YELLOW)Quick Commands:$(NC)"
-	@grep -E '^(setup|local-experiment|local-smoke):.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -E '^(setup|local-experiment|local-smoke|thesis-local|thesis-distributed):.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(RED)Distributed Mode (AWS):$(NC)"
@@ -235,6 +235,12 @@ local-experiment: setup build up ## Experimento completo local (one-command)
 local-smoke: setup build up ## Smoke test local (one-command)
 	@$(MAKE) smoke-test MODE=local
 	@echo "$(GREEN)✅ Smoke test completado$(NC)"
+
+thesis-local: ## Pipeline tesis local (quick por defecto)
+	bash scripts/thesis-run.sh --mode local --profile quick
+
+thesis-distributed: ## Pipeline tesis distribuido (quick por defecto)
+	bash scripts/thesis-run.sh --mode distributed --profile quick
 
 # ══════════════════════════════════════════════════════════════════
 # Development

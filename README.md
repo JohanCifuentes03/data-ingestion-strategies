@@ -179,13 +179,16 @@ make build              # Build Docker images
 # Local Experiments
 make local-experiment   # Full benchmark (all strategies)
 make local-smoke        # Quick 5-minute test
-make local-batch        # Run only batch strategy
 
 # Distributed Deployment (AWS)
 make provision          # Provision AWS infrastructure
 make distributed-deploy # Deploy services via Ansible
 make distributed-experiment  # Run full benchmark on AWS
 make distributed-teardown    # Destroy AWS resources
+
+# Thesis one-command pipelines
+bash scripts/thesis-run.sh --mode local --profile quick
+bash scripts/thesis-run.sh --mode distributed --profile quick
 
 # Analysis
 make analyze            # Generate all charts
@@ -194,6 +197,24 @@ make validate           # Validate results
 # Cleanup
 make clean              # Remove build artifacts
 make clean-results      # Remove experiment results
+```
+
+### Thesis One-Command Runner
+
+Use `scripts/thesis-run.sh` to orchestrate setup, execution, collection, analysis, and validation.
+
+```bash
+# Local thesis quick run
+bash scripts/thesis-run.sh --mode local --profile quick
+
+# Distributed thesis smoke run
+bash scripts/thesis-run.sh --mode distributed --profile smoke
+
+# Distributed stronger run (custom)
+bash scripts/thesis-run.sh --mode distributed --strategies "batch microbatch streaming" --scenarios "low-load medium-load high-load" --reps 2 --duration 180
+
+# Optional teardown at end
+bash scripts/thesis-run.sh --mode distributed --profile quick --teardown
 ```
 
 ## 📈 Results & Metrics
