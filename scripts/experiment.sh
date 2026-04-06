@@ -164,8 +164,10 @@ for STRATEGY in $STRATEGIES; do
 
             # ── Reset probe CSV before each run ───────────────────
             echo "[experiment] Truncating probe CSV for fresh run..."
-            docker compose exec -T probe sh -c \
-                "echo 'event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id' > /results/latency_samples.csv" 2>/dev/null || true
+            if [ "${MODE:-local}" = "local" ]; then
+                docker compose exec -T probe sh -c \
+                    "echo 'event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id' > /results/latency_samples.csv" 2>/dev/null || true
+            fi
 
             # ── Run the strategy ───────────────────────────────────
             case "$STRATEGY" in
