@@ -47,6 +47,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
 REMOTE="${SSH_USER}@${CLOUD_VM_SINK_PUBLIC_IP}"
 REMOTE_RESULTS="~/data-ingestion-strategies/results/"
 LOCAL_DEST="$SCRIPT_DIR/results-distributed"
+export LOCAL_DEST
 
 echo ""
 echo "┌──────────────────────────────────────────────────────────────┐"
@@ -75,16 +76,39 @@ echo -e "${GREEN}✓${NC} Conectividad SSH OK"
 
 # Crear directorio destino local
 mkdir -p "$LOCAL_DEST"
+rm -rf "$LOCAL_DEST/results" 2>/dev/null || true
 
 # Copiar resultados
 echo ""
 echo "Copiando resultados (puede tardar según el volumen de datos)..."
 scp -r $SSH_OPTS -i "$SSH_KEY" "${REMOTE}:${REMOTE_RESULTS}" "$LOCAL_DEST/"
 
+# Normalizar estructura: results-distributed/<strategy>/<scenario>/<run_id>/...
+if [ -d "$LOCAL_DEST/results" ]; then
+    shopt -s dotglob nullglob
+    mv "$LOCAL_DEST/results"/* "$LOCAL_DEST/" 2>/dev/null || true
+    shopt -u dotglob nullglob
+    rmdir "$LOCAL_DEST/results" 2>/dev/null || true
+fi
+
 # Calcular estadísticas de lo copiado
 CSV_COUNT=$(find "$LOCAL_DEST" -name "latency_samples.csv" 2>/dev/null | wc -l | tr -d ' ')
-TOTAL_LINES=$(find "$LOCAL_DEST" -name "latency_samples.csv" \
-    -exec tail -n +2 {} \; 2>/dev/null | wc -l | tr -d ' ')
+TOTAL_LINES=$(
+python3 - <<'PY'
+import os
+from pathlib import Path
+root = Path(os.environ["LOCAL_DEST"])
+total = 0
+for f in root.rglob("latency_samples.csv"):
+    try:
+        with f.open("r", encoding="utf-8", errors="ignore") as h:
+            lines = sum(1 for _ in h)
+        total += max(lines - 1, 0)
+    except Exception:
+        pass
+print(total)
+PY
+)
 DISK_USAGE=$(du -sh "$LOCAL_DEST" 2>/dev/null | cut -f1)
 
 echo ""

@@ -215,7 +215,7 @@ make clean-results      # Remove experiment results
 python -m benchmark.analysis.analyzer --results-dir results/
 
 # Validate experiment results
-python -m benchmark.validation.validator --results-dir results/ --output validation_report.html
+python -m benchmark.validation.validator --results-dir results/
 ```
 
 Charts are exported in multiple formats:
@@ -226,7 +226,7 @@ Charts are exported in multiple formats:
 ## 🐛 Known Limitations
 
 1. **Local Mode**: Requires 16GB+ RAM for concurrent strategies
-2. **Distributed Mode**: run.sh doesn't support remote job submission (use SSH + docker compose)
+2. **Distributed Mode**: A full 60-run distributed experiment can take 4-6 hours and should be executed in sessions
 3. **Fault Injection**: Manual verification required for complex failure scenarios
 4. **Cost**: AWS distributed tests cost ~$5-10 per full benchmark run
 
@@ -264,4 +264,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 **Status**: Production-ready for thesis defense ✅  
-**Last Updated**: 2026-04-05
+**Last Updated**: 2026-04-06

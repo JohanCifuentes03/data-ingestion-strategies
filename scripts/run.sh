@@ -56,6 +56,24 @@ sync_probe_csv_from_producer() {
         "$PROBE_GLOBAL" >/dev/null 2>&1 || true
 }
 
+archive_run_to_sink() {
+    if [ "$MODE" != "distributed" ]; then
+        return
+    fi
+    local run_dir="$1"
+    local strategy="$2"
+    local scenario="$3"
+    local run_id="$4"
+    local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+    [ -z "$sink_ip" ] && return
+
+    remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "$run_dir/latency_samples.csv" \
+        "$run_dir/prometheus_snapshot.csv" \
+        "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
+}
+
 RESULTS_BASE="$ROOT_DIR/results"
 PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
 PROBE_HEADER="event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id"
@@ -559,6 +577,7 @@ run_batch() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    archive_run_to_sink "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
 
     log "Completed: batch/$SCENARIO/$RUN_ID"
 }
@@ -635,6 +654,7 @@ run_microbatch() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    archive_run_to_sink "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
 
     log "Completed: microbatch/$SCENARIO/$RUN_ID"
 }
@@ -743,6 +763,7 @@ run_streaming() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    archive_run_to_sink "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
 
     log "Completed: streaming/$SCENARIO/$RUN_ID"
 }
