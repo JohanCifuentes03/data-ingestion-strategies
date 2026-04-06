@@ -169,6 +169,23 @@ flowchart LR
 - **Time consistency**: distributed runs enforce NTP synchronization checks before experiments to keep timestamp comparisons valid.
 - **Idempotency**: sink writes use `ON CONFLICT DO NOTHING` keyed by `event_id` to avoid duplicates after retries/restarts.
 
+#### 2.3.5 Control Plane vs Data Plane vs Observability Plane
+
+| Plane | Main Actors | Direction | Purpose |
+|------|-------------|-----------|---------|
+| Control plane | Terraform + Ansible + scripts | Operator -> all VMs | Provision, configure, deploy, and orchestrate runs |
+| Data plane | Generator, Kafka, Spark/Flink, PostgreSQL, Probe | Producer -> Broker -> Compute -> Sink -> Probe(read) | Produce, transport, process, persist, and measure visibility latency |
+| Observability plane | Prometheus + exporters + cAdvisor + probe metrics | Prometheus(node-sink) -> scrape targets | Throughput, lag, CPU, memory, and run telemetry collection |
+
+#### 2.3.6 Network Flows With Payload Semantics
+
+| Flow | Transport | Payload Type | Frequency |
+|------|-----------|--------------|-----------|
+| Generator -> Kafka | Kafka/TCP `9092` | JSON UTF-8 event bytes | per event |
+| Spark/Flink -> PostgreSQL | JDBC/TCP `5432` | Row insert (`event_id`, `produced_at`, `payload`, metadata) | per event / per batch |
+| Probe -> PostgreSQL | SQL/TCP `5432` | Select visible rows for sampling | periodic polling |
+| Prometheus -> metrics targets | HTTP scrape | Text exposition metrics | every scrape interval |
+
 ### 2.4 Event Schema
 
 ```json
@@ -193,6 +210,42 @@ CREATE TABLE events (
 ```
 
 **Key Design Decision**: `visible_at` is set by PostgreSQL's `DEFAULT` to ensure consistent measurement point across all strategies.
+
+#### 2.4.1 Data Type Catalog Across the Pipeline
+
+| Stage | Artifact | Format | Key fields |
+|------|----------|--------|------------|
+| Workload generation | Produced event | JSON (UTF-8 bytes) | `event_id`, `produced_at`, `schema`, domain fields, `payload` |
+| Message transport | Kafka record value | bytes | serialized event JSON |
+| Persistence | Sink row (`events`) | PostgreSQL row | `event_id`, `produced_at`, `visible_at`, `payload`, `strategy`, `scenario`, `run_id` |
+| Latency measurement | `latency_samples.csv` | CSV | `event_id`, `produced_at`, `visible_at`, `latency_ms`, labels |
+| Telemetry snapshot | `prometheus_snapshot.csv` | CSV | `metric`, `value`, `unit`, labels |
+
+#### 2.4.2 Official Thesis Workload Profile (Current Repository Baseline)
+
+These values match the generator defaults and are the baseline for thesis reporting:
+
+| Scenario | Event rate | Payload base | Schema | Run duration (typical) |
+|---------|------------:|-------------:|--------|-----------------------:|
+| `low-load` | 2,000 ev/s | 512 B | `iot_sensor` | 300 s |
+| `medium-load` | 10,000 ev/s | 512 B | `financial_tick` | 300 s |
+| `high-load` | 30,000 ev/s | 512 B | `health_monitor` | 300 s |
+
+#### 2.4.3 Approximate Data Volume Budget (Generated Stream)
+
+Assumptions for quick planning:
+- JSON event envelope overhead (metadata + keys + structure): ~200-300 B/event
+- Effective event bytes at Kafka ingress for 512 B payload profile: ~700-900 B/event
+
+Estimated generated volume per 300 s run:
+
+| Scenario | Events/run | Approx bytes/event | Approx total volume/run |
+|---------|-----------:|-------------------:|-------------------------:|
+| `low-load` | 600,000 | 700-900 B | ~0.4-0.5 GB |
+| `medium-load` | 3,000,000 | 700-900 B | ~2.1-2.7 GB |
+| `high-load` | 9,000,000 | 700-900 B | ~6.3-8.1 GB |
+
+These are generated-stream estimates (producer side). Sink-visible totals can be lower depending on strategy, runtime limits, and backpressure.
 
 ## 3. Implementation Details
 
@@ -465,7 +518,7 @@ Latency = visible_at - produced_at
 
 **Generalizability**:
 - ✅ **Workload**: Synthetic but representative (IoT sensors, financial ticks)
-- ⚠️ **Scale**: Single-node local, 3-node distributed (not "big data" scale)
+- ⚠️ **Scale**: Single-node local, 4-VM distributed topology (not "big data" scale)
 - ⚠️ **Operations**: Simple INSERT (no complex joins, aggregations)
 
 **Applicability**: Results apply to:

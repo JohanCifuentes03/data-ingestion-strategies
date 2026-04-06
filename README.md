@@ -21,7 +21,7 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 | **Micro-batch** | ~5 seconds | High | < 30s | Near real-time dashboards |
 | **Stream** | ~200ms | Medium-High | < 10s | Real-time monitoring, IoT |
 
-*Results from distributed deployment (3-node AWS cluster, medium load)*
+*Results from distributed deployment (4-VM AWS topology, medium load)*
 
 ## 🚀 Quick Start
 
@@ -128,6 +128,35 @@ latency_ms = visible_at - produced_at
 ```
 
 Probe outputs are written to `latency_samples.csv` and are the primary source for statistical analysis and validation.
+
+### Topology & Data Budget (Thesis Defense)
+
+- **Distributed network topology (4 VMs)**:
+  - `node-producers (10.0.1.10)`: Generator + Probe
+  - `node-broker (10.0.1.20)`: Kafka + ZooKeeper + kafka-exporter
+  - `node-compute (10.0.1.30)`: Spark + Flink
+  - `node-sink (10.0.1.40)`: PostgreSQL + Prometheus
+- **Main data-plane flow**: `Generator -> Kafka:9092 -> Spark/Flink -> PostgreSQL:5432 -> Probe(read-only)`
+- **Observability flow**: `Prometheus(node-sink) -> scrape targets (probe, exporter, cadvisor, engines)`
+- **Event payload model**: JSON UTF-8 with `event_id`, `produced_at`, `schema`, domain fields, and `payload`.
+
+Official thesis scenario profile used by this repository (`high-load = 30,000 ev/s`):
+
+| Escenario | Tasa objetivo | Payload base | Schema | Eventos estimados por run (300s) |
+|----------|---------------:|-------------:|--------|----------------------------------:|
+| low-load | 2,000 ev/s | 512 B | `iot_sensor` | 600,000 |
+| medium-load | 10,000 ev/s | 512 B | `financial_tick` | 3,000,000 |
+| high-load | 30,000 ev/s | 512 B | `health_monitor` | 9,000,000 |
+
+Approximate generated volume (JSON over Kafka) for a 300s run:
+
+- **low-load**: ~0.4-0.5 GB
+- **medium-load**: ~2.1-2.7 GB
+- **high-load**: ~6.3-8.1 GB
+
+For full defense-oriented details (protocols, ports, data types, formulas, and per-experiment totals), see:
+- `docs/architecture.md`
+- `docs/experiment_protocol.md`
 
 ```mermaid
 flowchart TB
