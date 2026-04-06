@@ -18,6 +18,8 @@ public final class JdbcEventWriter {
     private JdbcEventWriter() {
     }
 
+    private static final int JDBC_BATCH_SIZE = 5_000;
+
     private static final String INSERT_SQL = """
             INSERT INTO events(event_id, produced_at, payload, strategy, scenario, run_id)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -31,6 +33,7 @@ public final class JdbcEventWriter {
         }
         try (Connection connection = DriverManager.getConnection(url, properties);
                 PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+            int pending = 0;
             for (Event event : events) {
                 statement.setObject(1, event.getEventId());
                 statement.setLong(2, event.getProducedAt());
@@ -39,8 +42,15 @@ public final class JdbcEventWriter {
                 statement.setString(5, scenario);
                 statement.setString(6, runId);
                 statement.addBatch();
+                pending++;
+                if (pending >= JDBC_BATCH_SIZE) {
+                    statement.executeBatch();
+                    pending = 0;
+                }
             }
-            statement.executeBatch();
+            if (pending > 0) {
+                statement.executeBatch();
+            }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to write batch", e);
         }

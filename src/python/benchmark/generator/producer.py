@@ -31,27 +31,27 @@ log = logging.getLogger("generator")
 MESSAGES_TOTAL = Counter(
     "kafka_produced_messages_total",
     "Total events enviados a Kafka",
-    labelnames=["scenario"],
+    labelnames=["scenario", "run_id", "strategy"],
 )
 BYTES_TOTAL = Counter(
     "kafka_produced_bytes_total",
     "Bytes producidos hacia Kafka",
-    labelnames=["scenario"],
+    labelnames=["scenario", "run_id", "strategy"],
 )
 ERROR_TOTAL = Counter(
     "kafka_produce_errors_total",
     "Errores al enviar eventos",
-    labelnames=["scenario"],
+    labelnames=["scenario", "run_id", "strategy"],
 )
 CURRENT_RATE = Gauge(
     "generator_current_rate",
     "Tasa objetivo actual (eventos/s)",
-    labelnames=["scenario"],
+    labelnames=["scenario", "run_id", "strategy"],
 )
 PRODUCE_LAT_MS = Histogram(
     "kafka_produce_latency_ms",
     "Latencia de produce() a Kafka en ms",
-    labelnames=["scenario"],
+    labelnames=["scenario", "run_id", "strategy"],
     buckets=(0.5, 1, 2, 5, 10, 20, 50, 100, 250, 500, 1000),
 )
 
@@ -220,6 +220,8 @@ def producer_thread(
     bootstrap_servers: str,
     topic: str,
     scenario_name: str,
+    run_id: str,
+    strategy: str,
     state: SharedState,
     target_rate_fn,  # callable() → int (events/s for this thread)
     interval: float = 0.1,  # send window in seconds (100ms → fine-grained pacing)
@@ -258,14 +260,14 @@ def producer_thread(
                     producer.produce(topic, value=raw, key=key, on_delivery=on_delivery)
                     producer.poll(0)
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                    PRODUCE_LAT_MS.labels(scenario_name).observe(elapsed_ms)
-                    MESSAGES_TOTAL.labels(scenario_name).inc()
-                    BYTES_TOTAL.labels(scenario_name).inc(len(raw))
+                    PRODUCE_LAT_MS.labels(scenario_name, run_id, strategy).observe(elapsed_ms)
+                    MESSAGES_TOTAL.labels(scenario_name, run_id, strategy).inc()
+                    BYTES_TOTAL.labels(scenario_name, run_id, strategy).inc(len(raw))
                 except BufferError:
                     producer.poll(0.01)
                 except Exception as exc:
                     log.error("Thread %d: produce error: %s", thread_id, exc)
-                    ERROR_TOTAL.labels(scenario_name).inc()
+                    ERROR_TOTAL.labels(scenario_name, run_id, strategy).inc()
 
             producer.flush(0)  # non-blocking flush
 
@@ -312,6 +314,8 @@ def main():
 
     scenarios = load_scenarios()
     scenario_name, scenario = resolve_scenario(scenarios)
+    run_id = os.getenv("RUN_ID", "run_1")
+    strategy = os.getenv("STRATEGY", "unknown")
 
     topic = os.getenv("TOPIC_NAME", "events")
     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -334,6 +338,7 @@ def main():
         f"{run_duration}s" if run_duration > 0 else "infinite",
         warmup_seconds,
     )
+    log.info("Labels: run_id=%s strategy=%s", run_id, strategy)
 
     prom_port = int(os.getenv("PROMETHEUS_PORT", "8000"))
     start_http_server(prom_port)
@@ -358,7 +363,7 @@ def main():
     for i in range(n_threads):
         t = threading.Thread(
             target=producer_thread,
-            args=(i, bootstrap_servers, topic, scenario_name, state, current_rate_fn),
+            args=(i, bootstrap_servers, topic, scenario_name, run_id, strategy, state, current_rate_fn),
             daemon=True,
         )
         t.start()
@@ -398,7 +403,7 @@ def main():
 
             new_rate = burst_rate if in_burst else base_rate
             state.current_rate = new_rate
-            CURRENT_RATE.labels(scenario_name).set(new_rate)
+            CURRENT_RATE.labels(scenario_name, run_id, strategy).set(new_rate)
 
             time.sleep(0.5)  # control loop ticks every 500ms
 

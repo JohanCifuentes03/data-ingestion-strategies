@@ -144,10 +144,20 @@ start_generator_for_scenario() {
         export GENERATOR_EVENT_RATE="$GENERATOR_DEFAULT_RATE"
         export GENERATOR_PAYLOAD_BYTES="$GENERATOR_DEFAULT_PAYLOAD"
         export GENERATOR_EVENT_SCHEMA="$GENERATOR_DEFAULT_SCHEMA"
+        export RUN_ID="$RUN_ID"
+        export STRATEGY="$STRATEGY"
         if [ "$MODE" = "distributed" ]; then
             local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
             remote_shell "$producer_ip" "docker rm -f tesis-generator >/dev/null 2>&1 || true"
-            remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps generator"
+            remote_shell "$producer_ip" \
+                "cd ~/data-ingestion-strategies && \
+                 GENERATOR_SCENARIO='${GENERATOR_SCENARIO}' \
+                 GENERATOR_EVENT_RATE='${GENERATOR_EVENT_RATE}' \
+                 GENERATOR_PAYLOAD_BYTES='${GENERATOR_PAYLOAD_BYTES}' \
+                 GENERATOR_EVENT_SCHEMA='${GENERATOR_EVENT_SCHEMA}' \
+                 RUN_ID='${RUN_ID}' \
+                 STRATEGY='${STRATEGY}' \
+                 docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
         fi
@@ -442,12 +452,18 @@ except:
     local container_filter='name=~"tesis-.*"'
     local cpu_query="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",${container_filter}}[${prom_window}])) / ${duration}"
     local mem_query="sum(avg_over_time(container_memory_rss{job=\"cadvisor\",${container_filter}}[${prom_window}]))"
-    local prod_query="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\"}[${prom_window}])) / ${duration}"
+    local prod_query="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\",run_id=\"${run_id}\",strategy=\"${strategy}\"}[${prom_window}])) / ${duration}"
+
+    # Backward compatibility for historical metric labels (scenario-only)
+    local prod_query_legacy="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\"}[${prom_window}])) / ${duration}"
     local kafka_lag_query='max_over_time(kafka_consumergroup_lag{topic="events"}['"${prom_window}"'])'
 
     CPU_TOTAL=$(query_or_zero "$cpu_query" "$prom_time")
     MEM_TOTAL=$(query_or_zero "$mem_query" "$prom_time")
     TPUT_PRODUCED=$(query_or_zero "$prod_query" "$prom_time")
+    if [ "${TPUT_PRODUCED:-0}" = "0" ] || [ "${TPUT_PRODUCED:-0}" = "0.0" ]; then
+        TPUT_PRODUCED=$(query_or_zero "$prod_query_legacy" "$prom_time")
+    fi
     KAFKA_LAG=$(query_or_zero "$kafka_lag_query" "$prom_time")
 
     echo "${strategy},${scenario},${run_id},cpu_total_cores,${CPU_TOTAL},cores" >>"$out_file"
