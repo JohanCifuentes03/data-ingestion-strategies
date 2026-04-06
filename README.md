@@ -111,6 +111,24 @@ flowchart LR
     PR -.metrics.-> PM
 ```
 
+### Components at a glance
+
+- **Producer (`benchmark.generator`)**: generates synthetic events with `event_id`, `produced_at`, payload size, and scenario-specific rate; writes to Kafka topic `events`.
+- **Kafka (broker + topic partitions)**: decouples producers from consumers, buffers bursts, and enables parallel consumption (12 partitions by default).
+- **Processing strategies**:
+  - **Batch (Spark Batch)**: reads accumulated offsets and writes in larger JDBC batches.
+  - **Micro-batch (Spark Structured Streaming)**: processes periodic mini-batches with trigger/checkpoint semantics.
+  - **Streaming (Flink)**: continuous event-at-a-time pipeline with low-latency sink writes.
+- **Sink (PostgreSQL)**: persistence layer where each row gets `visible_at` (insert visibility timestamp), enabling a common latency reference.
+- **Observability (Prometheus + exporters + cAdvisor)**: scrapes throughput, lag, and resource metrics across all services.
+- **Probe (`benchmark.probe.availability_probe`)**: continuously polls sink for newly visible rows and computes end-to-end latency as:
+
+```text
+latency_ms = visible_at - produced_at
+```
+
+Probe outputs are written to `latency_samples.csv` and are the primary source for statistical analysis and validation.
+
 ```mermaid
 flowchart TB
     subgraph LAT[Latency/Throughput Envelope]
@@ -151,6 +169,7 @@ flowchart TB
 ## 📖 Detailed Documentation
 
 - **[Architecture](docs/architecture.md)**: System design, components, and implementation details
+- **[Architecture: Distributed Topology](docs/architecture.md#23-deployment-topologies-local-and-distributed)**: VM layout, network, protocols, and ports
 - **[Experiment Protocol](docs/experiment_protocol.md)**: Methodology, metrics, and statistical analysis
 - **[Reproducibility Guide](docs/reproducibility/)**: Environment specs and experiment checklist
 - **[Setup Guides](docs/setup/)**:

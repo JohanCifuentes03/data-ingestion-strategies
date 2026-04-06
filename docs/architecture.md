@@ -101,7 +101,75 @@ sequenceDiagram
 5. **Latency Measurement**: Probe continuously queries PostgreSQL for new events
 6. **Metrics Collection**: Prometheus scrapes metrics from all components
 
-### 2.3 Event Schema
+### 2.3 Deployment Topologies (Local and Distributed)
+
+The benchmark supports two operational topologies:
+
+- **Local topology**: all services run on one workstation via `infra/docker/compose/docker-compose.yml`
+- **Distributed topology**: services are split across 4 VMs in a private cloud network and orchestrated with Terraform + Ansible
+
+#### 2.3.1 Local Topology (Single Host)
+
+```mermaid
+flowchart LR
+    subgraph H[Single Docker Host]
+      G[Generator + Probe]
+      K[Kafka + Zookeeper]
+      C[Compute: Spark + Flink]
+      S[Sink: PostgreSQL + Prometheus]
+      M[cAdvisor + kafka-exporter]
+    end
+
+    G -->|TCP 9092| K
+    K -->|TCP 9092| C
+    C -->|TCP 5432| S
+    S -->|TCP 5432| G
+    M -->|TCP 9090 scrape| S
+```
+
+#### 2.3.2 Distributed Topology (4 VMs)
+
+```mermaid
+flowchart LR
+    subgraph VPC[AWS VPC / private subnet 10.0.1.0/24]
+      P1[VM-1 node-producers\nGenerator + Probe + cAdvisor\n10.0.1.10]
+      B1[VM-2 node-broker\nKafka + Zookeeper + kafka-exporter + cAdvisor\n10.0.1.20]
+      C1[VM-3 node-compute\nSpark Master/Workers + Flink JM/TM + cAdvisor\n10.0.1.30]
+      S1[VM-4 node-sink\nPostgreSQL + Prometheus + cAdvisor\n10.0.1.40]
+    end
+
+    P1 -->|Kafka Produce\nTCP 9092| B1
+    C1 -->|Kafka Consume\nTCP 9092| B1
+    C1 -->|JDBC Writes\nTCP 5432| S1
+    P1 -->|Probe Reads\nTCP 5432| S1
+    S1 -->|Prometheus Scrape\nHTTP 9090 -> targets| P1
+    S1 -->|Prometheus Scrape\nHTTP 9090 -> targets| B1
+    S1 -->|Prometheus Scrape\nHTTP 9090 -> targets| C1
+```
+
+#### 2.3.3 Communication Protocols and Ports
+
+| Source | Destination | Protocol | Port(s) | Purpose |
+|--------|-------------|----------|---------|---------|
+| Generator | Kafka broker | Kafka/TCP | `9092` | Publish `events` topic |
+| Spark/Flink jobs | Kafka broker | Kafka/TCP | `9092` | Consume events |
+| Spark/Flink jobs | PostgreSQL sink | PostgreSQL/TCP | `5432` | Persist processed events |
+| Probe | PostgreSQL sink | PostgreSQL/TCP | `5432` | Read visible rows and compute latency |
+| Prometheus | kafka-exporter | HTTP | `9308` | Kafka throughput/lag metrics |
+| Prometheus | Probe metrics endpoint | HTTP | `8001` | Probe health and sample counters |
+| Prometheus | cAdvisor | HTTP | `8083` | Container CPU/memory/network metrics |
+| Prometheus UI | User/browser | HTTP | `9090` | Metrics query and dashboarding |
+| Spark UI | User/browser | HTTP | `8080` | Spark runtime inspection |
+| Flink UI | User/browser | HTTP | `8081` | Flink runtime inspection |
+
+#### 2.3.4 Network and Reliability Notes
+
+- **Control plane**: Terraform provisions VMs/network; Ansible configures runtime services and deploys compose stacks.
+- **Data plane**: event flow remains unidirectional (`Producer -> Kafka -> Compute -> Sink`), while probe performs read-only sampling.
+- **Time consistency**: distributed runs enforce NTP synchronization checks before experiments to keep timestamp comparisons valid.
+- **Idempotency**: sink writes use `ON CONFLICT DO NOTHING` keyed by `event_id` to avoid duplicates after retries/restarts.
+
+### 2.4 Event Schema
 
 ```json
 {
