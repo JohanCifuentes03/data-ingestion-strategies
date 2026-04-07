@@ -912,67 +912,75 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
         print("  [SKIP] resource_efficiency_scatter.png")
         return
 
-    fig, ax = plt.subplots(figsize=(7.5, 5.2))
-    for strategy in STRATEGY_ORDER:
-        sub = res_df[res_df["strategy"] == strategy]
-        if sub.empty:
-            continue
-        ax.scatter(
-            sub["cpu_cores"],
-            sub["mem_mb_per_event"],
-            label=STRATEGY_LABELS.get(strategy, strategy).replace("\n", " "),
-            color=GRAYSCALE_FACE.get(strategy, "#9E9E9E"),
-            s=80,
-            alpha=0.75,
-            edgecolors="#222",
-            linewidths=0.8,
-            marker={"batch": "o", "microbatch": "s", "streaming": "D"}.get(strategy, "o"),
-            zorder=3,
-        )
-        # Centroides con marcador destacado + etiqueta
-        cx = sub["cpu_cores"].mean()
-        cy = sub["mem_mb_per_event"].mean()
-        ax.scatter(
-            cx,
-            cy,
-            facecolors="none",
-            edgecolors="#111",
-            s=340,
-            marker="o",
-            linewidths=2.0,
-            zorder=6,
-        )
-        ax.scatter(
-            cx,
-            cy,
-            color="#212121",
-            s=80,
-            marker="X",
-            linewidths=1.0,
-            zorder=7,
-        )
-        ax.annotate(
-            f"Centroide {STRATEGY_LABELS_SHORT.get(strategy, strategy)}",
-            xy=(cx, cy),
-            xytext=(8, 8),
-            textcoords="offset points",
-            fontsize=8,
-            color="#111",
-            bbox=dict(facecolor="white", edgecolor="#555", boxstyle="round,pad=0.15", alpha=0.9),
-            zorder=8,
-        )
+    scenarios = _sort_scenarios(res_df["scenario"].unique())
+    n = len(scenarios)
+    fig, axes = plt.subplots(1, n, figsize=(max(9, 4.2 * n), 5.6), sharey=True, squeeze=False)
+    axes = axes[0]
 
-    ax.set_xlabel("CPU total (cores)", fontsize=11)
-    ax.set_ylabel("Memoria RSS por evento (MB/evento)", fontsize=11)
-    ax.legend(fontsize=9, framealpha=0.9)
-    ax.set_title(
-        "Eficiencia de recursos: CPU vs memoria por evento visible\n"
-        "(marcador = run, aro+X = centroide de estrategia)",
-        fontsize=12,
+    strat_abbrev = {"batch": "B", "microbatch": "MB", "streaming": "S"}
+    marker_map = {"batch": "o", "microbatch": "s", "streaming": "D"}
+
+    for i, scenario in enumerate(scenarios):
+        ax = axes[i]
+        scen_df = res_df[res_df["scenario"] == scenario]
+
+        for strategy in STRATEGY_ORDER:
+            sub = scen_df[scen_df["strategy"] == strategy]
+            if sub.empty:
+                continue
+
+            ax.scatter(
+                sub["cpu_cores"],
+                sub["mem_mb_per_event"],
+                label=STRATEGY_LABELS_SHORT.get(strategy, strategy),
+                color=GRAYSCALE_FACE.get(strategy, "#9E9E9E"),
+                s=78,
+                alpha=0.82,
+                edgecolors="#222",
+                linewidths=0.8,
+                marker=marker_map.get(strategy, "o"),
+                zorder=3,
+            )
+
+            for idx, row in enumerate(sub.itertuples(index=False)):
+                run_num = str(row.run_id).replace("run_", "r")
+                label = f"{run_num}-{strat_abbrev.get(row.strategy, 'X')}"
+                x_off = 5 if idx % 2 == 0 else -5
+                y_off = 7 if idx % 3 == 0 else -7
+                ax.annotate(
+                    label,
+                    xy=(row.cpu_cores, row.mem_mb_per_event),
+                    xytext=(x_off, y_off),
+                    textcoords="offset points",
+                    ha="left" if x_off > 0 else "right",
+                    va="center",
+                    fontsize=7,
+                    color="#222",
+                    zorder=6,
+                )
+
+        ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
+        ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
+        ax.set_xlabel("CPU total (cores)", fontsize=10)
+        if i == 0:
+            ax.set_ylabel("Memoria RSS por evento (MB/evento)", fontsize=10)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    uniq = {}
+    for h, l in zip(handles, labels):
+        if l not in uniq:
+            uniq[l] = h
+    fig.legend(list(uniq.values()), list(uniq.keys()), loc="upper right", framealpha=0.95)
+
+    fig.suptitle(
+        "Eficiencia de recursos por carga: CPU vs memoria por evento visible\n"
+        "Etiqueta de punto: rN-ESTRATEGIA (B=batch, MB=microbatch, S=streaming)",
+        fontsize=11,
         fontweight="bold",
+        y=0.98,
     )
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.90, 0.94])
     _save_figure(fig, out, "resource_efficiency_scatter")
 
 
