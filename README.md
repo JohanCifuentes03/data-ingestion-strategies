@@ -6,14 +6,14 @@
 
 A comprehensive benchmark comparing three data ingestion architectures: **Batch Processing** (Apache Spark), **Micro-batch Processing** (Spark Structured Streaming), and **Stream Processing** (Apache Flink). This research quantifies trade-offs between latency, throughput, resource efficiency, and fault tolerance.
 
-## 🎯 Research Questions
+## Research Questions
 
 1. **RQ1**: How does ingestion strategy affect end-to-end latency under varying workloads?
 2. **RQ2**: What is the throughput-latency trade-off for each strategy?
 3. **RQ3**: How resource-efficient is each strategy in terms of CPU, memory, and cost?
 4. **RQ4**: How do strategies handle failures and recovery?
 
-## 🏆 Key Findings
+## Key Findings
 
 | Strategy | Latency (p50) | Throughput | Recovery Time | Best Use Case |
 |----------|---------------|------------|---------------|---------------|
@@ -23,7 +23,7 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 
 *Results from distributed deployment (4-VM AWS topology, medium load)*
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - **Docker** 20.10+ and **Docker Compose** 2.x
@@ -57,7 +57,7 @@ cat results/summary.csv  # Metrics summary
 make local-smoke
 ```
 
-## 📊 Project Structure
+## Project Structure
 
 ```
 data-ingestion-strategies/
@@ -86,7 +86,7 @@ data-ingestion-strategies/
 └── Makefile                       # One-command operations
 ```
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ### Data Flow
 
@@ -195,7 +195,7 @@ flowchart TB
 
 **Implementation**: `src/jobs/streaming/FlinkStreamingJob.java`
 
-## 📖 Detailed Documentation
+## Detailed Documentation
 
 - **[Architecture](docs/architecture.md)**: System design, components, and implementation details
 - **[Architecture: Distributed Topology](docs/architecture.md#23-deployment-topologies-local-and-distributed)**: VM layout, network, protocols, and ports
@@ -205,19 +205,19 @@ flowchart TB
   - [Local Setup](docs/setup/local.md): Docker Compose walkthrough
   - [Distributed Setup](docs/setup/distributed.md): AWS deployment guide
 
-## 🔬 Reproducibility
+## Reproducibility
 
 This benchmark follows best practices for computational reproducibility:
 
-✅ **Containerized**: All services run in Docker with pinned versions  
-✅ **Declarative**: Infrastructure as Code (Terraform + Ansible)  
-✅ **Versioned**: Git-tracked configurations and dependencies  
-✅ **Documented**: Complete experiment protocol with statistical methods  
-✅ **Validated**: Automated result validation scripts
+- **Containerized**: All services run in Docker with pinned versions  
+- **Declarative**: Infrastructure as Code (Terraform + Ansible)  
+- **Versioned**: Git-tracked configurations and dependencies  
+- **Documented**: Complete experiment protocol with statistical methods  
+- **Validated**: Automated result validation scripts
 
 See [Reproducibility Checklist](docs/reproducibility/experiment-checklist.md) for details.
 
-## 🛠️ Development Commands
+## Development Commands
 
 ```bash
 # Setup
@@ -265,7 +265,7 @@ bash scripts/thesis-run.sh --mode distributed --strategies "batch microbatch str
 bash scripts/thesis-run.sh --mode distributed --profile quick --teardown
 ```
 
-## 📈 Results & Metrics
+## Results & Metrics
 
 ### Primary Metrics
 - **End-to-end Latency**: Time from event production to visibility in sink (p50, p90, p99, p99.9)
@@ -298,39 +298,18 @@ Current compact figure set (thesis-focused):
 - `kafka_consumer_lag.*`: lag/backpressure by strategy and scenario
 - `latency_summary_table.*`: summary table (CSV + figure)
 
-## 🐛 Known Limitations
+## Known Limitations
 
 1. **Local Mode**: Requires 16GB+ RAM for concurrent strategies
 2. **Distributed Mode**: A full 60-run distributed experiment can take 4-6 hours and should be executed in sessions
 3. **Fault Injection**: Manual verification required for complex failure scenarios
 4. **Cost**: AWS distributed tests cost ~$5-10 per full benchmark run
 
-## 📚 Citation
-
-If you use this benchmark in your research, please cite:
-
-```bibtex
-@software{data_ingestion_benchmark,
-  title = {Data Ingestion Strategies: A Comparative Benchmark},
-  author = {Your Name},
-  year = {2026},
-  url = {https://github.com/username/data-ingestion-strategies}
-}
-```
-
-See [CITATION.cff](CITATION.cff) for complete metadata.
-
-## 📄 License
+## License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## 🤝 Acknowledgments
-
-- Apache Spark, Apache Flink, Apache Kafka communities
-- PostgreSQL, Prometheus, Docker projects
-- Research funded by [University/Grant Name]
-
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/username/data-ingestion-strategies/issues)
 - **Documentation**: [docs/](docs/)
@@ -338,5 +317,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-**Status**: Production-ready for thesis defense ✅  
+**Status**: Production-ready for thesis defense  
 **Last Updated**: 2026-04-06

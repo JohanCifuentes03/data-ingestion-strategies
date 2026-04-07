@@ -517,9 +517,9 @@ Latency = visible_at - produced_at
 ### 6.2 External Validity
 
 **Generalizability**:
-- ✅ **Workload**: Synthetic but representative (IoT sensors, financial ticks)
-- ⚠️ **Scale**: Single-node local, 4-VM distributed topology (not "big data" scale)
-- ⚠️ **Operations**: Simple INSERT (no complex joins, aggregations)
+- **Workload**: Synthetic but representative (IoT sensors, financial ticks)
+- **Scale**: Single-node local, 4-VM distributed topology (not "big data" scale)
+- **Operations**: Simple INSERT (no complex joins, aggregations)
 
 **Applicability**: Results apply to:
 - Simple event ingestion pipelines
@@ -534,9 +534,9 @@ Latency = visible_at - produced_at
 ### 6.3 Construct Validity
 
 **Metric Appropriateness**:
-- **Latency**: ✅ Directly measures data availability
-- **Throughput**: ✅ Industry-standard metric
-- **Resource Usage**: ⚠️ CPU/memory alone don't capture all costs (network, disk I/O)
+- **Latency**: Directly measures data availability
+- **Throughput**: Industry-standard metric
+- **Resource Usage**: CPU/memory alone don't capture all costs (network, disk I/O)
 
 ## 7. References
 

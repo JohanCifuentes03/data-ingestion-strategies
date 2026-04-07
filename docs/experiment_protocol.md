@@ -423,15 +423,15 @@ See [experiment-checklist.md](reproducibility/experiment-checklist.md) for compl
 - No security overhead (authentication, encryption)
 
 **Applicability**:
-- ✅ Applies to: Simple event ingestion, OLTP workloads, <100K events/s
-- ⚠️ Limited applicability to: Complex stateful processing, OLAP queries, extreme scale
+- Applies to: Simple event ingestion, OLTP workloads, <100K events/s
+- Limited applicability to: Complex stateful processing, OLAP queries, extreme scale
 
 ### 6.3 Construct Validity
 
 **Metric Validity**:
-- **Latency**: ✅ Directly measures data availability (strong construct validity)
-- **Throughput**: ✅ Standard industry metric
-- **Cost**: ⚠️ AWS pricing only, may not reflect other cloud providers
+- **Latency**: Directly measures data availability (strong construct validity)
+- **Throughput**: Standard industry metric
+- **Cost**: AWS pricing only, may not reflect other cloud providers
 
 **Confounds**:
 - PostgreSQL write latency affects all strategies equally (fair comparison)
