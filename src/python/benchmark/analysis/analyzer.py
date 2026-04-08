@@ -917,7 +917,6 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
     fig, axes = plt.subplots(1, n, figsize=(max(9, 4.2 * n), 5.6), sharey=True, squeeze=False)
     axes = axes[0]
 
-    strat_abbrev = {"batch": "B", "microbatch": "MB", "streaming": "S"}
     marker_map = {"batch": "o", "microbatch": "s", "streaming": "D"}
 
     for i, scenario in enumerate(scenarios):
@@ -929,35 +928,21 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
             if sub.empty:
                 continue
 
+            cx = sub["cpu_cores"].mean()
+            cy = sub["mem_mb_per_event"].mean()
+
             ax.scatter(
-                sub["cpu_cores"],
-                sub["mem_mb_per_event"],
+                [cx],
+                [cy],
                 label=STRATEGY_LABELS_SHORT.get(strategy, strategy),
                 color=GRAYSCALE_FACE.get(strategy, "#9E9E9E"),
-                s=78,
-                alpha=0.82,
+                s=170,
+                alpha=0.92,
                 edgecolors="#222",
-                linewidths=0.8,
+                linewidths=1.0,
                 marker=marker_map.get(strategy, "o"),
-                zorder=3,
+                zorder=4,
             )
-
-            for idx, row in enumerate(sub.itertuples(index=False)):
-                run_num = str(row.run_id).replace("run_", "r")
-                label = f"{run_num}-{strat_abbrev.get(row.strategy, 'X')}"
-                x_off = 5 if idx % 2 == 0 else -5
-                y_off = 7 if idx % 3 == 0 else -7
-                ax.annotate(
-                    label,
-                    xy=(row.cpu_cores, row.mem_mb_per_event),
-                    xytext=(x_off, y_off),
-                    textcoords="offset points",
-                    ha="left" if x_off > 0 else "right",
-                    va="center",
-                    fontsize=7,
-                    color="#222",
-                    zorder=6,
-                )
 
         ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
         ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
@@ -974,7 +959,7 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
 
     fig.suptitle(
         "Eficiencia de recursos por carga: CPU vs memoria por evento visible\n"
-        "Etiqueta de punto: rN-ESTRATEGIA (B=batch, MB=microbatch, S=streaming)",
+        "Cada punto representa el centroide por estrategia en cada escenario",
         fontsize=11,
         fontweight="bold",
         y=0.98,
