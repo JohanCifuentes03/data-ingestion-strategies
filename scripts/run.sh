@@ -98,38 +98,38 @@ set_generator_defaults() {
     case "$scenario" in
         low-load)
             GENERATOR_DEFAULT_RATE=2000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="iot_sensor"
             ;;
         medium-load)
             GENERATOR_DEFAULT_RATE=10000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="financial_tick"
             ;;
         high-load)
             GENERATOR_DEFAULT_RATE=30000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="health_monitor"
             ;;
         extreme-load)
             GENERATOR_DEFAULT_RATE=100000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="iot_sensor"
             ;;
         burst)
             GENERATOR_DEFAULT_RATE=10000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="financial_tick"
             ;;
         mixed-payload)
             GENERATOR_DEFAULT_RATE=10000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="iot_sensor"
             ;;
         *)
             warn "Escenario '$scenario' no reconocido para generator; usando configuracion low-load"
             GENERATOR_DEFAULT_RATE=2000
-            GENERATOR_DEFAULT_PAYLOAD=512
+            GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="iot_sensor"
             ;;
     esac

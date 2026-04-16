@@ -37,7 +37,7 @@ flink_parallelism:         4
 flink_taskmanager_memory:  "2048m"
 
 generator_event_rate:    2000
-generator_payload_bytes: 512
+generator_payload_bytes: 1500
 generator_scenario:      "low-load"
 generator_run_duration:  300
 generator_warmup:        30

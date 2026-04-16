@@ -128,7 +128,7 @@ FLINK_TASKMANAGER_MEMORY=2048m
 
 # Generator
 GENERATOR_EVENT_RATE=1000        # events/second
-GENERATOR_PAYLOAD_BYTES=256      # bytes per event
+GENERATOR_PAYLOAD_BYTES=1500     # minimum bytes per event
 GENERATOR_WARMUP_SECONDS=30      # warmup period
 GENERATOR_RUN_DURATION_SECONDS=0 # 0 = indefinite
 
@@ -140,12 +140,9 @@ PROBE_POLL_INTERVAL_MS=100
 
 | Scenario | Event Rate | Payload Size | Duration |
 |----------|------------|--------------|----------|
-| low-load | 100 ev/s | 256 bytes | 5 min |
-| medium-load | 1,000 ev/s | 256 bytes | 5 min |
-| high-load | 5,000 ev/s | 256 bytes | 5 min |
-| burst | 1,000-10,000 ev/s | 256 bytes | 5 min |
-| extreme-load | 10,000 ev/s | 256 bytes | 5 min |
-| mixed-payload | 1,000 ev/s | 64-1024 bytes | 5 min |
+| low-load | 100 ev/s | 1,500 bytes | 5 min |
+| medium-load | 1,000 ev/s | 1,500 bytes | 5 min |
+| high-load | 5,000 ev/s | 1,500 bytes | 5 min |
 
 ## 5. Resource Limits
 

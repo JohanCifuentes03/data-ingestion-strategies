@@ -144,15 +144,15 @@ Official thesis scenario profile used by this repository (`high-load = 30,000 ev
 
 | Escenario | Tasa objetivo | Payload base | Schema | Eventos estimados por run (300s) |
 |----------|---------------:|-------------:|--------|----------------------------------:|
-| low-load | 2,000 ev/s | 512 B | `iot_sensor` | 600,000 |
-| medium-load | 10,000 ev/s | 512 B | `financial_tick` | 3,000,000 |
-| high-load | 30,000 ev/s | 512 B | `health_monitor` | 9,000,000 |
+| low-load | 2,000 ev/s | 1,500 B | `iot_sensor` | 600,000 |
+| medium-load | 10,000 ev/s | 1,500 B | `financial_tick` | 3,000,000 |
+| high-load | 30,000 ev/s | 1,500 B | `health_monitor` | 9,000,000 |
 
 Approximate generated volume (JSON over Kafka) for a 300s run:
 
-- **low-load**: ~0.4-0.5 GB
-- **medium-load**: ~2.1-2.7 GB
-- **high-load**: ~6.3-8.1 GB
+- **low-load**: ~0.95-1.1 GB
+- **medium-load**: ~4.8-5.6 GB
+- **high-load**: ~14.4-16.8 GB
 
 For full defense-oriented details (protocols, ports, data types, formulas, and per-experiment totals), see:
 - `docs/architecture.md`
@@ -301,7 +301,7 @@ Current compact figure set (thesis-focused):
 ## Known Limitations
 
 1. **Local Mode**: Requires 16GB+ RAM for concurrent strategies
-2. **Distributed Mode**: A full 60-run distributed experiment can take 4-6 hours and should be executed in sessions
+2. **Distributed Mode**: A full 45-run distributed experiment can take around 5 hours and should be executed in sessions
 3. **Fault Injection**: Manual verification required for complex failure scenarios
 4. **Cost**: AWS distributed tests cost ~$5-10 per full benchmark run
 

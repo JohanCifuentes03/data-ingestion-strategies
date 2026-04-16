@@ -59,27 +59,27 @@ PRODUCE_LAT_MS = Histogram(
 DEFAULT_SCENARIOS: dict[str, Any] = {
     "low-load": {
         "event_rate": 2_000,
-        "payload": 512,
+        "payload": 1500,
         "schema": "iot_sensor",
     },
     "medium-load": {
         "event_rate": 10_000,
-        "payload": 512,
+        "payload": 1500,
         "schema": "financial_tick",
     },
     "high-load": {
         "event_rate": 30_000,
-        "payload": 512,
+        "payload": 1500,
         "schema": "health_monitor",
     },
     "extreme-load": {
         "event_rate": 100_000,
-        "payload": 512,
+        "payload": 1500,
         "schema": "iot_sensor",
     },
     "burst": {
         "event_rate": 10_000,
-        "payload": 512,
+        "payload": 1500,
         "burst_rate": 50_000,
         "burst_duration": 60,
         "burst_period": 300,
@@ -87,11 +87,13 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
     },
     "mixed-payload": {
         "event_rate": 10_000,
-        "payload": 512,  # base; rotates across payload_sizes
-        "payload_sizes": [512, 4096, 65536],
+        "payload": 1500,  # base; rotates across payload_sizes
+        "payload_sizes": [1500, 4096, 65536],
         "schema": "iot_sensor",
     },
 }
+
+MIN_PAYLOAD_BYTES = 1500
 
 
 # ── Event schema builders ───────────────────────────────────────────
@@ -203,7 +205,7 @@ class SharedState:
         self.in_burst = False
         self.current_rate = 0
         self.schema = "iot_sensor"
-        self.payload_sizes: list[int] = [512]
+        self.payload_sizes: list[int] = [MIN_PAYLOAD_BYTES]
         self._payload_idx = 0
         self._lock = threading.Lock()
 
@@ -252,8 +254,12 @@ def producer_thread(
                 # then serialize — avoids brittle byte-offset slicing.
                 builder = SCHEMA_BUILDERS.get(schema, _iot_sensor_event)
                 event_dict = builder(payload_size)
-                key = event_dict["event_id"].encode("utf-8")
                 raw = json.dumps(event_dict).encode("utf-8")
+                if len(raw) < payload_size:
+                    deficit = payload_size - len(raw)
+                    event_dict["payload"] = event_dict.get("payload", "") + _rand_str(deficit)
+                    raw = json.dumps(event_dict).encode("utf-8")
+                key = event_dict["event_id"].encode("utf-8")
 
                 t0 = time.perf_counter()
                 try:
@@ -297,7 +303,15 @@ def resolve_scenario(configs: dict):
     key = os.getenv("SCENARIO", "low-load")
     base = configs.get(key, DEFAULT_SCENARIOS["low-load"])
     rate = int(os.getenv("EVENT_RATE", base.get("event_rate", 2000)))
-    payload = int(os.getenv("PAYLOAD_SIZE", base.get("payload", 512)))
+    payload = int(os.getenv("PAYLOAD_SIZE", base.get("payload", MIN_PAYLOAD_BYTES)))
+    if payload < MIN_PAYLOAD_BYTES:
+        log.warning(
+            "PAYLOAD_SIZE=%d es menor al minimo requerido (%d); usando %d",
+            payload,
+            MIN_PAYLOAD_BYTES,
+            MIN_PAYLOAD_BYTES,
+        )
+        payload = MIN_PAYLOAD_BYTES
     schema = os.getenv("EVENT_SCHEMA", base.get("schema", "iot_sensor"))
     return key, {**base, "event_rate": rate, "payload": payload, "schema": schema}
 
@@ -325,6 +339,7 @@ def main():
     burst_duration = scenario.get("burst_duration", 60)
     burst_period = scenario.get("burst_period", 300)
     payload_sizes = scenario.get("payload_sizes", [scenario["payload"]])
+    payload_sizes = [max(MIN_PAYLOAD_BYTES, int(sz)) for sz in payload_sizes]
 
     n_threads = decide_n_threads(max(base_rate, burst_rate))
     log.info(

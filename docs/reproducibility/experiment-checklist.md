@@ -328,7 +328,7 @@ For each experiment run, record:
 ```
 Date: YYYY-MM-DD HH:MM
 Strategy: [batch|microbatch|streaming]
-Scenario: [low-load|medium-load|high-load|burst|extreme-load|mixed-payload]
+Scenario: [low-load|medium-load|high-load]
 Mode: [local|distributed]
 Duration: XXX seconds
 Events Generated: XXX,XXX

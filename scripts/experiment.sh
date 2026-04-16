@@ -9,7 +9,7 @@
 #   ./scripts/experiment.sh --smoke        # ~5 min (1 estrategia, 1 escenario)
 #   ./scripts/experiment.sh --quick        # ~30 min (3 estrategias, 2 escenarios)
 #   ./scripts/experiment.sh --standard     # ~2 horas (default)
-#   ./scripts/experiment.sh --full         # 60+ corridas completo
+#   ./scripts/experiment.sh --full         # matriz tesis completa
 #   ./scripts/experiment.sh --reps 3       # 3 repeticiones
 #   ./scripts/experiment.sh --duration 240 # 4 min por corrida
 #   ./scripts/experiment.sh --strategies batch # solo batch
@@ -22,9 +22,9 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 RESULTS_BASE="$ROOT_DIR/results"
 
 # ── Defaults (override via arguments) ──────────────────────────────
-# Standard experiment: 5 reps × 4 scenarios × 3 strategies = 60 runs
+# Standard thesis experiment: 5 reps × 3 scenarios × 3 strategies = 45 runs
 STRATEGIES=${STRATEGIES:-"batch microbatch streaming"}
-SCENARIOS=${SCENARIOS:-"low-load medium-load high-load burst"}
+SCENARIOS=${SCENARIOS:-"low-load medium-load high-load"}
 REPETITIONS=${REPETITIONS:-5}
 TRIGGER_INTERVAL=${TRIGGER_INTERVAL:-"5 seconds"}
 COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-30}   # >= Flink checkpoint interval + margin
