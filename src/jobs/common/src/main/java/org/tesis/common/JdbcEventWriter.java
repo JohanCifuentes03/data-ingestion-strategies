@@ -18,7 +18,7 @@ public final class JdbcEventWriter {
     private JdbcEventWriter() {
     }
 
-    private static final int JDBC_BATCH_SIZE = 5_000;
+    private static final int JDBC_BATCH_SIZE = 500;
 
     private static final String INSERT_SQL = """
             INSERT INTO events(event_id, produced_at, payload, strategy, scenario, run_id)

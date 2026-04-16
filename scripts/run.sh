@@ -571,11 +571,15 @@ run_batch() {
     log "Ejecutando Spark Batch..."
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=3g --conf spark.driver.memory=2g --conf spark.executor.memoryOverhead=1024 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.batch.SparkBatchJob \
         --master spark://spark-master:${MASTER_PORT} \
+        --conf spark.executor.memory=3g \
+        --conf spark.driver.memory=2g \
+        --conf spark.executor.memoryOverhead=1024 \
+        --conf spark.sql.shuffle.partitions=12 \
         /opt/spark/jobs/batch/batch-job.jar \
         --scenario="$SCENARIO" \
         --run.id="$RUN_ID" \
