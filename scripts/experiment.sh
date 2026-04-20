@@ -96,6 +96,17 @@ done
 # Apply warmup setting to environment for generator
 export WARMUP_SECONDS
 
+# Guardrail: en ejecuciones oficiales no permitir burst/extreme/mixed por error
+OFFICIAL_SCENARIOS="low-load medium-load high-load"
+for SCN in $SCENARIOS; do
+    case "$SCN" in
+        low-load|medium-load|high-load) ;;
+        *)
+            echo "[experiment] WARN: escenario no-oficial detectado: $SCN"
+            ;;
+    esac
+done
+
 TOTAL_RUNS=0
 for _ in $STRATEGIES; do for _ in $SCENARIOS; do TOTAL_RUNS=$((TOTAL_RUNS + REPETITIONS)); done; done
 CURRENT_RUN=0

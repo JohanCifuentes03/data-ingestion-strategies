@@ -247,6 +247,32 @@ def load_prometheus_snapshot(results_dir: Path) -> pd.DataFrame:
     return combined
 
 
+def load_cloudwatch_snapshot(results_dir: Path) -> pd.DataFrame:
+    """
+    Recorre results/<strategy>/<scenario>/<run>/cloudwatch_snapshot.csv
+    con columnas:
+      strategy, scenario, run_id, node, instance_id, metric, value, unit, start_utc, end_utc
+    """
+    frames = []
+    for csv_path in results_dir.rglob("cloudwatch_snapshot.csv"):
+        parts = csv_path.relative_to(results_dir).parts
+        if len(parts) < 4:
+            continue
+        df = pd.read_csv(csv_path, on_bad_lines="skip")
+        if df.empty:
+            continue
+        frames.append(df)
+
+    if not frames:
+        print("[WARN] Sin cloudwatch_snapshot.csv — se usará solo Prometheus para recursos")
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["value"] = pd.to_numeric(combined["value"], errors="coerce")
+    print(f"[INFO] cloudwatch: {len(combined)} métricas cargadas")
+    return combined
+
+
 # ════════════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════════════
@@ -850,7 +876,7 @@ def chart_scaling_efficiency(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
 # ════════════════════════════════════════════════════════════════════
 
 
-def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
+def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, cloudwatch: pd.DataFrame, out: Path):
     """
     Scatter: eje X = CPU total (cores), eje Y = memoria RSS MB por evento.
     Cada punto = un run. Colorear por estrategia.
@@ -900,6 +926,65 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
                     "run_id": run_id,
                     "cpu_cores": cpu_val,
                     "mem_mb_per_event": mem_mb_per_event,
+                    "source": "prometheus",
+                }
+            )
+
+    # Fallback: si Prometheus no trajo recursos útiles, usar CloudWatch host-level.
+    prom_valid = False
+    if records:
+        tmp_df = pd.DataFrame(records)
+        prom_valid = bool(
+            ((tmp_df["cpu_cores"] > 0) & (tmp_df["mem_mb_per_event"] > 0)).any()
+        )
+
+    if (not prom_valid) and (cloudwatch is not None) and (not cloudwatch.empty):
+        print("  [INFO] Recursos desde CloudWatch (fallback), Prometheus sin datos útiles")
+        cw = cloudwatch.copy()
+        cpu = cw[cw["metric"] == "CPUUtilization"].copy()
+        mem = cw[cw["metric"] == "mem_used_percent"].copy()
+
+        for (strategy, scenario, run_id), grp_cpu in cpu.groupby(["strategy", "scenario", "run_id"]):
+            cpu_pct = grp_cpu["value"].mean()
+            mem_row = mem[
+                (mem["strategy"] == strategy)
+                & (mem["scenario"] == scenario)
+                & (mem["run_id"] == run_id)
+            ]
+            mem_pct = mem_row["value"].mean() if not mem_row.empty else np.nan
+            if np.isnan(cpu_pct) or np.isnan(mem_pct):
+                continue
+
+            # Conversión aproximada para mantener ejes comparables con Prometheus:
+            # - cpu_cores ~ fracción de 4 cores (normalizado cloud-level)
+            cpu_cores = max(0.0, (cpu_pct / 100.0) * 4.0)
+
+            run_lat = df[
+                (df["strategy"] == strategy)
+                & (df["scenario"] == scenario)
+                & (df["run_id"] == run_id)
+            ]
+            if run_lat.empty or "visible_at" not in run_lat.columns or "produced_at" not in run_lat.columns:
+                continue
+            run_dur = (run_lat["visible_at"].max() - run_lat["produced_at"].min()) / 1000.0
+            tput_val = len(run_lat) / run_dur if run_dur > 0 else np.nan
+            if np.isnan(tput_val) or tput_val <= 0:
+                continue
+
+            # Aproximación: mem_pct -> MB ocupados de host (suponiendo 8 GiB nominales promedio en cluster)
+            mem_mb = (mem_pct / 100.0) * 8192.0
+            mem_mb_per_event = mem_mb / tput_val if tput_val > 0 else np.nan
+            if np.isnan(mem_mb_per_event):
+                continue
+
+            records.append(
+                {
+                    "strategy": strategy,
+                    "scenario": scenario,
+                    "run_id": run_id,
+                    "cpu_cores": cpu_cores,
+                    "mem_mb_per_event": mem_mb_per_event,
+                    "source": "cloudwatch",
                 }
             )
 
@@ -911,6 +996,12 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
     if res_df.empty:
         print("  [SKIP] resource_efficiency_scatter.png")
         return
+
+    valid_points = res_df[(res_df["cpu_cores"] > 0) & (res_df["mem_mb_per_event"] > 0)]
+    if valid_points.empty:
+        print("  [SKIP] resource_efficiency_scatter.png (recursos no válidos: CPU/Mem en cero)")
+        return
+    res_df = valid_points
 
     scenarios = _sort_scenarios(res_df["scenario"].unique())
     n = len(scenarios)
@@ -957,9 +1048,13 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, out: Path)
             uniq[l] = h
     fig.legend(list(uniq.values()), list(uniq.keys()), loc="upper right", framealpha=0.95)
 
+    source_note = "Prometheus"
+    if "source" in res_df.columns and (res_df["source"] == "cloudwatch").any():
+        source_note = "CloudWatch fallback"
+
     fig.suptitle(
         "Eficiencia de recursos por carga: CPU vs memoria por evento visible\n"
-        "Cada punto representa el centroide por estrategia en cada escenario",
+        f"Cada punto representa el centroide por estrategia en cada escenario ({source_note})",
         fontsize=11,
         fontweight="bold",
         y=0.98,
@@ -1427,6 +1522,7 @@ def main():
     df = load_latency(results_dir)
     fault_df = load_fault_recovery(results_dir)
     prom = load_prometheus_snapshot(results_dir)
+    cloudwatch = load_cloudwatch_snapshot(results_dir)
 
     if not args.no_warmup_filter:
         df = filter_warmup(df)
@@ -1446,7 +1542,7 @@ def main():
 
     figure_latency_boxplot(df, out_dir)
     figure_generated_vs_sink(df, prom, out_dir)
-    figure_resource_utilization(df, prom, out_dir)
+    figure_resource_utilization(df, prom, cloudwatch, out_dir)
     figure_kafka_lag(df, prom, out_dir)
     table_latency_summary(df, out_dir)
 

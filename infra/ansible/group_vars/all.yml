@@ -43,3 +43,8 @@ generator_run_duration:  300
 generator_warmup:        30
 
 probe_poll_interval_ms: 500
+
+# ── CloudWatch Agent (host-level metrics on AWS EC2) ─────────────
+cloudwatch_agent_enabled: true
+cloudwatch_metrics_namespace: "TesisBenchmark/EC2"
+cloudwatch_metrics_interval_seconds: 60

@@ -27,7 +27,28 @@ scrape_configs:
           nodo: node-broker
           vm_ip: '{{ vm_broker_ip }}'
 
+  - job_name: node-exporter
+    static_configs:
+      - targets: ['{{ vm_compute_ip }}:9100']
+        labels:
+          nodo: node-compute
+          vm_ip: '{{ vm_compute_ip }}'
+      - targets: ['{{ vm_broker_ip }}:9100']
+        labels:
+          nodo: node-broker
+          vm_ip: '{{ vm_broker_ip }}'
+      - targets: ['{{ vm_producers_ip }}:9100']
+        labels:
+          nodo: node-producers
+          vm_ip: '{{ vm_producers_ip }}'
+      - targets: ['{{ vm_sink_ip }}:9100']
+        labels:
+          nodo: node-sink
+          vm_ip: '{{ vm_sink_ip }}'
+
   - job_name: cadvisor
+    scrape_protocols:
+      - PrometheusText0.0.4
     static_configs:
       - targets: ['{{ vm_compute_ip }}:8083']
         labels:
@@ -45,6 +66,10 @@ scrape_configs:
         labels:
           nodo: node-sink
           vm_ip: '{{ vm_sink_ip }}'
+    metric_relabel_configs:
+      - source_labels: [id]
+        regex: '/docker/.+|/system.slice/docker-.+\.scope'
+        action: keep
 
   - job_name: flink_jobmanager
     static_configs:

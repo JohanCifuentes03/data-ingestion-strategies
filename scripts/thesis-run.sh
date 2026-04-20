@@ -127,6 +127,16 @@ run_experiment() {
     local profile="$2"
 
     if [[ ${#CUSTOM_ARGS[@]} -gt 0 ]]; then
+        has_scenarios=false
+        for ((i=0; i<${#CUSTOM_ARGS[@]}; i++)); do
+            if [[ "${CUSTOM_ARGS[$i]}" == "--scenarios" ]]; then
+                has_scenarios=true
+                break
+            fi
+        done
+        if [[ "$has_scenarios" == false ]]; then
+            CUSTOM_ARGS+=("--scenarios" "low-load medium-load high-load")
+        fi
         log "Running custom experiment in ${mode} mode"
         MODE="$mode" bash scripts/experiment.sh "${CUSTOM_ARGS[@]}"
         return

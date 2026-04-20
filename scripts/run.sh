@@ -68,9 +68,12 @@ archive_run_to_sink() {
     [ -z "$sink_ip" ] && return
 
     remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
+    local files=("$run_dir/latency_samples.csv" "$run_dir/prometheus_snapshot.csv")
+    if [ -f "$run_dir/cloudwatch_snapshot.csv" ]; then
+        files+=("$run_dir/cloudwatch_snapshot.csv")
+    fi
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "$run_dir/latency_samples.csv" \
-        "$run_dir/prometheus_snapshot.csv" \
+        "${files[@]}" \
         "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
 }
 
@@ -452,6 +455,14 @@ except:
     local container_filter='name=~"tesis-.*"'
     local cpu_query="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",${container_filter}}[${prom_window}])) / ${duration}"
     local mem_query="sum(avg_over_time(container_memory_rss{job=\"cadvisor\",${container_filter}}[${prom_window}]))"
+    # Fallback robusto para entornos donde el label 'name' no está presente
+    local cpu_query_alt="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",container_label_com_docker_compose_project=~\"tesis-ingestion|tesis\"}[${prom_window}])) / ${duration}"
+    local mem_query_alt="sum(avg_over_time(container_memory_rss{job=\"cadvisor\",container_label_com_docker_compose_project=~\"tesis-ingestion|tesis\"}[${prom_window}]))"
+    local cpu_query_id="sum(increase(container_cpu_usage_seconds_total{job=\"cadvisor\",id=~\"/docker/.+|/system.slice/docker-.+\\.scope\"}[${prom_window}])) / ${duration}"
+    local mem_query_id="sum(avg_over_time(container_memory_rss{job=\"cadvisor\",id=~\"/docker/.+|/system.slice/docker-.+\\.scope\"}[${prom_window}]))"
+    # Fallback adicional host-level (node-exporter) en caso de cadvisor vacío
+    local cpu_query_host="sum(increase(node_cpu_seconds_total{job=\"node-exporter\",mode!=\"idle\"}[${prom_window}])) / ${duration}"
+    local mem_query_host="sum(avg_over_time(node_memory_MemTotal_bytes{job=\"node-exporter\"}[${prom_window}])) - sum(avg_over_time(node_memory_MemAvailable_bytes{job=\"node-exporter\"}[${prom_window}]))"
     local prod_query="sum(increase(kafka_produced_messages_total{scenario=\"${scenario}\",run_id=\"${run_id}\",strategy=\"${strategy}\"}[${prom_window}])) / ${duration}"
 
     # Backward compatibility for historical metric labels (scenario-only)
@@ -460,6 +471,27 @@ except:
 
     CPU_TOTAL=$(query_or_zero "$cpu_query" "$prom_time")
     MEM_TOTAL=$(query_or_zero "$mem_query" "$prom_time")
+    if [ "${CPU_TOTAL:-0}" = "0" ] || [ "${CPU_TOTAL:-0}" = "0.0" ]; then
+        CPU_TOTAL=$(query_or_zero "$cpu_query_alt" "$prom_time")
+    fi
+    if [ "${MEM_TOTAL:-0}" = "0" ] || [ "${MEM_TOTAL:-0}" = "0.0" ]; then
+        MEM_TOTAL=$(query_or_zero "$mem_query_alt" "$prom_time")
+    fi
+    if [ "${CPU_TOTAL:-0}" = "0" ] || [ "${CPU_TOTAL:-0}" = "0.0" ]; then
+        CPU_TOTAL=$(query_or_zero "$cpu_query_id" "$prom_time")
+    fi
+    if [ "${MEM_TOTAL:-0}" = "0" ] || [ "${MEM_TOTAL:-0}" = "0.0" ]; then
+        MEM_TOTAL=$(query_or_zero "$mem_query_id" "$prom_time")
+    fi
+    if [ "${CPU_TOTAL:-0}" = "0" ] || [ "${CPU_TOTAL:-0}" = "0.0" ]; then
+        CPU_TOTAL=$(query_or_zero "$cpu_query_host" "$prom_time")
+    fi
+    if [ "${MEM_TOTAL:-0}" = "0" ] || [ "${MEM_TOTAL:-0}" = "0.0" ]; then
+        MEM_TOTAL=$(query_or_zero "$mem_query_host" "$prom_time")
+    fi
+    if [ "${CPU_TOTAL:-0}" = "0" ] || [ "${CPU_TOTAL:-0}" = "0.0" ] || [ "${MEM_TOTAL:-0}" = "0" ] || [ "${MEM_TOTAL:-0}" = "0.0" ]; then
+        warn "Prometheus resources fallback unresolved (CPU=${CPU_TOTAL}, MEM=${MEM_TOTAL}) — keeping values for traceability"
+    fi
     TPUT_PRODUCED=$(query_or_zero "$prod_query" "$prom_time")
     if [ "${TPUT_PRODUCED:-0}" = "0" ] || [ "${TPUT_PRODUCED:-0}" = "0.0" ]; then
         TPUT_PRODUCED=$(query_or_zero "$prod_query_legacy" "$prom_time")
@@ -506,6 +538,98 @@ PY
     echo "${strategy},${scenario},${run_id},latency_p99_ms,${lat_p99},ms" >>"$out_file"
 
     log "Snapshot guardado: $(wc -l <"$out_file") metricas en $out_file"
+}
+
+collect_cloudwatch_snapshot() {
+    local run_dir="$1"
+    local strategy="$2"
+    local scenario="$3"
+    local run_id="$4"
+    local start_ts=${5:-0}
+    local end_ts=${6:-0}
+
+    local out_file="$run_dir/cloudwatch_snapshot.csv"
+    local start_iso end_iso period
+    start_iso=$(date -u -d "@${start_ts}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)
+    end_iso=$(date -u -d "@${end_ts}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)
+    period=60
+
+    if [ -z "$start_iso" ] || [ -z "$end_iso" ]; then
+        return 0
+    fi
+
+    if [ -z "${CLOUD_VM_PRODUCER_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_BROKER_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_COMPUTE_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_SINK_INSTANCE_ID:-}" ]; then
+        return 0
+    fi
+
+    local cw_runner_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    local cw_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+    if [ -z "$cw_runner_ip" ]; then
+        return 0
+    fi
+
+    echo "strategy,scenario,run_id,node,instance_id,metric,value,unit,start_utc,end_utc" >"$out_file"
+
+    cw_append_metric() {
+        local node="$1"
+        local instance_id="$2"
+        local namespace="$3"
+        local metric_name="$4"
+        local stat="$5"
+        local unit="$6"
+        local metric_period="$7"
+        local metric_start_iso="$8"
+
+        local val
+        val=$(remote_shell "$cw_runner_ip" "AWS_DEFAULT_REGION='${cw_region}' aws cloudwatch get-metric-statistics \
+            --namespace "$namespace" \
+            --metric-name "$metric_name" \
+            --dimensions "Name=InstanceId,Value=${instance_id}" \
+            --start-time "$metric_start_iso" \
+            --end-time "$end_iso" \
+            --period "$metric_period" \
+            --statistics "$stat" \
+            --query 'Datapoints[-1].Average' \
+            --output text 2>/dev/null || echo NaN" 2>/dev/null || echo "NaN")
+
+        if [ -z "$val" ] || [ "$val" = "None" ] || [ "$val" = "null" ]; then
+            val="NaN"
+        fi
+
+        echo "${strategy},${scenario},${run_id},${node},${instance_id},${metric_name},${val},${unit},${metric_start_iso},${end_iso}" >>"$out_file"
+    }
+
+    local ec2_start_iso
+    ec2_start_iso=$(date -u -d "@$((start_ts - 1800))" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "$start_iso")
+
+    # EC2 default metrics
+    cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
+    cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
+    cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
+
+    cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
+
+    cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
+
+    # CloudWatch Agent custom host metrics
+    cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
+
+    cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
+
+    log "CloudWatch snapshot guardado: $(wc -l <"$out_file") metricas en $out_file"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -571,14 +695,14 @@ run_batch() {
     log "Ejecutando Spark Batch..."
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=3g --conf spark.driver.memory=2g --conf spark.executor.memoryOverhead=1024 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=1500m --conf spark.driver.memory=2g --conf spark.executor.cores=2 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.batch.SparkBatchJob \
         --master spark://spark-master:${MASTER_PORT} \
-        --conf spark.executor.memory=3g \
+        --conf spark.executor.memory=1500m \
         --conf spark.driver.memory=2g \
-        --conf spark.executor.memoryOverhead=1024 \
+        --conf spark.executor.cores=2 \
         --conf spark.sql.shuffle.partitions=12 \
         /opt/spark/jobs/batch/batch-job.jar \
         --scenario="$SCENARIO" \
@@ -597,6 +721,9 @@ run_batch() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    if [ "$MODE" = "distributed" ]; then
+        collect_cloudwatch_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    fi
     archive_run_to_sink "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
 
     log "Completed: batch/$SCENARIO/$RUN_ID"
@@ -674,6 +801,9 @@ run_microbatch() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    if [ "$MODE" = "distributed" ]; then
+        collect_cloudwatch_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    fi
     archive_run_to_sink "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
 
     log "Completed: microbatch/$SCENARIO/$RUN_ID"
@@ -783,6 +913,9 @@ run_streaming() {
     sync_probe_csv_from_producer
     copy_probe_csv_to_run "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    if [ "$MODE" = "distributed" ]; then
+        collect_cloudwatch_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
+    fi
     archive_run_to_sink "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
 
     log "Completed: streaming/$SCENARIO/$RUN_ID"

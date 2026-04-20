@@ -22,6 +22,20 @@ include:
   - path: ./base.yml
 
 services:
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    restart: unless-stopped
+    container_name: tesis-node-exporter
+    networks:
+      - benchmark-net
+    command:
+      - '--path.rootfs=/host'
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    ports:
+      - '9100:9100'
+
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     restart: unless-stopped

@@ -14,9 +14,19 @@ output "vm_producers_ip" {
   value       = module.vm_producers.private_ip
 }
 
+output "vm_producers_instance_id" {
+  description = "Instance ID del nodo generator/probe (VM-1)"
+  value       = module.vm_producers.instance_id
+}
+
 output "vm_broker_ip" {
   description = "IP privada del nodo Kafka broker (VM-2)"
   value       = module.vm_broker.private_ip
+}
+
+output "vm_broker_instance_id" {
+  description = "Instance ID del nodo Kafka broker (VM-2)"
+  value       = module.vm_broker.instance_id
 }
 
 output "vm_compute_ip" {
@@ -24,9 +34,19 @@ output "vm_compute_ip" {
   value       = module.vm_compute.private_ip
 }
 
+output "vm_compute_instance_id" {
+  description = "Instance ID del nodo Spark/Flink (VM-3)"
+  value       = module.vm_compute.instance_id
+}
+
 output "vm_sink_ip" {
   description = "IP privada del nodo PostgreSQL/Prometheus (VM-4)"
   value       = module.vm_sink.private_ip
+}
+
+output "vm_sink_instance_id" {
+  description = "Instance ID del nodo PostgreSQL/Prometheus (VM-4)"
+  value       = module.vm_sink.instance_id
 }
 
 # ── IPs Públicas (acceso SSH desde el exterior) ─────────────────
@@ -87,6 +107,10 @@ resource "local_file" "outputs_env" {
     export CLOUD_VM_BROKER_PUBLIC_IP="${module.vm_broker.public_ip}"
     export CLOUD_VM_COMPUTE_PUBLIC_IP="${module.vm_compute.public_ip}"
     export CLOUD_VM_SINK_PUBLIC_IP="${module.vm_sink.public_ip}"
+    export CLOUD_VM_PRODUCER_INSTANCE_ID="${module.vm_producers.instance_id}"
+    export CLOUD_VM_BROKER_INSTANCE_ID="${module.vm_broker.instance_id}"
+    export CLOUD_VM_COMPUTE_INSTANCE_ID="${module.vm_compute.instance_id}"
+    export CLOUD_VM_SINK_INSTANCE_ID="${module.vm_sink.instance_id}"
     export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${module.vm_broker.private_ip}:9092"
     export KAFKA_BOOTSTRAP_SERVERS="${module.vm_broker.private_ip}:9092"
   EOT

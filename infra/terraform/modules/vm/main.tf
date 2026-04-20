@@ -17,13 +17,17 @@ terraform {
   }
 }
 
-variable "ami_id"            { type = string }
-variable "instance_type"     { type = string }
-variable "subnet_id"         { type = string }
+variable "ami_id" { type = string }
+variable "instance_type" { type = string }
+variable "subnet_id" { type = string }
 variable "security_group_id" { type = string }
-variable "key_name"          { type = string }
-variable "private_ip"        { type = string }
-variable "display_name"      { type = string }
+variable "key_name" { type = string }
+variable "private_ip" { type = string }
+variable "display_name" { type = string }
+variable "iam_instance_profile_name" {
+  type    = string
+  default = ""
+}
 
 resource "aws_instance" "vm" {
   ami                    = var.ami_id
@@ -32,6 +36,7 @@ resource "aws_instance" "vm" {
   vpc_security_group_ids = [var.security_group_id]
   key_name               = var.key_name
   private_ip             = var.private_ip
+  iam_instance_profile   = var.iam_instance_profile_name != "" ? var.iam_instance_profile_name : null
 
   root_block_device {
     volume_size           = 20
@@ -66,4 +71,8 @@ output "private_ip" {
 
 output "public_ip" {
   value = aws_instance.vm.public_ip
+}
+
+output "instance_id" {
+  value = aws_instance.vm.id
 }

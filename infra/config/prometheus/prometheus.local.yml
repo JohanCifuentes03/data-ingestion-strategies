@@ -31,7 +31,7 @@ scrape_configs:
       # Descartar cgroups raíz "/" y "/docker" — solo conservar contenedores
       # individuales cuyo id tiene la forma /docker/<sha256>.
       - source_labels: [id]
-        regex: '/docker/.+'
+        regex: '/docker/.+|/system.slice/docker-.+\.scope'
         action: keep
 
   # ── Generator (métricas de producción) ────────────────────────────

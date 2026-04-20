@@ -1,0 +1,39 @@
+{
+  "agent": {
+    "metrics_collection_interval": {{ cloudwatch_metrics_interval_seconds | default(60) }},
+    "run_as_user": "cwagent"
+  },
+  "metrics": {
+    "namespace": "{{ cloudwatch_metrics_namespace | default('TesisBenchmark/EC2') }}",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "aggregation_dimensions": [["InstanceId"]],
+    "metrics_collected": {
+      "mem": {
+        "measurement": [
+          "mem_used_percent",
+          "mem_available_percent"
+        ],
+        "metrics_collection_interval": {{ cloudwatch_metrics_interval_seconds | default(60) }}
+      },
+      "disk": {
+        "resources": ["/"],
+        "measurement": [
+          "used_percent"
+        ],
+        "metrics_collection_interval": {{ cloudwatch_metrics_interval_seconds | default(60) }},
+        "drop_device": true
+      },
+      "net": {
+        "resources": ["eth0"],
+        "measurement": [
+          "bytes_sent",
+          "bytes_recv"
+        ],
+        "metrics_collection_interval": {{ cloudwatch_metrics_interval_seconds | default(60) }}
+      }
+    }
+  }
+}

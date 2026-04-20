@@ -70,6 +70,62 @@ resource "aws_key_pair" "benchmark_key" {
   }
 }
 
+# ── IAM para CloudWatch Agent (métricas host-level) ──────────────
+resource "aws_iam_role" "ec2_cloudwatch_role" {
+  name = "tesis-benchmark-ec2-cloudwatch-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    proyecto = "tesis-benchmark"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_agent_server_policy" {
+  role       = aws_iam_role.ec2_cloudwatch_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_readonly_policy" {
+  role       = aws_iam_role.ec2_cloudwatch_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess"
+}
+
+resource "aws_iam_role_policy" "ec2_cloudwatch_read_policy" {
+  name = "tesis-benchmark-cloudwatch-read"
+  role = aws_iam_role.ec2_cloudwatch_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "ec2_cloudwatch_profile" {
+  name = "tesis-benchmark-ec2-cloudwatch-profile"
+  role = aws_iam_role.ec2_cloudwatch_role.name
+}
+
 # ── VPC (Virtual Private Cloud) ──────────────────────────────────
 resource "aws_vpc" "benchmark_vpc" {
   cidr_block           = "10.0.0.0/16"
@@ -186,13 +242,14 @@ resource "aws_security_group" "benchmark_sg" {
 module "vm_producers" {
   source = "./modules/vm"
 
-  ami_id            = data.aws_ami.ubuntu_22.id
-  instance_type     = "c7i-flex.large"
-  subnet_id         = aws_subnet.benchmark_subnet.id
-  security_group_id = aws_security_group.benchmark_sg.id
-  key_name          = aws_key_pair.benchmark_key.key_name
-  private_ip        = "10.0.1.10"
-  display_name      = "node-producers"
+  ami_id                    = data.aws_ami.ubuntu_22.id
+  instance_type             = "c7i-flex.large"
+  subnet_id                 = aws_subnet.benchmark_subnet.id
+  security_group_id         = aws_security_group.benchmark_sg.id
+  key_name                  = aws_key_pair.benchmark_key.key_name
+  private_ip                = "10.0.1.10"
+  display_name              = "node-producers"
+  iam_instance_profile_name = aws_iam_instance_profile.ec2_cloudwatch_profile.name
 }
 
 # VM-2: node-broker (Kafka + ZooKeeper)
@@ -200,13 +257,14 @@ module "vm_producers" {
 module "vm_broker" {
   source = "./modules/vm"
 
-  ami_id            = data.aws_ami.ubuntu_22.id
-  instance_type     = "m7i-flex.large"
-  subnet_id         = aws_subnet.benchmark_subnet.id
-  security_group_id = aws_security_group.benchmark_sg.id
-  key_name          = aws_key_pair.benchmark_key.key_name
-  private_ip        = "10.0.1.20"
-  display_name      = "node-broker"
+  ami_id                    = data.aws_ami.ubuntu_22.id
+  instance_type             = "m7i-flex.large"
+  subnet_id                 = aws_subnet.benchmark_subnet.id
+  security_group_id         = aws_security_group.benchmark_sg.id
+  key_name                  = aws_key_pair.benchmark_key.key_name
+  private_ip                = "10.0.1.20"
+  display_name              = "node-broker"
+  iam_instance_profile_name = aws_iam_instance_profile.ec2_cloudwatch_profile.name
 }
 
 # VM-3: node-compute (Spark + Flink)
@@ -214,24 +272,26 @@ module "vm_broker" {
 module "vm_compute" {
   source = "./modules/vm"
 
-  ami_id            = data.aws_ami.ubuntu_22.id
-  instance_type     = "m7i-flex.large"
-  subnet_id         = aws_subnet.benchmark_subnet.id
-  security_group_id = aws_security_group.benchmark_sg.id
-  key_name          = aws_key_pair.benchmark_key.key_name
-  private_ip        = "10.0.1.30"
-  display_name      = "node-compute"
+  ami_id                    = data.aws_ami.ubuntu_22.id
+  instance_type             = "m7i-flex.large"
+  subnet_id                 = aws_subnet.benchmark_subnet.id
+  security_group_id         = aws_security_group.benchmark_sg.id
+  key_name                  = aws_key_pair.benchmark_key.key_name
+  private_ip                = "10.0.1.30"
+  display_name              = "node-compute"
+  iam_instance_profile_name = aws_iam_instance_profile.ec2_cloudwatch_profile.name
 }
 
 # VM-4: node-sink (PostgreSQL + Prometheus + cAdvisor)
 module "vm_sink" {
   source = "./modules/vm"
 
-  ami_id            = data.aws_ami.ubuntu_22.id
-  instance_type     = "c7i-flex.large"
-  subnet_id         = aws_subnet.benchmark_subnet.id
-  security_group_id = aws_security_group.benchmark_sg.id
-  key_name          = aws_key_pair.benchmark_key.key_name
-  private_ip        = "10.0.1.40"
-  display_name      = "node-sink"
+  ami_id                    = data.aws_ami.ubuntu_22.id
+  instance_type             = "c7i-flex.large"
+  subnet_id                 = aws_subnet.benchmark_subnet.id
+  security_group_id         = aws_security_group.benchmark_sg.id
+  key_name                  = aws_key_pair.benchmark_key.key_name
+  private_ip                = "10.0.1.40"
+  display_name              = "node-sink"
+  iam_instance_profile_name = aws_iam_instance_profile.ec2_cloudwatch_profile.name
 }
