@@ -413,7 +413,7 @@ def run_statistics(df: pd.DataFrame) -> pd.DataFrame:
 
         records.append(
             {
-                "scenario": scenario,
+                "escenario": SCENARIO_LABELS.get(scenario, scenario),
                 "kruskal_H": round(kw_stat, 4),
                 "kruskal_p": round(kw_p, 6),
                 "significant": "si" if kw_p < 0.05 else "no",
@@ -437,15 +437,15 @@ def figure_latency_boxplot(df: pd.DataFrame, out: Path):
     """
     scenarios = _sort_scenarios(df["scenario"].unique())
     n = len(scenarios)
-    
-    # Ajustar tamaño según número de escenarios
-    fig_width = min(FIG_W * n, 14)  # Máximo 14 pulgadas
+    fig_width = min(FIG_W * n, 14)
     fig, axes = plt.subplots(1, n, figsize=(fig_width, FIG_H + 0.5), sharey=True, squeeze=False)
     axes = axes[0]
 
     for i, scenario in enumerate(scenarios):
         sub = df[df["scenario"] == scenario]
         order = [s for s in STRATEGY_ORDER if s in sub["strategy"].unique()]
+        if not order:
+            continue
 
         bp = axes[i].boxplot(
             [sub[sub["strategy"] == s]["latency_ms"].values for s in order],
@@ -459,59 +459,49 @@ def figure_latency_boxplot(df: pd.DataFrame, out: Path):
             boxprops=dict(linewidth=1.0),
         )
 
-        # Cajas en B/N con patrones
         for patch, strat in zip(bp["boxes"], order):
             patch.set_facecolor(GRAYSCALE_FACE.get(strat, "#9E9E9E"))
             patch.set_alpha(0.9)
             patch.set_hatch(HATCHES.get(strat, ""))
             patch.set_edgecolor("#333")
 
-        # Anotaciones estadísticas por estrategia (al costado derecho de cada caja)
+        # Etiquetas compactas por caja: cuartiles Q1, Q2, Q3
         for x_idx, strat in enumerate(order):
             lat = sub[sub["strategy"] == strat]["latency_ms"]
             if lat.empty:
                 continue
-            p50 = lat.quantile(0.50)
             q1 = lat.quantile(0.25)
+            q2 = lat.quantile(0.50)
             q3 = lat.quantile(0.75)
-            n_samples = len(lat)
-
             axes[i].text(
-                x_idx + 0.30,
-                p50,
-                f"Q1 {q1:.0f} ms\nQ2 {p50:.0f} ms\nQ3 {q3:.0f} ms\nN {n_samples}",
+                x_idx + 0.28,
+                q2,
+                f"Q1 {q1:.0f}\nQ2 {q2:.0f}\nQ3 {q3:.0f}",
                 ha="left",
                 va="center",
                 fontsize=7.5,
                 color="#222",
             )
 
-        # Título del escenario
         scenario_label = SCENARIO_LABELS.get(scenario, scenario)
         axes[i].set_title(scenario_label, fontsize=10, fontweight="bold", pad=6)
         axes[i].set_xlabel("")
         axes[i].set_xticks(range(len(order)))
-        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=8, rotation=15, ha="right")
-        
-        if i == 0:
-            axes[i].set_ylabel("Latencia E2E (ms)", fontsize=10)
-        else:
-            axes[i].set_ylabel("")
-        
+        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
         axes[i].set_yscale("log")
         axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(_fmt_ms))
         axes[i].grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+        if i == 0:
+            axes[i].set_ylabel("Latencia E2E ms", fontsize=10)
 
-    # Título más compacto para papers
-    fig.suptitle("Distribucion de latencia E2E por estrategia y escenario", fontsize=11, fontweight="bold", y=0.98)
-    
+    fig.suptitle(
+        "Distribucion de latencia E2E\nEje Y en escala logaritmica",
+        fontsize=11,
+        fontweight="bold",
+        y=0.98,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    
-    # Guardar en múltiples formatos
-    for fmt in SAVE_FORMATS:
-        fig.savefig(out / f"latency_distribution_boxplot.{fmt}", bbox_inches="tight", dpi=300 if fmt == "png" else None)
-    plt.close(fig)
-    print("  [OK] latency_distribution_boxplot.png/.pdf")
+    _save_figure(fig, out, "latency_distribution_boxplot")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -647,21 +637,18 @@ def figure_generated_vs_sink(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
         axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
         axes[i].grid(axis="y", linestyle="--", alpha=0.3)
         if i == 0:
-            axes[i].set_ylabel("Throughput (eventos/s)")
+            axes[i].set_ylabel("Promedio de eventos por segundo")
 
     handles = [
         Patch(facecolor="#BDBDBD", edgecolor="#222", hatch="//", label="Generado"),
         Patch(facecolor="#616161", edgecolor="#222", hatch="", label="Visible en sink"),
     ]
     fig.legend(handles=handles, loc="upper right", framealpha=0.95)
-    fig.suptitle(
-        "Throughput generado vs visible en sink por estrategia y escenario\n"
-        "(N/A = falta telemetria de generacion en esa estrategia/escenario)",
-        fontsize=12,
-        fontweight="bold",
-    )
+    fig.suptitle("Promedio de eventos por segundo generado y visible", fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 0.9, 0.95])
     _save_figure(fig, out, "generated_vs_sink_throughput")
+
+
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1010,10 +997,15 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, cloudwatch
 
     marker_map = {"batch": "o", "microbatch": "s", "streaming": "D"}
 
+    source_note = "Prometheus"
+    if "source" in res_df.columns and (res_df["source"] == "cloudwatch").any():
+        source_note = "CloudWatch"
+
     for i, scenario in enumerate(scenarios):
         ax = axes[i]
         scen_df = res_df[res_df["scenario"] == scenario]
 
+        plotted_points = []
         for strategy in STRATEGY_ORDER:
             sub = scen_df[scen_df["strategy"] == strategy]
             if sub.empty:
@@ -1035,31 +1027,66 @@ def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, cloudwatch
                 zorder=4,
             )
 
+            plotted_points.append((strategy, cx, cy))
+
+        # Etiquetas compactas C/M con offsets anti-colisión
+        base_offsets = {
+            "batch": (6, 6),
+            "microbatch": (-28, 8),
+            "streaming": (6, -12),
+        }
+        candidate_offsets = [
+            (6, 6),
+            (-28, 8),
+            (6, -12),
+            (-28, -12),
+            (20, 14),
+            (-36, 14),
+        ]
+
+        x_vals = [p[1] for p in plotted_points]
+        y_vals = [p[2] for p in plotted_points]
+        x_span = (max(x_vals) - min(x_vals)) if len(x_vals) >= 2 else 1.0
+        y_span = (max(y_vals) - min(y_vals)) if len(y_vals) >= 2 else 1.0
+        x_near = max(0.06, x_span * 0.22)
+        y_near = max(0.001, y_span * 0.22)
+
+        used_offsets = []
+        for strategy, cx, cy in plotted_points:
+            offset = base_offsets.get(strategy, (6, 6))
+            for _, px, py, p_off in used_offsets:
+                if abs(cx - px) <= x_near and abs(cy - py) <= y_near and p_off == offset:
+                    for cand in candidate_offsets:
+                        if cand != p_off:
+                            offset = cand
+                            break
+
+            ax.annotate(
+                f"C {cx:.2f} M {cy:.3f}",
+                xy=(cx, cy),
+                xytext=offset,
+                textcoords="offset points",
+                fontsize=7,
+                color="#222",
+                bbox=dict(facecolor="white", edgecolor="#777", boxstyle="round,pad=0.10", alpha=0.75),
+                zorder=5,
+            )
+            used_offsets.append((strategy, cx, cy, offset))
+
         ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
         ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
-        ax.set_xlabel("CPU total (cores)", fontsize=10)
+        ax.set_xlabel("CPU total cores", fontsize=10)
         if i == 0:
-            ax.set_ylabel("Memoria RSS por evento (MB/evento)", fontsize=10)
+            ax.set_ylabel("Memoria RSS por evento MB evento", fontsize=10)
 
     handles, labels = axes[0].get_legend_handles_labels()
     uniq = {}
     for h, l in zip(handles, labels):
         if l not in uniq:
             uniq[l] = h
-    fig.legend(list(uniq.values()), list(uniq.keys()), loc="upper right", framealpha=0.95)
+    fig.legend(list(uniq.values()), list(uniq.keys()), loc="upper right", framealpha=0.95, title=source_note)
 
-    source_note = "Prometheus"
-    if "source" in res_df.columns and (res_df["source"] == "cloudwatch").any():
-        source_note = "CloudWatch fallback"
-
-    fig.suptitle(
-        "Eficiencia de recursos por carga: CPU vs memoria por evento visible\n"
-        f"Cada punto representa el centroide por estrategia en cada escenario ({source_note})",
-        fontsize=11,
-        fontweight="bold",
-        y=0.98,
-    )
-
+    fig.suptitle("Eficiencia de recursos", fontsize=11, fontweight="bold", y=0.98)
     fig.tight_layout(rect=[0, 0, 0.90, 0.94])
     _save_figure(fig, out, "resource_efficiency_scatter")
 
@@ -1158,26 +1185,340 @@ def figure_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
             zorder=5,
         )
 
-        axes[i].set_title(scenario, fontsize=11)
+        axes[i].set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=11)
         axes[i].set_xticks(x)
-        axes[i].set_xticklabels([STRATEGY_LABELS.get(s, s) for s in order], fontsize=9)
+        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
         axes[i].set_xlabel("")
         if i == 0:
-            axes[i].set_ylabel("Consumer Lag (mensajes)")
+            axes[i].set_ylabel("Consumer lag mensajes")
         axes[i].yaxis.set_major_formatter(
             ticker.FuncFormatter(lambda v, _: f"{v:,.0f}")
         )
         if i == n - 1:
             axes[i].legend(fontsize=8, loc="upper right")
 
-    fig.suptitle(
-        f"Kafka consumer lag y backpressure por estrategia y escenario\n"
-        f"(linea roja: umbral critico = {KAFKA_LAG_THRESHOLD:,} mensajes)",
-        fontsize=12,
-        fontweight="bold",
-    )
+    fig.suptitle("Kafka consumer lag por estrategia y escenario", fontsize=12, fontweight="bold")
     fig.tight_layout()
     _save_figure(fig, out, "kafka_consumer_lag")
+
+
+def figure_cloudwatch_overview(cloudwatch: pd.DataFrame, out: Path):
+    """
+    Heatmap compacto con promedios host-level de CloudWatch por nodo.
+    Útil para anexar evidencia de consumo real en infraestructura AWS.
+    """
+    if cloudwatch is None or cloudwatch.empty:
+        print("  [SKIP] cloudwatch_host_overview.png (sin cloudwatch_snapshot.csv)")
+        return
+
+    cw = cloudwatch.copy()
+    cw["value"] = pd.to_numeric(cw["value"], errors="coerce")
+    cw = cw.dropna(subset=["value", "metric", "node"])
+
+    metrics_keep = ["CPUUtilization", "mem_used_percent", "disk_used_percent", "NetworkIn", "NetworkOut"]
+    cw = cw[cw["metric"].isin(metrics_keep)]
+    if cw.empty:
+        print("  [SKIP] cloudwatch_host_overview.png (métricas CloudWatch insuficientes)")
+        return
+
+    # Escalar red a MB para que sea interpretable en tabla compacta
+    net_mask = cw["metric"].isin(["NetworkIn", "NetworkOut"])
+    cw.loc[net_mask, "value"] = cw.loc[net_mask, "value"] / (1024 * 1024)
+
+    metric_labels = {
+        "CPUUtilization": "CPU %",
+        "mem_used_percent": "Mem %",
+        "disk_used_percent": "Disco %",
+        "NetworkIn": "Red In (MB)",
+        "NetworkOut": "Red Out (MB)",
+    }
+
+    agg = (
+        cw.groupby(["node", "metric"], observed=True)["value"]
+        .mean()
+        .reset_index()
+    )
+    agg["metric"] = agg["metric"].map(metric_labels)
+
+    node_order = ["producer", "broker", "compute", "sink"]
+    node_labels = {
+        "producer": "Producer",
+        "broker": "Broker",
+        "compute": "Compute",
+        "sink": "Sink",
+    }
+    agg["node"] = pd.Categorical(agg["node"], categories=node_order, ordered=True)
+    agg = agg.sort_values(["node", "metric"])
+    agg["node"] = agg["node"].astype(str).map(node_labels)
+
+    pivot = agg.pivot(index="node", columns="metric", values="value")
+    desired_cols = ["CPU %", "Mem %", "Disco %", "Red In (MB)", "Red Out (MB)"]
+    pivot = pivot[[c for c in desired_cols if c in pivot.columns]]
+
+    fig, ax = plt.subplots(figsize=(8.2, 3.7))
+    sns.heatmap(
+        pivot,
+        cmap="Greys",
+        annot=True,
+        fmt=".2f",
+        linewidths=0.5,
+        linecolor="#D0D0D0",
+        cbar=True,
+        cbar_kws={"shrink": 0.85, "label": "Promedio"},
+        ax=ax,
+    )
+    ax.set_title("Resumen de consumo CloudWatch por nodo", fontsize=11, fontweight="bold", pad=10)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    plt.xticks(rotation=15, ha="right")
+    plt.yticks(rotation=0)
+
+    fig.tight_layout()
+    _save_figure(fig, out, "cloudwatch_host_overview")
+
+
+def _prepare_cloudwatch_hw(cloudwatch: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza snapshots CloudWatch a nivel run para nodos broker/compute."""
+    if cloudwatch is None or cloudwatch.empty:
+        return pd.DataFrame()
+
+    required_cols = {"strategy", "scenario", "run_id", "node", "metric", "value"}
+    if not required_cols.issubset(set(cloudwatch.columns)):
+        return pd.DataFrame()
+
+    cw = cloudwatch.copy()
+    cw["value"] = pd.to_numeric(cw["value"], errors="coerce")
+    cw = cw.dropna(subset=["value"])
+    cw = cw[cw["node"].isin(["broker", "compute"])]
+    if cw.empty:
+        return pd.DataFrame()
+
+    # Un valor promedio por run, nodo y métrica
+    cw = (
+        cw.groupby(["strategy", "scenario", "run_id", "node", "metric"], observed=True)["value"]
+        .mean()
+        .reset_index()
+    )
+    return cw
+
+
+def _figure_hw_bars_by_strategy(
+    hw: pd.DataFrame,
+    metric: str,
+    out: Path,
+    basename: str,
+    title: str,
+    ylabel: str,
+):
+    if hw.empty:
+        print(f"  [SKIP] {basename}.png (sin datos CloudWatch)")
+        return
+
+    sub = hw[hw["metric"] == metric].copy()
+    if sub.empty:
+        print(f"  [SKIP] {basename}.png (métrica '{metric}' no disponible)")
+        return
+
+    agg = (
+        sub.groupby(["strategy", "node"], observed=True)["value"]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    agg["std"] = agg["std"].fillna(0.0)
+
+    strat_order = [s for s in STRATEGY_ORDER if s in agg["strategy"].unique()]
+    node_order = ["broker", "compute"]
+    node_labels = {"broker": "Broker", "compute": "Compute"}
+    node_colors = {"broker": "#9E9E9E", "compute": "#616161"}
+    node_hatches = {"broker": "//", "compute": ""}
+
+    x = np.arange(len(strat_order))
+    w = 0.35
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+
+    for i, node in enumerate(node_order):
+        vals, errs = [], []
+        for s in strat_order:
+            row = agg[(agg["strategy"] == s) & (agg["node"] == node)]
+            vals.append(float(row["mean"].iloc[0]) if not row.empty else 0.0)
+            errs.append(float(row["std"].iloc[0]) if not row.empty else 0.0)
+
+        bars = ax.bar(
+            x + (i - 0.5) * w,
+            vals,
+            width=w,
+            yerr=errs,
+            capsize=4,
+            color=node_colors[node],
+            edgecolor="#222",
+            linewidth=0.9,
+            hatch=node_hatches[node],
+            alpha=0.9,
+            label=node_labels[node],
+            zorder=3,
+        )
+        for b, v in zip(bars, vals):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                b.get_height() * 1.02 if b.get_height() > 0 else 0.05,
+                f"{v:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="#222",
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in strat_order], fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+    ax.legend(framealpha=0.95, fontsize=9)
+    ax.grid(True, axis="y", alpha=0.25, linestyle="--", linewidth=0.5)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    _save_figure(fig, out, basename)
+
+
+def figure_hw_cpu_heatmap_by_strategy_scenario(hw: pd.DataFrame, out: Path):
+    if hw.empty:
+        print("  [SKIP] hardware_cpu_heatmap_strategy_scenario.png (sin datos CloudWatch)")
+        return
+
+    sub = hw[hw["metric"] == "CPUUtilization"].copy()
+    if sub.empty:
+        print("  [SKIP] hardware_cpu_heatmap_strategy_scenario.png (CPUUtilization no disponible)")
+        return
+
+    scenarios = _sort_scenarios(sub["scenario"].unique())
+    nodes = ["broker", "compute"]
+    node_titles = {"broker": "Broker", "compute": "Compute"}
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.3), sharey=True)
+
+    for i, node in enumerate(nodes):
+        node_df = sub[sub["node"] == node]
+        pivot = (
+            node_df.groupby(["strategy", "scenario"], observed=True)["value"]
+            .mean()
+            .reset_index()
+            .pivot(index="strategy", columns="scenario", values="value")
+        )
+        strat_order = [s for s in STRATEGY_ORDER if s in pivot.index]
+        pivot = pivot.reindex(index=strat_order, columns=scenarios)
+        pivot.index = [STRATEGY_LABELS_SHORT.get(s, s) for s in pivot.index]
+        pivot.columns = [SCENARIO_LABELS.get(s, s) for s in pivot.columns]
+
+        sns.heatmap(
+            pivot,
+            cmap="Greys",
+            annot=True,
+            fmt=".2f",
+            linewidths=0.5,
+            linecolor="#D0D0D0",
+            cbar=(i == 1),
+            cbar_kws={"shrink": 0.85, "label": "CPU (%)"} if i == 1 else None,
+            ax=axes[i],
+        )
+        axes[i].set_title(f"{node_titles[node]}", fontsize=10, fontweight="bold")
+        axes[i].set_xlabel("Escenario", fontsize=9)
+        if i == 0:
+            axes[i].set_ylabel("Estrategia", fontsize=9)
+        else:
+            axes[i].set_ylabel("")
+        axes[i].tick_params(axis="x", rotation=15)
+        axes[i].tick_params(axis="y", rotation=0)
+
+    fig.suptitle("CPU por estrategia y escenario", fontsize=11, fontweight="bold", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    _save_figure(fig, out, "hardware_cpu_heatmap_strategy_scenario")
+
+
+def figure_hw_cpu_normalized_efficiency(hw: pd.DataFrame, df_latency: pd.DataFrame, out: Path):
+    """
+    CPU normalizada por trabajo útil:
+      CPU% por cada 10k eventos visibles.
+    """
+    if hw.empty or df_latency.empty:
+        print("  [SKIP] hardware_cpu_normalized_efficiency.png (datos insuficientes)")
+        return
+
+    cpu = hw[hw["metric"] == "CPUUtilization"].copy()
+    if cpu.empty:
+        print("  [SKIP] hardware_cpu_normalized_efficiency.png (CPUUtilization no disponible)")
+        return
+
+    events = (
+        df_latency.groupby(["strategy", "scenario", "run_id"], observed=True)
+        .size()
+        .reset_index(name="visible_events")
+    )
+
+    merged = cpu.merge(events, on=["strategy", "scenario", "run_id"], how="left")
+    merged = merged.dropna(subset=["visible_events", "value"])
+    merged = merged[merged["visible_events"] > 0]
+    if merged.empty:
+        print("  [SKIP] hardware_cpu_normalized_efficiency.png (eventos visibles nulos)")
+        return
+
+    merged["cpu_pct_per_10k_events"] = merged["value"] / (merged["visible_events"] / 10_000.0)
+
+    agg = (
+        merged.groupby(["strategy", "node"], observed=True)["cpu_pct_per_10k_events"]
+        .agg(["mean", "std"])
+        .reset_index()
+    )
+    agg["std"] = agg["std"].fillna(0.0)
+
+    strat_order = [s for s in STRATEGY_ORDER if s in agg["strategy"].unique()]
+    node_order = ["broker", "compute"]
+    node_labels = {"broker": "Broker", "compute": "Compute"}
+    node_colors = {"broker": "#BDBDBD", "compute": "#757575"}
+    node_hatches = {"broker": "//", "compute": ""}
+
+    x = np.arange(len(strat_order))
+    w = 0.35
+    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+
+    for i, node in enumerate(node_order):
+        vals, errs = [], []
+        for s in strat_order:
+            row = agg[(agg["strategy"] == s) & (agg["node"] == node)]
+            vals.append(float(row["mean"].iloc[0]) if not row.empty else 0.0)
+            errs.append(float(row["std"].iloc[0]) if not row.empty else 0.0)
+
+        bars = ax.bar(
+            x + (i - 0.5) * w,
+            vals,
+            width=w,
+            yerr=errs,
+            capsize=4,
+            color=node_colors[node],
+            edgecolor="#222",
+            linewidth=0.9,
+            hatch=node_hatches[node],
+            alpha=0.9,
+            label=node_labels[node],
+            zorder=3,
+        )
+        for b, v in zip(bars, vals):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                b.get_height() * 1.02 if b.get_height() > 0 else 0.05,
+                f"{v:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="#222",
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in strat_order], fontsize=10)
+    ax.set_ylabel("CPU (%) por cada 10k eventos visibles", fontsize=10)
+    ax.set_title("Eficiencia normalizada de CPU por estrategia", fontsize=11, fontweight="bold", pad=8)
+    ax.grid(True, axis="y", alpha=0.25, linestyle="--", linewidth=0.5)
+    ax.legend(framealpha=0.95, fontsize=9)
+    fig.tight_layout()
+    _save_figure(fig, out, "hardware_cpu_normalized_efficiency")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1196,17 +1537,17 @@ def table_latency_summary(df: pd.DataFrame, out: Path):
         records.append(
             {
                 "Estrategia": strategy,
-                "Escenario": scenario,
+                "Escenario": SCENARIO_LABELS.get(scenario, scenario),
                 "N": len(lat),
-                "p50 (ms)": round(lat.quantile(0.50), 1),
-                "p95 (ms)": round(lat.quantile(0.95), 1),
-                "p99 (ms)": round(lat.quantile(0.99), 1),
-                "IQR (ms)": round(lat.quantile(0.75) - lat.quantile(0.25), 1),
+                "p50 ms": round(lat.quantile(0.50), 1),
+                "p95 ms": round(lat.quantile(0.95), 1),
+                "p99 ms": round(lat.quantile(0.99), 1),
+                "IQR ms": round(lat.quantile(0.75) - lat.quantile(0.25), 1),
                 "CV%": round(lat.std() / lat.mean() * 100, 1)
                 if lat.mean() > 0
                 else 0.0,
-                "Min (ms)": round(lat.min(), 1),
-                "Max (ms)": round(lat.max(), 1),
+                "Min ms": round(lat.min(), 1),
+                "Max ms": round(lat.max(), 1),
             }
         )
 
@@ -1215,7 +1556,7 @@ def table_latency_summary(df: pd.DataFrame, out: Path):
     tbl["_s_order"] = tbl["Estrategia"].map(
         {s: i for i, s in enumerate(STRATEGY_ORDER)}
     )
-    tbl["_c_order"] = tbl["Escenario"].map({s: i for i, s in enumerate(SCENARIO_ORDER)})
+    tbl["_c_order"] = tbl["Escenario"].map({SCENARIO_LABELS.get(s, s): i for i, s in enumerate(SCENARIO_ORDER)})
     tbl = tbl.sort_values(["_s_order", "_c_order"]).drop(
         columns=["_s_order", "_c_order"]
     )
@@ -1252,7 +1593,7 @@ def table_latency_summary(df: pd.DataFrame, out: Path):
         for j in range(n_cols):
             table[(row_idx, j)].set_facecolor(col)
 
-    ax.set_title("Resumen estadistico de latencia por estrategia y escenario", fontsize=12, fontweight="bold", pad=10)
+    ax.set_title("Resumen estadistico de latencia escala lineal", fontsize=12, fontweight="bold", pad=10)
     fig.tight_layout()
     _save_figure(fig, out, "latency_summary_table")
 
