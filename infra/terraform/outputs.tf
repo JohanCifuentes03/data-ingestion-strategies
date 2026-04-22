@@ -90,7 +90,7 @@ resource "local_file" "ansible_inventory" {
 }
 
 # ── Shell Environment File (para scripts de experimento) ─────────
-# Cargado por manage.sh y experiment.sh cuando MODE=distributed.
+# Cargado por thesis.sh y experiment.sh cuando MODE=distributed.
 # Nunca se sube al repositorio (.gitignore).
 resource "local_file" "outputs_env" {
   filename        = "${path.module}/outputs.env"

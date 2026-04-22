@@ -170,7 +170,6 @@ data-ingestion-strategies/
 ├── scripts/                       # Official workflow + execution scripts
 ├── docs/                          # Technical architecture documentation
 ├── results/                       # Experiment outputs
-└── Makefile                       # Optional convenience aliases
 ```
 
 ## Architecture Overview

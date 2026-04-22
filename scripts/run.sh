@@ -313,7 +313,7 @@ ensure_services() {
     else
         # Modo local: verificar docker compose local
         if ! docker compose ps kafka postgres 2>/dev/null | grep -q "Up"; then
-            warn "Servicios no estan levantados. Ejecuta ./scripts/manage.sh up primero."
+            warn "Servicios no estan levantados. Ejecuta: bash scripts/thesis.sh run --mode local"
             exit 1
         fi
     fi

@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
+DC=(docker compose --env-file .env -f infra/docker/compose/docker-compose.yml)
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -91,9 +93,54 @@ Ejemplos:
   bash scripts/thesis.sh full --mode distributed --deploy
 
   # Debug local
-  bash scripts/thesis.sh run --mode distributed --reps 1 --duration 180 --warmup 10 --cooldown 10
+  bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
   bash scripts/thesis.sh full --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
 EOF
+}
+
+ensure_env_file() {
+    if [[ ! -f ".env" ]]; then
+        if [[ -f ".env.example" ]]; then
+            cp ".env.example" ".env"
+            log "Creado .env desde .env.example"
+        else
+            err ".env.example no existe"
+            exit 1
+        fi
+    fi
+}
+
+ensure_python_env() {
+    if [[ ! -d ".venv" ]]; then
+        log "Creando entorno virtual Python"
+        python3 -m venv .venv
+        .venv/bin/pip install --upgrade pip
+        .venv/bin/pip install -e src/python/
+    fi
+}
+
+compile_jobs() {
+    log "Compilando jobs Java"
+    if [[ -f "./gradlew" ]]; then
+        ./gradlew buildJobs
+    else
+        gradle buildJobs
+    fi
+}
+
+build_local_images() {
+    log "Construyendo imágenes locales necesarias"
+    "${DC[@]}" build generator probe
+}
+
+start_local_stack() {
+    log "Levantando stack local"
+    "${DC[@]}" up -d
+}
+
+stop_local_stack() {
+    log "Bajando stack local"
+    "${DC[@]}" down
 }
 
 require_outputs_env() {
@@ -116,9 +163,11 @@ setup_local_stack() {
         return 0
     fi
     log "Preparando stack local"
-    make setup
-    make build
-    make up MODE=local
+    ensure_env_file
+    ensure_python_env
+    compile_jobs
+    build_local_images
+    start_local_stack
 }
 
 run_provision() {
@@ -127,7 +176,8 @@ run_provision() {
         exit 1
     fi
     log "Provisionando infraestructura distribuida"
-    make provision
+    terraform -chdir=infra/terraform init
+    terraform -chdir=infra/terraform apply -auto-approve
 }
 
 run_deploy() {
@@ -140,7 +190,12 @@ run_deploy() {
     fi
     require_outputs_env
     log "Desplegando servicios distribuidos"
-    make distributed-deploy
+    (
+        # shellcheck source=/dev/null
+        source infra/terraform/outputs.env
+        cd infra/ansible
+        ansible-playbook -i inventory.ini site.yml
+    )
 }
 
 run_experiment() {
@@ -215,7 +270,7 @@ run_full() {
 run_destroy() {
     if [[ "$MODE" == "local" ]]; then
         log "Bajando stack local"
-        make down MODE=local
+        stop_local_stack
         return 0
     fi
     require_outputs_env
