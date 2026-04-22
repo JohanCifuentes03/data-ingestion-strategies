@@ -220,6 +220,18 @@ services:
     ports:
       - "9090:9090"
 
+  # node-exporter: métricas host-level para fallback local de CPU/memoria
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    restart: unless-stopped
+    command:
+      - '--path.rootfs=/host'
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    ports:
+      - "9100:9100"
+
   # cAdvisor: expone métricas de CPU, Memoria, Red e I/O por contenedor
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1

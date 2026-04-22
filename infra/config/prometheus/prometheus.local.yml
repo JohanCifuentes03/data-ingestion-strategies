@@ -27,12 +27,6 @@ scrape_configs:
       - PrometheusText0.0.4
     static_configs:
       - targets: ['cadvisor:8080']
-    metric_relabel_configs:
-      # Descartar cgroups raíz "/" y "/docker" — solo conservar contenedores
-      # individuales cuyo id tiene la forma /docker/<sha256>.
-      - source_labels: [id]
-        regex: '/docker/.+|/system.slice/docker-.+\.scope'
-        action: keep
 
   # ── Generator (métricas de producción) ────────────────────────────
   # Expone: generator_events_total, generator_errors_total,
@@ -55,3 +49,12 @@ scrape_configs:
       - source_labels: [__address__]
         target_label: instance
         replacement: 'probe'
+
+  # ── Node Exporter (host-level fallback CPU/Mem) ───────────────────
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'node-exporter'
