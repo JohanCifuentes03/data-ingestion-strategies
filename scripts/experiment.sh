@@ -8,13 +8,10 @@
 # Uso:
 #   ./scripts/experiment.sh --smoke        # ~5 min (1 estrategia, 1 escenario)
 #   ./scripts/experiment.sh --quick        # ~30 min (3 estrategias, 2 escenarios)
-#   ./scripts/experiment.sh --standard     # ~2 horas (default)
-#   ./scripts/experiment.sh --full         # matriz tesis completa
+#   ./scripts/experiment.sh                # matriz tesis completa
 #   ./scripts/experiment.sh --reps 3       # 3 repeticiones
 #   ./scripts/experiment.sh --duration 240 # 4 min por corrida
 #   ./scripts/experiment.sh --strategies batch # solo batch
-#   ./scripts/experiment.sh --fault-inject # inyectar fallos después de cada run
-#   ./scripts/experiment.sh --scaling-test # medir eficiencia de escalado (1→2→3 workers)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -33,11 +30,6 @@ EXPORT_WINDOW=${EXPORT_WINDOW:-"5m"}
 EVENT_SCHEMA=${EVENT_SCHEMA:-""}
 export RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
 WARMUP_SECONDS=${WARMUP_SECONDS:-30}    # 30 s per protocol spec (JVM JIT warm-up)
-
-# ── Feature flags ──────────────────────────────────────────────────
-FAULT_INJECT=false      # --fault-inject : ejecutar fault_inject.sh por estrategia
-SCALING_TEST=false      # --scaling-test : medir eficiencia de escalado (1→2→3 workers)
-FAULT_SCENARIO=${FAULT_SCENARIO:-"medium-load"}   # escenario sobre el que se inyecta fallo
 
 # ── Quick mode presets ─────────────────────────────────────────────
 QUICK_MODE=false
@@ -76,9 +68,6 @@ while [[ $# -gt 0 ]]; do
             EXPORT_METRICS=false
             shift
             ;;
-        --fault-inject)   FAULT_INJECT=true;          shift   ;;
-        --fault-scenario) FAULT_SCENARIO="$2";        shift 2 ;;
-        --scaling-test)   SCALING_TEST=true;           shift   ;;
         --strategies)  STRATEGIES="$2";       shift 2 ;;
         --scenarios)   SCENARIOS="$2";        shift 2 ;;
         --reps)        REPETITIONS="$2";      shift 2 ;;
@@ -96,7 +85,7 @@ done
 # Apply warmup setting to environment for generator
 export WARMUP_SECONDS
 
-# Guardrail: en ejecuciones oficiales no permitir burst/extreme/mixed por error
+# Guardrail: en ejecuciones oficiales solo permitir escenarios oficiales
 OFFICIAL_SCENARIOS="low-load medium-load high-load"
 for SCN in $SCENARIOS; do
     case "$SCN" in
@@ -136,8 +125,6 @@ echo "║  Total runs  : $TOTAL_RUNS"
 echo "║  Est. time   : ~${ESTIMATED_MINUTES} minutes"
 echo "║  Export win. : $EXPORT_WINDOW"
 echo "║  Schema      : ${EVENT_SCHEMA:-<scenario default>}"
-echo "║  Fault inject: $FAULT_INJECT"
-echo "║  Scaling test: $SCALING_TEST"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -222,86 +209,3 @@ echo "║          EXPERIMENT COMPLETE — $TOTAL_RUNS runs finished           �
 echo "║  Results directory: $RESULTS_BASE/                          "
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
-
-# ══════════════════════════════════════════════════════════════════
-# FAULT INJECTION PHASE  (--fault-inject)
-# ══════════════════════════════════════════════════════════════════
-# Ejecuta fault_inject.sh por cada estrategia en el escenario
-# seleccionado (default: medium-load). Los resultados se acumulan
-# en results/fault_recovery.csv.
-if [ "$FAULT_INJECT" = true ]; then
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────┐"
-    echo "│  FAULT INJECTION — escenario: $FAULT_SCENARIO"
-    echo "└──────────────────────────────────────────────────────────┘"
-
-    FAULT_INJECT_SCRIPT="$ROOT_DIR/scripts/fault_inject.sh"
-    if [ ! -f "$FAULT_INJECT_SCRIPT" ]; then
-        echo "[experiment] ERROR: fault_inject.sh no encontrado en scripts/"
-        exit 1
-    fi
-
-    for STRATEGY in $STRATEGIES; do
-        echo "[experiment] Inyectando fallo en estrategia: $STRATEGY / $FAULT_SCENARIO"
-        bash "$FAULT_INJECT_SCRIPT" "$STRATEGY" "$FAULT_SCENARIO" \
-            || echo "[experiment] WARN: fault_inject.sh retornó error para $STRATEGY — continuando"
-    done
-
-    echo "[experiment] Fault injection completada. Ver results/fault_recovery.csv"
-fi
-
-# ══════════════════════════════════════════════════════════════════
-# SCALING TEST PHASE  (--scaling-test)
-# ══════════════════════════════════════════════════════════════════
-# Ejecuta cada estrategia en low-load con 1, 2 y 3 Spark workers
-# usando el profile Docker Compose "scaling". Los resultados se
-# guardan en results/<strategy>/scaling_<N>w/ para que analyze.py
-# calcule la eficiencia de escalado.
-if [ "$SCALING_TEST" = true ]; then
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────┐"
-    echo "│  SCALING TEST — 1 → 2 → 3 Spark workers"
-    echo "└──────────────────────────────────────────────────────────┘"
-
-    SCALING_SCENARIO="low-load"
-    SCALING_DURATION=120   # 2 min es suficiente para medir throughput estable
-
-    for STRATEGY in $STRATEGIES; do
-        for N_WORKERS in 1 2 3; do
-            SCALING_RUN_ID="scaling_${N_WORKERS}w"
-            SCALING_RUN_DIR="$RESULTS_BASE/$STRATEGY/${SCALING_SCENARIO}/${SCALING_RUN_ID}"
-            mkdir -p "$SCALING_RUN_DIR"
-
-            echo "[experiment] Scaling: $STRATEGY / ${N_WORKERS} worker(s)"
-
-            # Bajar workers adicionales, luego levantar solo los necesarios
-            docker compose --profile scaling down spark-worker-2 spark-worker-3 2>/dev/null || true
-
-            if [ "$N_WORKERS" -ge 2 ]; then
-                docker compose --profile scaling up -d spark-worker-2
-            fi
-            if [ "$N_WORKERS" -ge 3 ]; then
-                docker compose --profile scaling up -d spark-worker-3
-            fi
-
-            # Pequeña pausa para que los workers se registren en el master
-            sleep 10
-
-            # Ejecutar run con duración reducida
-            RUN_DURATION_SECONDS=$SCALING_DURATION \
-                bash "$ROOT_DIR/scripts/run.sh" "$STRATEGY" "$SCALING_SCENARIO" "$SCALING_RUN_ID"
-
-            # Nota: run.sh ya copio el CSV filtrado al directorio del run via copy_probe_csv_to_run.
-
-            # Añadir metadato de workers al snapshot de Prometheus
-            if [ -f "$SCALING_RUN_DIR/prometheus_snapshot.csv" ]; then
-                echo "${STRATEGY},${SCALING_SCENARIO},${SCALING_RUN_ID},n_workers,${N_WORKERS},count" \
-                    >> "$SCALING_RUN_DIR/prometheus_snapshot.csv"
-            fi
-        done
-    done
-
-    # Restaurar a 1 worker (bajar los extras)
-    docker compose --profile scaling down spark-worker-2 spark-worker-3 2>/dev/null || true
-    echo "[experiment] Scaling test completado. Ver results/*/scaling_*w/"
-fi

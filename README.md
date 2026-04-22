@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Java 17](https://img.shields.io/badge/Java-17-orange.svg)](https://openjdk.org/)
 
-A comprehensive benchmark comparing three data ingestion architectures: **Batch Processing** (Apache Spark), **Micro-batch Processing** (Spark Structured Streaming), and **Stream Processing** (Apache Flink). This research quantifies trade-offs between latency, throughput, resource efficiency, and fault tolerance.
+A comprehensive benchmark comparing three data ingestion architectures: **Batch Processing** (Apache Spark), **Micro-batch Processing** (Spark Structured Streaming), and **Stream Processing** (Apache Flink). The official thesis scope is limited to the three official scenarios `low-load`, `medium-load`, and `high-load`.
 
 ## Research Questions
 
@@ -23,39 +23,86 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 
 *Results from distributed deployment (4-VM AWS topology, medium load)*
 
-## Quick Start
+## Official Workflow
 
 ### Prerequisites
 - **Docker** 20.10+ and **Docker Compose** 2.x
 - 16GB RAM, 4 CPU cores (for local mode)
 - *(Optional)* AWS account for distributed deployment
 
-### Run Complete Benchmark (Local)
+The official entrypoint is:
 
 ```bash
-# 1. Clone and setup
+bash scripts/thesis.sh <subcommand> [options]
+```
+
+The workflow is intentionally split into three phases:
+
+### 1. Infrastructure
+
+Distributed official execution:
+
+```bash
+bash scripts/thesis.sh provision --mode distributed
+bash scripts/thesis.sh deploy --mode distributed
+```
+
+### 2. Execution
+
+Official distributed run:
+
+```bash
+bash scripts/thesis.sh run --mode distributed
+```
+
+Local debug run:
+
+```bash
+bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+```
+
+### 3. Results and Analysis
+
+Distributed results pipeline:
+
+```bash
+bash scripts/thesis.sh collect --mode distributed
+bash scripts/thesis.sh analyze --mode distributed
+bash scripts/thesis.sh validate --mode distributed
+```
+
+Local results pipeline:
+
+```bash
+bash scripts/thesis.sh analyze --mode local
+bash scripts/thesis.sh validate --mode local
+```
+
+### Convenience Mode
+
+If you already understand the three-phase workflow, you can still use:
+
+```bash
+bash scripts/thesis.sh full --mode distributed --deploy
+```
+
+### Local Debug Example
+
+```bash
 git clone <repository-url>
 cd data-ingestion-strategies
 cp .env.example .env
 
-# 2. Run full benchmark (all strategies, all load profiles)
-make local-experiment
-
-# 3. Generate analysis charts
-make analyze
-
-# 4. View results
-ls results/figures/  # PNG/PDF charts
-cat results/summary.csv  # Metrics summary
+# Quick local debug cycle
+bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+bash scripts/thesis.sh analyze --mode local
+bash scripts/thesis.sh validate --mode local
 ```
 
-**That's it!** Results will be in `results/` directory with publication-ready charts.
+Results will be written to:
 
-### Run Quick Smoke Test (5 minutes)
-
-```bash
-make local-smoke
-```
+- `results/` for local runs
+- `results-distributed/` for distributed runs
 
 ## Project Structure
 
@@ -80,8 +127,8 @@ data-ingestion-strategies/
 │   ├── terraform/                 # AWS provisioning
 │   ├── ansible/                   # Configuration management
 │   └── config/                    # Service configurations
-├── scripts/                       # Orchestration scripts
-├── docs/                          # Detailed documentation
+├── scripts/                       # Official workflow + execution scripts
+├── docs/                          # Technical architecture documentation
 ├── results/                       # Experiment outputs
 └── Makefile                       # One-command operations
 ```
@@ -156,7 +203,6 @@ Approximate generated volume (JSON over Kafka) for a 300s run:
 
 For full defense-oriented details (protocols, ports, data types, formulas, and per-experiment totals), see:
 - `docs/architecture.md`
-- `docs/experiment_protocol.md`
 
 ```mermaid
 flowchart TB
@@ -195,74 +241,37 @@ flowchart TB
 
 **Implementation**: `src/jobs/streaming/FlinkStreamingJob.java`
 
-## Detailed Documentation
+## Documentation
 
-- **[Architecture](docs/architecture.md)**: System design, components, and implementation details
-- **[Architecture: Distributed Topology](docs/architecture.md#23-deployment-topologies-local-and-distributed)**: VM layout, network, protocols, and ports
-- **[Experiment Protocol](docs/experiment_protocol.md)**: Methodology, metrics, and statistical analysis
-- **[Reproducibility Guide](docs/reproducibility/)**: Environment specs and experiment checklist
-- **[Setup Guides](docs/setup/)**:
-  - [Local Setup](docs/setup/local.md): Docker Compose walkthrough
-  - [Distributed Setup](docs/setup/distributed.md): AWS deployment guide
+- **[Architecture](docs/architecture.md)**: system design, deployment topology, data model, network flows, and official benchmark baseline
 
 ## Reproducibility
 
-This benchmark follows best practices for computational reproducibility:
+This benchmark follows a simple reproducibility model:
 
-- **Containerized**: All services run in Docker with pinned versions  
-- **Declarative**: Infrastructure as Code (Terraform + Ansible)  
-- **Versioned**: Git-tracked configurations and dependencies  
-- **Documented**: Complete experiment protocol with statistical methods  
-- **Validated**: Automated result validation scripts
+- **Containerized**: Docker-based local and distributed runtime
+- **Declarative**: Terraform + Ansible for distributed provisioning
+- **Versioned**: code, configs, and analysis tracked in git
+- **Validated**: result validation via `benchmark.validation.validator`
 
-See [Reproducibility Checklist](docs/reproducibility/experiment-checklist.md) for details.
-
-## Development Commands
+## Official Commands
 
 ```bash
-# Setup
-make setup              # Install dependencies
-make build              # Build Docker images
+# Distributed official flow
+bash scripts/thesis.sh provision --mode distributed
+bash scripts/thesis.sh deploy --mode distributed
+bash scripts/thesis.sh run --mode distributed
+bash scripts/thesis.sh collect --mode distributed
+bash scripts/thesis.sh analyze --mode distributed
+bash scripts/thesis.sh validate --mode distributed
 
-# Local Experiments
-make local-experiment   # Full benchmark (all strategies)
-make local-smoke        # Quick 5-minute test
+# Local debug flow
+bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+bash scripts/thesis.sh analyze --mode local
+bash scripts/thesis.sh validate --mode local
 
-# Distributed Deployment (AWS)
-make provision          # Provision AWS infrastructure
-make distributed-deploy # Deploy services via Ansible
-make distributed-experiment  # Run full benchmark on AWS
-make distributed-teardown    # Destroy AWS resources
-
-# Thesis one-command pipelines
-bash scripts/thesis-run.sh --mode local --profile quick
-bash scripts/thesis-run.sh --mode distributed --profile quick
-
-# Analysis
-make analyze            # Generate all charts
-make validate           # Validate results
-
-# Cleanup
-make clean              # Remove build artifacts
-make clean-results      # Remove experiment results
-```
-
-### Thesis One-Command Runner
-
-Use `scripts/thesis-run.sh` to orchestrate setup, execution, collection, analysis, and validation.
-
-```bash
-# Local thesis quick run
-bash scripts/thesis-run.sh --mode local --profile quick
-
-# Distributed thesis smoke run
-bash scripts/thesis-run.sh --mode distributed --profile smoke
-
-# Distributed stronger run (custom)
-bash scripts/thesis-run.sh --mode distributed --strategies "batch microbatch streaming" --scenarios "low-load medium-load high-load" --reps 2 --duration 180
-
-# Optional teardown at end
-bash scripts/thesis-run.sh --mode distributed --profile quick --teardown
+# Destroy distributed infrastructure when done
+bash scripts/thesis.sh destroy --mode distributed
 ```
 
 ## Results & Metrics
@@ -274,8 +283,6 @@ bash scripts/thesis-run.sh --mode distributed --profile quick --teardown
 
 ### Secondary Metrics
 - **Consumer Lag**: Kafka offset lag
-- **Checkpoint Overhead**: State management cost (Flink)
-- **Recovery Time**: Time to restore throughput after failure
 
 ### Analysis Tools
 
@@ -298,12 +305,12 @@ Current compact figure set (thesis-focused):
 - `kafka_consumer_lag.*`: lag/backpressure by strategy and scenario
 - `latency_summary_table.*`: summary table (CSV + figure)
 
-## Known Limitations
+## Notes
 
 1. **Local Mode**: Requires 16GB+ RAM for concurrent strategies
 2. **Distributed Mode**: A full 45-run distributed experiment can take around 5 hours and should be executed in sessions
-3. **Fault Injection**: Manual verification required for complex failure scenarios
-4. **Cost**: AWS distributed tests cost ~$5-10 per full benchmark run
+3. **Official Scope**: the official thesis benchmark uses only `low-load`, `medium-load`, and `high-load`
+4. **Cost**: AWS distributed tests cost roughly a few USD per full benchmark session, depending on instance uptime
 
 ## License
 

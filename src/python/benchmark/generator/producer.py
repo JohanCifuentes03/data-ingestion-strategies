@@ -1,9 +1,12 @@
 """
-Workload generator — high-throughput multi-threaded Kafka producer.
+Workload generator for the official thesis benchmark.
 
-Supports realistic event schemas (IoT sensor, financial tick, health monitor),
-variable payload sizes, burst patterns, warmup phases, and finite run durations
-for fully reproducible experiments at large scale.
+Supports the three official scenarios only:
+- low-load
+- medium-load
+- high-load
+
+Each scenario maps to a fixed event schema, payload size, warmup, and finite run duration.
 """
 
 import json
@@ -71,25 +74,6 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
         "event_rate": 30_000,
         "payload": 1500,
         "schema": "health_monitor",
-    },
-    "extreme-load": {
-        "event_rate": 100_000,
-        "payload": 1500,
-        "schema": "iot_sensor",
-    },
-    "burst": {
-        "event_rate": 10_000,
-        "payload": 1500,
-        "burst_rate": 50_000,
-        "burst_duration": 60,
-        "burst_period": 300,
-        "schema": "financial_tick",
-    },
-    "mixed-payload": {
-        "event_rate": 10_000,
-        "payload": 1500,  # base; rotates across payload_sizes
-        "payload_sizes": [1500, 4096, 65536],
-        "schema": "iot_sensor",
     },
 }
 
@@ -202,7 +186,6 @@ def wait_for_kafka(bootstrap_servers: str, max_retries: int = 30) -> Producer:
 class SharedState:
     def __init__(self):
         self.running = True
-        self.in_burst = False
         self.current_rate = 0
         self.schema = "iot_sensor"
         self.payload_sizes: list[int] = [MIN_PAYLOAD_BYTES]
@@ -335,18 +318,14 @@ def main():
     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
     base_rate = scenario["event_rate"]
-    burst_rate = scenario.get("burst_rate", base_rate)
-    burst_duration = scenario.get("burst_duration", 60)
-    burst_period = scenario.get("burst_period", 300)
     payload_sizes = scenario.get("payload_sizes", [scenario["payload"]])
     payload_sizes = [max(MIN_PAYLOAD_BYTES, int(sz)) for sz in payload_sizes]
 
-    n_threads = decide_n_threads(max(base_rate, burst_rate))
+    n_threads = decide_n_threads(base_rate)
     log.info(
-        "Config: scenario=%s rate=%d burst=%d schema=%s payload=%s threads=%d duration=%s warmup=%ds",
+        "Config: scenario=%s rate=%d schema=%s payload=%s threads=%d duration=%s warmup=%ds",
         scenario_name,
         base_rate,
-        burst_rate,
         scenario["schema"],
         payload_sizes,
         n_threads,
@@ -369,7 +348,7 @@ def main():
     state._n_threads = n_threads  # type: ignore[attr-defined]
     state.current_rate = base_rate
 
-    # Rate accessor (reads live state for burst support)
+    # Rate accessor for producer threads
     def current_rate_fn() -> int:
         return state.current_rate
 
@@ -384,9 +363,8 @@ def main():
         t.start()
         threads.append(t)
 
-    # ── Control loop (burst logic + rate gauge + shutdown) ──────────
+    # ── Control loop (rate gauge + shutdown) ────────────────────────
     start_time = time.time()
-    last_burst = start_time
     warmup_complete = False
 
     try:
@@ -408,17 +386,8 @@ def main():
                 )
                 break
 
-            # Burst logic
-            if scenario_name == "burst":
-                if now - last_burst >= burst_period:
-                    last_burst = now
-                in_burst = (now - last_burst) <= burst_duration
-            else:
-                in_burst = False
-
-            new_rate = burst_rate if in_burst else base_rate
-            state.current_rate = new_rate
-            CURRENT_RATE.labels(scenario_name, run_id, strategy).set(new_rate)
+            state.current_rate = base_rate
+            CURRENT_RATE.labels(scenario_name, run_id, strategy).set(base_rate)
 
             time.sleep(0.5)  # control loop ticks every 500ms
 

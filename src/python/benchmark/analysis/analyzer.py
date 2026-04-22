@@ -130,9 +130,6 @@ SCENARIO_ORDER = [
     "low-load",
     "medium-load",
     "high-load",
-    "burst",
-    "extreme-load",
-    "mixed-payload",
 ]
 
 # Labels de escenarios más legibles
@@ -140,9 +137,6 @@ SCENARIO_LABELS = {
     "low-load": "Baja",
     "medium-load": "Media",
     "high-load": "Alta",
-    "burst": "Rafaga",
-    "extreme-load": "Extrema",
-    "mixed-payload": "Mixta",
 }
 
 FIG_W = 4.5  # ancho por subgráfico (IEEE column width ~3.5in)

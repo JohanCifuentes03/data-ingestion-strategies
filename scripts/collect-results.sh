@@ -7,7 +7,6 @@
 # Los resultados incluyen:
 #   - latency_samples.csv (por corrada: strategy/scenario/run_id/)
 #   - prometheus_snapshot.csv
-#   - fault_recovery.csv (si se ejecutó --fault-inject)
 #   - clock_offsets_*.csv (logs de sincronización NTP)
 #
 # USO:

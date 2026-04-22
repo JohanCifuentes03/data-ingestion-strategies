@@ -45,15 +45,21 @@ usage() {
 Uso:
   bash scripts/thesis.sh <subcommand> [options]
 
-Subcommands:
-  run        Ejecuta solo el experimento
-  collect    Recolecta resultados distribuidos
-  analyze    Genera figuras
-  validate   Valida resultados
-  full       Ejecuta pipeline completo
+Fase 1. Infraestructura:
   provision  Provisiona IaC distribuida
   deploy     Despliega servicios
   destroy    Baja local o destruye IaC distribuida
+
+Fase 2. Ejecución:
+  run        Ejecuta solo el experimento
+
+Fase 3. Resultados y análisis:
+  collect    Recolecta resultados distribuidos
+  analyze    Genera figuras
+  validate   Valida resultados
+
+Conveniencia:
+  full       Ejecuta pipeline completo
   help       Muestra esta ayuda
 
 Opciones:
@@ -73,7 +79,18 @@ Opciones:
   --scenarios "..."             Escenarios (default: low-load medium-load high-load)
 
 Ejemplos:
-  bash scripts/thesis.sh full --mode distributed
+  # Flujo oficial recomendado
+  bash scripts/thesis.sh provision --mode distributed
+  bash scripts/thesis.sh deploy --mode distributed
+  bash scripts/thesis.sh run --mode distributed
+  bash scripts/thesis.sh collect --mode distributed
+  bash scripts/thesis.sh analyze --mode distributed
+  bash scripts/thesis.sh validate --mode distributed
+
+  # Conveniencia
+  bash scripts/thesis.sh full --mode distributed --deploy
+
+  # Debug local
   bash scripts/thesis.sh run --mode distributed --reps 1 --duration 180 --warmup 10 --cooldown 10
   bash scripts/thesis.sh full --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
 EOF

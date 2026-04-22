@@ -114,21 +114,6 @@ set_generator_defaults() {
             GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="health_monitor"
             ;;
-        extreme-load)
-            GENERATOR_DEFAULT_RATE=100000
-            GENERATOR_DEFAULT_PAYLOAD=1500
-            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
-            ;;
-        burst)
-            GENERATOR_DEFAULT_RATE=10000
-            GENERATOR_DEFAULT_PAYLOAD=1500
-            GENERATOR_DEFAULT_SCHEMA="financial_tick"
-            ;;
-        mixed-payload)
-            GENERATOR_DEFAULT_RATE=10000
-            GENERATOR_DEFAULT_PAYLOAD=1500
-            GENERATOR_DEFAULT_SCHEMA="iot_sensor"
-            ;;
         *)
             warn "Escenario '$scenario' no reconocido para generator; usando configuracion low-load"
             GENERATOR_DEFAULT_RATE=2000
@@ -944,7 +929,7 @@ case "$STRATEGY" in
         echo ""
         echo "Argumentos:"
         echo "  estrategia   batch | microbatch | streaming"
-        echo "  escenario    low-load | medium-load | high-load | burst | extreme-load"
+        echo "  escenario    low-load | medium-load | high-load"
         echo "  run_id       Identificador de la corrida (default: run_1)"
         echo "  trigger      Intervalo para microbatch, ej: '5 seconds' (default)"
         echo ""
