@@ -38,9 +38,66 @@ bash scripts/thesis.sh <subcommand> [options]
 
 The workflow is intentionally split into three phases:
 
+1. Infraestructura
+2. Ejecución
+3. Resultados y análisis
+
+The same entrypoint is used for both local debug runs and the official distributed execution:
+
+```bash
+bash scripts/thesis.sh <subcommand> [options]
+```
+
+## Local Workflow
+
+Use local mode only for debugging and quick verification.
+
+### Local Setup
+
+```bash
+git clone <repository-url>
+cd data-ingestion-strategies
+cp .env.example .env
+```
+
+The first local run will automatically execute local setup, image build, and container startup unless you pass `--skip-setup`.
+
+### Local Execution
+
+Quick local debug run:
+
+```bash
+bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+```
+
+Longer local debug run:
+
+```bash
+bash scripts/thesis.sh run --mode local --reps 1 --duration 120 --warmup 10 --cooldown 10
+```
+
+### Local Results and Analysis
+
+```bash
+bash scripts/thesis.sh analyze --mode local
+bash scripts/thesis.sh validate --mode local
+```
+
+### Local Teardown
+
+```bash
+bash scripts/thesis.sh destroy --mode local
+```
+
+Local outputs are written to `results/`.
+
+## Distributed Workflow
+
+Use distributed mode for the official thesis execution.
+
 ### 1. Infrastructure
 
-Distributed official execution:
+Provision and deploy:
 
 ```bash
 bash scripts/thesis.sh provision --mode distributed
@@ -49,16 +106,16 @@ bash scripts/thesis.sh deploy --mode distributed
 
 ### 2. Execution
 
-Official distributed run:
+Official full run:
 
 ```bash
 bash scripts/thesis.sh run --mode distributed
 ```
 
-Local debug run:
+Short distributed verification run:
 
 ```bash
-bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+bash scripts/thesis.sh run --mode distributed --reps 1 --duration 60 --warmup 5 --cooldown 5
 ```
 
 ### 3. Results and Analysis
@@ -71,38 +128,21 @@ bash scripts/thesis.sh analyze --mode distributed
 bash scripts/thesis.sh validate --mode distributed
 ```
 
-Local results pipeline:
+### 4. Distributed Teardown
 
 ```bash
-bash scripts/thesis.sh analyze --mode local
-bash scripts/thesis.sh validate --mode local
+bash scripts/thesis.sh destroy --mode distributed
 ```
 
-### Convenience Mode
+Distributed outputs are written to `results-distributed/`.
+
+## Convenience Mode
 
 If you already understand the three-phase workflow, you can still use:
 
 ```bash
 bash scripts/thesis.sh full --mode distributed --deploy
 ```
-
-### Local Debug Example
-
-```bash
-git clone <repository-url>
-cd data-ingestion-strategies
-cp .env.example .env
-
-# Quick local debug cycle
-bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
-bash scripts/thesis.sh analyze --mode local
-bash scripts/thesis.sh validate --mode local
-```
-
-Results will be written to:
-
-- `results/` for local runs
-- `results-distributed/` for distributed runs
 
 ## Project Structure
 
@@ -130,7 +170,7 @@ data-ingestion-strategies/
 ├── scripts/                       # Official workflow + execution scripts
 ├── docs/                          # Technical architecture documentation
 ├── results/                       # Experiment outputs
-└── Makefile                       # One-command operations
+└── Makefile                       # Optional convenience aliases
 ```
 
 ## Architecture Overview
@@ -257,6 +297,12 @@ This benchmark follows a simple reproducibility model:
 ## Official Commands
 
 ```bash
+# Local debug flow
+bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
+bash scripts/thesis.sh analyze --mode local
+bash scripts/thesis.sh validate --mode local
+bash scripts/thesis.sh destroy --mode local
+
 # Distributed official flow
 bash scripts/thesis.sh provision --mode distributed
 bash scripts/thesis.sh deploy --mode distributed
@@ -264,13 +310,6 @@ bash scripts/thesis.sh run --mode distributed
 bash scripts/thesis.sh collect --mode distributed
 bash scripts/thesis.sh analyze --mode distributed
 bash scripts/thesis.sh validate --mode distributed
-
-# Local debug flow
-bash scripts/thesis.sh run --mode local --reps 1 --duration 60 --warmup 5 --cooldown 5
-bash scripts/thesis.sh analyze --mode local
-bash scripts/thesis.sh validate --mode local
-
-# Destroy distributed infrastructure when done
 bash scripts/thesis.sh destroy --mode distributed
 ```
 
@@ -283,16 +322,6 @@ bash scripts/thesis.sh destroy --mode distributed
 
 ### Secondary Metrics
 - **Consumer Lag**: Kafka offset lag
-
-### Analysis Tools
-
-```bash
-# Generate all charts
-python -m benchmark.analysis.analyzer --results-dir results/
-
-# Validate experiment results
-python -m benchmark.validation.validator --results-dir results/
-```
 
 Figures are exported in publication-ready formats:
 - **PNG**: Quick preview for notebooks/slides
