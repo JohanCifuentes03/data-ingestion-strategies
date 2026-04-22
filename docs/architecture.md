@@ -20,9 +20,10 @@ This benchmark quantifies the trade-offs between these approaches using a contro
 - End-to-end latency measurement (producer → sink)
 - Throughput analysis under varying load
 - Resource efficiency (CPU, memory, network)
-- Fault recovery behavior
+- Distributed execution across the official low, medium, and high load profiles
 
 **Out of Scope**:
+- Fault injection and recovery benchmarking
 - Complex stateful operations (joins, sessionization)
 - Multi-datacenter deployments
 - Security and authentication mechanisms
@@ -313,7 +314,7 @@ Micro-batch streaming uses **mini-batches** with configurable triggers:
 2. **Read**: Fetch new Kafka offsets since last checkpoint
 3. **Process**: Same as batch, but on smaller dataset
 4. **Write**: JDBC batch insert
-5. **Checkpoint**: Save Kafka offsets for fault tolerance
+5. **Checkpoint**: Persist progress metadata between micro-batches
 
 **Latency Model**:
 ```
@@ -351,7 +352,7 @@ StreamingQuery query = parsed.writeStream()
 **Configuration Trade-offs**:
 - `trigger.interval`: Lower = lower latency, but higher overhead
 - `maxOffsetsPerTrigger`: Limits batch size to prevent overload
-- `checkpointLocation`: Required for fault tolerance, adds I/O cost
+- `checkpointLocation`: Required for progress tracking, adds I/O cost
 
 **Expected Performance**:
 - **Latency**: Seconds (configurable, typically 5s trigger)
@@ -406,7 +407,7 @@ env.execute("FlinkStreamingJob-" + scenario);
 
 **Configuration Trade-offs**:
 - `parallelism`: Higher = more throughput, but coordination overhead
-- `checkpointInterval`: Lower = faster recovery, but higher I/O cost
+- `checkpointInterval`: Lower = more frequent snapshots, but higher I/O cost
 - `sink.bufferFlush`: Batching at sink level for better throughput
 
 **Expected Performance**:
@@ -414,15 +415,9 @@ env.execute("FlinkStreamingJob-" + scenario);
 - **Throughput**: 10K-30K events/s (single-node)
 - **Resource**: Constant CPU/memory with checkpoint spikes
 
-### 3.4 Fault Tolerance Mechanisms
+### 3.4 Consistency and Idempotency
 
-| Strategy | Mechanism | Recovery Time | Data Loss Risk |
-|----------|-----------|---------------|----------------|
-| **Batch** | Idempotent writes (ON CONFLICT) | N/A (rerun job) | None (at-least-once) |
-| **Micro-batch** | Checkpoint + WAL | ~30s | None (exactly-once with checkpoints) |
-| **Stream** | Chandy-Lamport snapshots | ~10s | None (exactly-once with 2PC sink) |
-
-**Implementation Note**: All strategies use `ON CONFLICT (event_id) DO NOTHING` for idempotency.
+All strategies use `ON CONFLICT (event_id) DO NOTHING` at the sink to avoid duplicate inserts when retries or restarts occur.
 
 ## 4. Infrastructure Components
 
@@ -463,7 +458,7 @@ wal_buffers = 16MB
 ### 4.3 Monitoring (Prometheus + cAdvisor)
 
 **Prometheus**: Time-series database for metrics
-- **Scrape Interval**: 15s
+- **Scrape Interval**: 5s in the current repository baseline
 - **Retention**: 7 days
 - **Targets**: Kafka, Spark, Flink, PostgreSQL, cAdvisor
 
@@ -510,7 +505,7 @@ Latency = visible_at - produced_at
 ### 6.1 Internal Validity
 
 **Confounding Variables**:
-- JVM warmup: Mitigated with 10-minute warmup period
+- JVM warmup: Mitigated with configured warmup and analysis-side warmup filtering
 - Garbage collection: Not controlled, measured as part of "real-world" performance
 - Network latency: Minimized in local mode, measured in distributed mode
 
