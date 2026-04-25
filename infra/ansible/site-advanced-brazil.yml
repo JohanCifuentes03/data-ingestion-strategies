@@ -4,7 +4,7 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_compute_ip: "{{ hostvars[groups['compute_brazil'][0]].inventory_hostname }}"
   roles:
     - common
 
@@ -13,9 +13,9 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
-    vm_broker_ip: "{{ vm_broker_public_ip }}"
-    vm_sink_ip: "{{ vm_sink_public_ip }}"
+    vm_compute_ip: "{{ inventory_hostname }}"
+    vm_broker_ip: "{{ hostvars[groups['broker'][0]].inventory_hostname }}"
+    vm_sink_ip: "{{ hostvars[groups['sink'][0]].inventory_hostname }}"
   roles:
     - common
 
@@ -24,7 +24,7 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_compute_ip: "{{ hostvars[groups['compute_brazil'][0]].inventory_hostname }}"
   roles:
     - broker
 
@@ -33,7 +33,7 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_compute_ip: "{{ hostvars[groups['compute_brazil'][0]].inventory_hostname }}"
   roles:
     - sink
 
@@ -42,9 +42,9 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
-    vm_broker_ip: "{{ vm_broker_public_ip }}"
-    vm_sink_ip: "{{ vm_sink_public_ip }}"
+    vm_compute_ip: "{{ inventory_hostname }}"
+    vm_broker_ip: "{{ hostvars[groups['broker'][0]].inventory_hostname }}"
+    vm_sink_ip: "{{ hostvars[groups['sink'][0]].inventory_hostname }}"
   roles:
     - compute
 
@@ -53,6 +53,6 @@
   become: yes
   gather_facts: yes
   vars:
-    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_compute_ip: "{{ hostvars[groups['compute_brazil'][0]].inventory_hostname }}"
   roles:
     - producer
