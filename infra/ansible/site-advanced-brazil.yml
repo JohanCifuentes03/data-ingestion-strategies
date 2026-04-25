@@ -1,0 +1,58 @@
+---
+- name: "Fase 1/6 — Configuración base nodos principales"
+  hosts: producers:broker:sink
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+  roles:
+    - common
+
+- name: "Fase 2/6 — Configuración base compute Brasil"
+  hosts: compute_brazil
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_broker_ip: "{{ vm_broker_public_ip }}"
+    vm_sink_ip: "{{ vm_sink_public_ip }}"
+  roles:
+    - common
+
+- name: "Fase 3/6 — Levantar Message Broker principal"
+  hosts: broker
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+  roles:
+    - broker
+
+- name: "Fase 4/6 — Levantar Persistencia principal"
+  hosts: sink
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+  roles:
+    - sink
+
+- name: "Fase 5/6 — Levantar Compute en Brasil"
+  hosts: compute_brazil
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+    vm_broker_ip: "{{ vm_broker_public_ip }}"
+    vm_sink_ip: "{{ vm_sink_public_ip }}"
+  roles:
+    - compute
+
+- name: "Fase 6/6 — Preparar Producer principal"
+  hosts: producers
+  become: yes
+  gather_facts: yes
+  vars:
+    vm_compute_ip: "{{ vm_compute_brazil_public_ip }}"
+  roles:
+    - producer

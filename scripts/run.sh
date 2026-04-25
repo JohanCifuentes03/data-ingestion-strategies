@@ -28,6 +28,8 @@ export COMPOSE_FILE="$ROOT_DIR/infra/docker/compose/docker-compose.yml"
 MODE=$REQUESTED_MODE
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/benchmark_aws}
 SSH_USER=${SSH_USER:-ubuntu}
+LOAD_PROFILE=${LOAD_PROFILE:-constant}
+COMPUTE_REGION=${COMPUTE_REGION:-primary}
 
 remote_compose() {
     local host="$1"
@@ -52,8 +54,25 @@ sync_probe_csv_from_producer() {
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     [ -z "$producer_ip" ] && return
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/results/latency_samples.csv" \
+        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv" \
         "$PROBE_GLOBAL" >/dev/null 2>&1 || true
+}
+
+sync_generator_artifacts_from_producer() {
+    if [ "$MODE" != "distributed" ]; then
+        return
+    fi
+    local run_dir="$1"
+    local strategy="$2"
+    local scenario="$3"
+    local run_id="$4"
+    local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
+    [ -z "$producer_ip" ] && return
+
+    mkdir -p "$run_dir"
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/${strategy}/${scenario}/${run_id}/generator_rate_timeline.csv" \
+        "$run_dir/generator_rate_timeline.csv" >/dev/null 2>&1 || true
 }
 
 archive_run_to_sink() {
@@ -67,19 +86,26 @@ archive_run_to_sink() {
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
     [ -z "$sink_ip" ] && return
 
-    remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
+    remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
     local files=("$run_dir/latency_samples.csv" "$run_dir/prometheus_snapshot.csv")
     if [ -f "$run_dir/cloudwatch_snapshot.csv" ]; then
         files+=("$run_dir/cloudwatch_snapshot.csv")
     fi
+    if [ -f "$run_dir/generator_rate_timeline.csv" ]; then
+        files+=("$run_dir/generator_rate_timeline.csv")
+    fi
+    if [ -f "$run_dir/run_metadata.json" ]; then
+        files+=("$run_dir/run_metadata.json")
+    fi
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
         "${files[@]}" \
-        "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
+        "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
 }
 
-RESULTS_BASE="$ROOT_DIR/results"
+RESULTS_BASE="${RESULTS_BASE:-$ROOT_DIR/results}"
 PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
 PROBE_HEADER="event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id"
+REMOTE_RESULTS_BASE_NAME="$(basename "$RESULTS_BASE")"
 RUN_START_TS=0
 RUN_END_TS=0
 GENERATOR_DEFAULT_RATE=0
@@ -95,6 +121,54 @@ NC='\033[0m'
 log()   { echo -e "${GREEN}[run]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[run]${NC} $*"; }
 error() { echo -e "${RED}[run]${NC} $*"; }
+
+resolve_compute_public_ip() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP:-}"
+    else
+        echo "${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    fi
+}
+
+resolve_compute_private_ip() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_COMPUTE_BRAZIL_IP:-}"
+    else
+        echo "${CLOUD_VM_COMPUTE_IP:-}"
+    fi
+}
+
+resolve_compute_instance_id() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_COMPUTE_BRAZIL_INSTANCE_ID:-}"
+    else
+        echo "${CLOUD_VM_COMPUTE_INSTANCE_ID:-}"
+    fi
+}
+
+resolve_broker_host() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+    else
+        echo "${CLOUD_VM_BROKER_IP:-}"
+    fi
+}
+
+resolve_broker_port() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "19092"
+    else
+        echo "9092"
+    fi
+}
+
+resolve_sink_host() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_SINK_PUBLIC_IP:-}"
+    else
+        echo "${CLOUD_VM_SINK_IP:-}"
+    fi
+}
 
 set_generator_defaults() {
     local scenario="$1"
@@ -114,6 +188,11 @@ set_generator_defaults() {
             GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="health_monitor"
             ;;
+        bursty-load|bursty-load-br-compute)
+            GENERATOR_DEFAULT_RATE=10000
+            GENERATOR_DEFAULT_PAYLOAD=1500
+            GENERATOR_DEFAULT_SCHEMA="financial_tick"
+            ;;
         *)
             warn "Escenario '$scenario' no reconocido para generator; usando configuracion low-load"
             GENERATOR_DEFAULT_RATE=2000
@@ -121,6 +200,46 @@ set_generator_defaults() {
             GENERATOR_DEFAULT_SCHEMA="iot_sensor"
             ;;
     esac
+}
+
+write_run_metadata() {
+    local run_dir="$1"
+    local strategy="$2"
+    local scenario="$3"
+    local payload_bytes="$4"
+    local compute_region_mode="${COMPUTE_REGION:-primary}"
+    local primary_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+    local remote_compute_region=""
+
+    if [ "$compute_region_mode" = "brazil" ]; then
+        remote_compute_region="${BRAZIL_REGION:-sa-east-1}"
+    fi
+
+    mkdir -p "$run_dir"
+    "$PYTHON_BIN" - "$run_dir/run_metadata.json" <<PY
+import json
+import sys
+
+path = sys.argv[1]
+metadata = {
+    "scope": "${SCOPE:-official}",
+    "strategy": "${strategy}",
+    "scenario": "${scenario}",
+    "load_profile": "${LOAD_PROFILE:-constant}",
+    "compute_region_mode": "${compute_region_mode}",
+    "primary_region": "${primary_region}",
+    "remote_compute_region": "${remote_compute_region}",
+    "primary_vpc_cidr": "10.0.0.0/16",
+    "brazil_vpc_cidr": "10.1.0.0/16" if "${compute_region_mode}" == "brazil" else "",
+    "duration_seconds": int("${RUN_DURATION_SECONDS:-300}"),
+    "warmup_seconds": int("${WARMUP_SECONDS:-30}"),
+    "payload_bytes": int("${payload_bytes}"),
+    "kafka_partitions": 12,
+}
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(metadata, handle, indent=2)
+PY
 }
 
 start_generator_for_scenario() {
@@ -134,17 +253,24 @@ start_generator_for_scenario() {
         export GENERATOR_EVENT_SCHEMA="$GENERATOR_DEFAULT_SCHEMA"
         export RUN_ID="$RUN_ID"
         export STRATEGY="$STRATEGY"
+        export LOAD_PROFILE="${LOAD_PROFILE:-constant}"
+        export RESULTS_DIR="/results/${STRATEGY}/${scenario}/${RUN_ID}"
+        export RESULTS_VOLUME_HOST="$(realpath -m "$RESULTS_BASE")"
         if [ "$MODE" = "distributed" ]; then
             local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
             remote_shell "$producer_ip" "docker rm -f tesis-generator >/dev/null 2>&1 || true"
             remote_shell "$producer_ip" \
                 "cd ~/data-ingestion-strategies && \
+                 mkdir -p ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} && \
                  GENERATOR_SCENARIO='${GENERATOR_SCENARIO}' \
                  GENERATOR_EVENT_RATE='${GENERATOR_EVENT_RATE}' \
                  GENERATOR_PAYLOAD_BYTES='${GENERATOR_PAYLOAD_BYTES}' \
                  GENERATOR_EVENT_SCHEMA='${GENERATOR_EVENT_SCHEMA}' \
                  RUN_ID='${RUN_ID}' \
                  STRATEGY='${STRATEGY}' \
+                 LOAD_PROFILE='${LOAD_PROFILE}' \
+                  RESULTS_DIR='/results/${STRATEGY}/${scenario}/${RUN_ID}' \
+                 RESULTS_VOLUME_HOST=\"\$HOME/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}\" \
                  docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
@@ -159,7 +285,8 @@ clear_checkpoint_dir() {
     fi
     log "Limpiando checkpoint Spark (${subdir})"
     if [ "$MODE" = "distributed" ]; then
-        local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+        local compute_ip
+        compute_ip="$(resolve_compute_public_ip)"
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
             "exec -T spark-master sh -c 'rm -rf /opt/spark/checkpoints/${subdir} && mkdir -p /opt/spark/checkpoints/${subdir}'" >/dev/null 2>&1 || true
     else
@@ -177,19 +304,19 @@ end_run_timer() {
 
 reset_probe_csv() {
     mkdir -p "$RESULTS_BASE"
+    chmod 0777 "$RESULTS_BASE" >/dev/null 2>&1 || true
     # Resetear via el container del probe para evitar errores de permisos.
     # El probe escribe continuamente en /results/latency_samples.csv (montado
     # desde el host), por lo que el archivo puede estar bloqueado/en uso.
     if [ "$MODE" = "distributed" ]; then
         local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
-        remote_shell "$producer_ip" "mkdir -p ~/data-ingestion-strategies/results && sudo -n chown -R ubuntu:ubuntu ~/data-ingestion-strategies/results >/dev/null 2>&1 || true"
-        remote_shell "$producer_ip" "chmod 777 ~/data-ingestion-strategies/results >/dev/null 2>&1 || true; touch ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true; chmod 666 ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "mkdir -p ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} && sudo -n chown -R ubuntu:ubuntu ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "chmod 777 ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} >/dev/null 2>&1 || true; touch ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv >/dev/null 2>&1 || true; chmod 666 ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv >/dev/null 2>&1 || true"
         remote_shell "$producer_ip" "docker rm -f tesis-probe >/dev/null 2>&1 || true"
-        remote_compose "$producer_ip" "infra/docker/compose/producer.yml" "up -d --no-deps probe" >/dev/null 2>&1 || true
+        remote_shell "$producer_ip" "cd ~/data-ingestion-strategies && RESULTS_VOLUME_HOST=\"\$HOME/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}\" docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps probe" >/dev/null 2>&1 || true
         local ok=false
         for _ in $(seq 1 6); do
-            if remote_compose "$producer_ip" "infra/docker/compose/producer.yml" \
-                "exec -T probe sh -c \"echo '${PROBE_HEADER}' > /results/latency_samples.csv\"" 2>/dev/null; then
+            if remote_shell "$producer_ip" "cd ~/data-ingestion-strategies && RESULTS_VOLUME_HOST=\"\$HOME/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}\" docker compose --env-file .env -f infra/docker/compose/producer.yml exec -T probe sh -c \"echo '${PROBE_HEADER}' > /results/latency_samples.csv\"" 2>/dev/null; then
                 ok=true
                 break
             fi
@@ -200,7 +327,8 @@ reset_probe_csv() {
         else
             warn "No se pudo resetear probe CSV remoto"
         fi
-    elif docker compose exec -T probe sh -c \
+    elif RESULTS_VOLUME_HOST="$(realpath -m "$RESULTS_BASE")" docker compose up -d --no-deps --force-recreate probe >/dev/null 2>&1 && \
+        docker compose exec -T probe sh -c \
         "echo '${PROBE_HEADER}' > /results/latency_samples.csv" 2>/dev/null; then
         log "Probe CSV reseteado (via container)"
     else
@@ -292,7 +420,8 @@ ensure_services() {
     if [ "${MODE:-local}" = "distributed" ]; then
         # En modo distribuido, verificamos servicios remotamente via SSH
         local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
-        local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+        local compute_ip
+        compute_ip="$(resolve_compute_public_ip)"
         
         if [ -z "$broker_ip" ] || [ -z "$compute_ip" ]; then
             warn "IPs de VMs no configuradas. Ejecuta: source infra/terraform/outputs.env"
@@ -543,7 +672,10 @@ collect_cloudwatch_snapshot() {
         return 0
     fi
 
-    if [ -z "${CLOUD_VM_PRODUCER_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_BROKER_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_COMPUTE_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_SINK_INSTANCE_ID:-}" ]; then
+    local compute_instance_id
+    compute_instance_id="$(resolve_compute_instance_id)"
+
+    if [ -z "${CLOUD_VM_PRODUCER_INSTANCE_ID:-}" ] || [ -z "${CLOUD_VM_BROKER_INSTANCE_ID:-}" ] || [ -z "$compute_instance_id" ] || [ -z "${CLOUD_VM_SINK_INSTANCE_ID:-}" ]; then
         return 0
     fi
 
@@ -590,28 +722,28 @@ collect_cloudwatch_snapshot() {
     # EC2 default metrics
     cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
     cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
-    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$compute_instance_id" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
     cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "CPUUtilization" "Average" "Percent" "300" "$ec2_start_iso"
 
     cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
     cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
-    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$compute_instance_id" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
     cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "NetworkIn" "Average" "Bytes" "300" "$ec2_start_iso"
 
     cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
     cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
-    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
+    cw_append_metric "compute" "$compute_instance_id" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
     cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "AWS/EC2" "NetworkOut" "Average" "Bytes" "300" "$ec2_start_iso"
 
     # CloudWatch Agent custom host metrics
     cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
     cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
-    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "compute" "$compute_instance_id" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
     cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "TesisBenchmark/EC2" "mem_used_percent" "Average" "Percent" "60" "$start_iso"
 
     cw_append_metric "producer" "$CLOUD_VM_PRODUCER_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
     cw_append_metric "broker" "$CLOUD_VM_BROKER_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
-    cw_append_metric "compute" "$CLOUD_VM_COMPUTE_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
+    cw_append_metric "compute" "$compute_instance_id" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
     cw_append_metric "sink" "$CLOUD_VM_SINK_INSTANCE_ID" "TesisBenchmark/EC2" "disk_used_percent" "Average" "Percent" "60" "$start_iso"
 
     log "CloudWatch snapshot guardado: $(wc -l <"$out_file") metricas en $out_file"
@@ -625,8 +757,15 @@ run_batch() {
 
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
-    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local compute_ip
+    compute_ip="$(resolve_compute_public_ip)"
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+    local kafka_host
+    kafka_host="$(resolve_broker_host)"
+    local kafka_port
+    kafka_port="$(resolve_broker_port)"
+    local sink_host
+    sink_host="$(resolve_sink_host)"
 
     log "Ejecutando BATCH: scenario=$SCENARIO run_id=$RUN_ID duration=${RUN_DURATION_SECONDS}s"
 
@@ -680,7 +819,7 @@ run_batch() {
     log "Ejecutando Spark Batch..."
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=1500m --conf spark.driver.memory=2g --conf spark.executor.cores=2 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=1500m --conf spark.driver.memory=2g --conf spark.executor.cores=2 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${kafka_host}:${kafka_port} --kafka.topic=events --postgres.url=jdbc:postgresql://${sink_host}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.batch.SparkBatchJob \
@@ -701,10 +840,12 @@ run_batch() {
     fi
 
     end_run_timer
-    RUN_DIR="${ROOT_DIR}/results/batch/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/batch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     sync_probe_csv_from_producer
+    sync_generator_artifacts_from_producer "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
     copy_probe_csv_to_run "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID"
+    write_run_metadata "$RUN_DIR" "batch" "$SCENARIO" "$GENERATOR_DEFAULT_PAYLOAD"
     collect_prometheus_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
     if [ "$MODE" = "distributed" ]; then
         collect_cloudwatch_snapshot "$RUN_DIR" "batch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
@@ -722,8 +863,15 @@ run_microbatch() {
 
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
-    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local compute_ip
+    compute_ip="$(resolve_compute_public_ip)"
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+    local kafka_host
+    kafka_host="$(resolve_broker_host)"
+    local kafka_port
+    kafka_port="$(resolve_broker_port)"
+    local sink_host
+    sink_host="$(resolve_sink_host)"
 
     log "Ejecutando MICROBATCH: scenario=$SCENARIO run_id=$RUN_ID trigger=$TRIGGER_INTERVAL"
 
@@ -755,7 +903,7 @@ run_microbatch() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=events --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=${kafka_host}:${kafka_port} --kafka.topic=events --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://${sink_host}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.microbatch.SparkStructuredJob \
@@ -780,11 +928,13 @@ run_microbatch() {
         docker compose stop generator
     fi
 
-    RUN_DIR="${ROOT_DIR}/results/microbatch/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/microbatch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
     sync_probe_csv_from_producer
+    sync_generator_artifacts_from_producer "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     copy_probe_csv_to_run "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
+    write_run_metadata "$RUN_DIR" "microbatch" "$SCENARIO" "$GENERATOR_DEFAULT_PAYLOAD"
     collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
     if [ "$MODE" = "distributed" ]; then
         collect_cloudwatch_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
@@ -802,8 +952,15 @@ run_streaming() {
 
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     local broker_ip="${CLOUD_VM_BROKER_PUBLIC_IP:-}"
-    local compute_ip="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    local compute_ip
+    compute_ip="$(resolve_compute_public_ip)"
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+    local kafka_host
+    kafka_host="$(resolve_broker_host)"
+    local kafka_port
+    kafka_port="$(resolve_broker_port)"
+    local sink_host
+    sink_host="$(resolve_sink_host)"
 
     log "Ejecutando STREAMING: scenario=$SCENARIO run_id=$RUN_ID"
 
@@ -868,7 +1025,7 @@ run_streaming() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers ${CLOUD_VM_BROKER_IP}:9092 --kafka.topic events --postgres.url jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
+            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers ${kafka_host}:${kafka_port} --kafka.topic events --postgres.url jdbc:postgresql://${sink_host}:5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
         ${FLINK_DETACH_FLAG} \
@@ -892,11 +1049,13 @@ run_streaming() {
         docker compose stop generator
     fi
 
-    RUN_DIR="${ROOT_DIR}/results/streaming/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/streaming/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
     sync_probe_csv_from_producer
+    sync_generator_artifacts_from_producer "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
     copy_probe_csv_to_run "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID"
+    write_run_metadata "$RUN_DIR" "streaming" "$SCENARIO" "$GENERATOR_DEFAULT_PAYLOAD"
     collect_prometheus_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
     if [ "$MODE" = "distributed" ]; then
         collect_cloudwatch_snapshot "$RUN_DIR" "streaming" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"

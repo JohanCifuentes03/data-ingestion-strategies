@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-RESULTS_BASE="$ROOT_DIR/results"
+RESULTS_BASE="${RESULTS_BASE:-$ROOT_DIR/results}"
 
 # ── Defaults (override via arguments) ──────────────────────────────
 # Standard thesis experiment: 5 reps × 3 scenarios × 3 strategies = 45 runs
@@ -28,6 +28,9 @@ COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-30}   # >= Flink checkpoint interval + marg
 EXPORT_METRICS=${EXPORT_METRICS:-true}
 EXPORT_WINDOW=${EXPORT_WINDOW:-"5m"}
 EVENT_SCHEMA=${EVENT_SCHEMA:-""}
+SCOPE=${SCOPE:-official}
+LOAD_PROFILE=${LOAD_PROFILE:-constant}
+COMPUTE_REGION=${COMPUTE_REGION:-primary}
 export RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
 WARMUP_SECONDS=${WARMUP_SECONDS:-30}    # 30 s per protocol spec (JVM JIT warm-up)
 
@@ -84,6 +87,10 @@ done
 
 # Apply warmup setting to environment for generator
 export WARMUP_SECONDS
+export LOAD_PROFILE
+export COMPUTE_REGION
+export RESULTS_BASE
+export SCOPE
 
 # Guardrail: en ejecuciones oficiales solo permitir escenarios oficiales
 OFFICIAL_SCENARIOS="low-load medium-load high-load"
@@ -91,7 +98,9 @@ for SCN in $SCENARIOS; do
     case "$SCN" in
         low-load|medium-load|high-load) ;;
         *)
-            echo "[experiment] WARN: escenario no-oficial detectado: $SCN"
+            if [ "$SCOPE" = "official" ]; then
+                echo "[experiment] WARN: escenario no-oficial detectado: $SCN"
+            fi
             ;;
     esac
 done
@@ -125,6 +134,10 @@ echo "║  Total runs  : $TOTAL_RUNS"
 echo "║  Est. time   : ~${ESTIMATED_MINUTES} minutes"
 echo "║  Export win. : $EXPORT_WINDOW"
 echo "║  Schema      : ${EVENT_SCHEMA:-<scenario default>}"
+echo "║  Scope       : $SCOPE"
+echo "║  Load profile: $LOAD_PROFILE"
+echo "║  Compute reg.: $COMPUTE_REGION"
+echo "║  Results dir : $RESULTS_BASE"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -136,8 +149,8 @@ if [ "${MODE:-local}" = "distributed" ]; then
     echo "[experiment] Modo distribuido: verificando sincronización de relojes NTP..."
     CLOCK_SYNC_SCRIPT="$(dirname "$0")/check-clock-sync.sh"
     if [ -f "$CLOCK_SYNC_SCRIPT" ]; then
-        if ! bash "$CLOCK_SYNC_SCRIPT"; then
-            echo "[experiment] ABORT: Relojes desincronizados. Ver log en results/clock_offsets_*.csv"
+        if ! RESULTS_BASE="$RESULTS_BASE" bash "$CLOCK_SYNC_SCRIPT"; then
+            echo "[experiment] ABORT: Relojes desincronizados. Ver log en ${RESULTS_BASE}/clock_offsets_*.csv"
             echo "[experiment] Solución: esperar 30s para que chrony converja y reintentar."
             exit 1
         fi

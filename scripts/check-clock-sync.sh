@@ -61,23 +61,32 @@ else
     exit 1
 fi
 
+COMPUTE_NODE_IP="${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+COMPUTE_NODE_NAME="node-compute   (VM-3)"
+
+if [ "${CLOUD_COMPUTE_REGION_MODE:-primary}" = "brazil" ] && [ -n "${CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP:-}" ]; then
+    COMPUTE_NODE_IP="${CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP}"
+    COMPUTE_NODE_NAME="node-compute-br (sa-east-1)"
+fi
+
 NODES=(
     "${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     "${CLOUD_VM_BROKER_PUBLIC_IP:-}"
-    "${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    "${COMPUTE_NODE_IP:-}"
     "${CLOUD_VM_SINK_PUBLIC_IP:-}"
 )
 
 NODE_NAMES=(
     "node-producers (VM-1)"
     "node-broker    (VM-2)"
-    "node-compute   (VM-3)"
+    "${COMPUTE_NODE_NAME}"
     "node-sink      (VM-4)"
 )
 
 # ── Preparar directorio de resultados ──────────────────────────
-mkdir -p "$SCRIPT_DIR/results"
-CLOCK_LOG="$SCRIPT_DIR/results/clock_offsets_$(date +%Y%m%d_%H%M%S).csv"
+RESULTS_BASE="${RESULTS_BASE:-$SCRIPT_DIR/results}"
+mkdir -p "$RESULTS_BASE"
+CLOCK_LOG="$RESULTS_BASE/clock_offsets_$(date +%Y%m%d_%H%M%S).csv"
 echo "node,node_name,offset_ms,status,timestamp" > "$CLOCK_LOG"
 
 FAIL=0

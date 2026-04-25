@@ -24,6 +24,8 @@ import yaml
 from confluent_kafka import Producer, KafkaException
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
+from benchmark.generator.load_profiles import max_rate_for_profile, rate_for_elapsed
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [generator] %(levelname)s %(message)s",
@@ -74,6 +76,16 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
         "event_rate": 30_000,
         "payload": 1500,
         "schema": "health_monitor",
+    },
+    "bursty-load": {
+        "event_rate": 10_000,
+        "payload": 1500,
+        "schema": "financial_tick",
+    },
+    "bursty-load-br-compute": {
+        "event_rate": 10_000,
+        "payload": 1500,
+        "schema": "financial_tick",
     },
 }
 
@@ -304,10 +316,36 @@ def decide_n_threads(target_rate: int) -> int:
     return max(2, min(16, (target_rate + 19_999) // 20_000))
 
 
+def append_rate_timeline_row(
+    timeline_file: Path,
+    timestamp_ms: int,
+    elapsed_s: float,
+    current_rate: int,
+    load_profile: str,
+    strategy: str,
+    scenario_name: str,
+    run_id: str,
+):
+    if not timeline_file.exists():
+        timeline_file.parent.mkdir(parents=True, exist_ok=True)
+        timeline_file.write_text(
+            "timestamp_ms,elapsed_s,current_rate,load_profile,strategy,scenario,run_id\n",
+            encoding="utf-8",
+        )
+
+    with timeline_file.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f"{timestamp_ms},{elapsed_s:.3f},{current_rate},{load_profile},{strategy},{scenario_name},{run_id}\n"
+        )
+
+
 # ── Main ────────────────────────────────────────────────────────────
 def main():
     run_duration = int(os.getenv("RUN_DURATION_SECONDS", "0"))  # 0 = infinite
     warmup_seconds = int(os.getenv("WARMUP_SECONDS", "30"))
+    load_profile = os.getenv("LOAD_PROFILE", "constant").strip().lower()
+    results_dir = Path(os.getenv("RESULTS_DIR", "/results"))
+    timeline_file = results_dir / "generator_rate_timeline.csv"
 
     scenarios = load_scenarios()
     scenario_name, scenario = resolve_scenario(scenarios)
@@ -321,7 +359,8 @@ def main():
     payload_sizes = scenario.get("payload_sizes", [scenario["payload"]])
     payload_sizes = [max(MIN_PAYLOAD_BYTES, int(sz)) for sz in payload_sizes]
 
-    n_threads = decide_n_threads(base_rate)
+    max_target_rate = max_rate_for_profile(load_profile, base_rate)
+    n_threads = decide_n_threads(max_target_rate)
     log.info(
         "Config: scenario=%s rate=%d schema=%s payload=%s threads=%d duration=%s warmup=%ds",
         scenario_name,
@@ -333,6 +372,7 @@ def main():
         warmup_seconds,
     )
     log.info("Labels: run_id=%s strategy=%s", run_id, strategy)
+    log.info("Load profile: %s max_rate=%d", load_profile, max_target_rate)
 
     prom_port = int(os.getenv("PROMETHEUS_PORT", "8000"))
     start_http_server(prom_port)
@@ -386,8 +426,25 @@ def main():
                 )
                 break
 
-            state.current_rate = base_rate
-            CURRENT_RATE.labels(scenario_name, run_id, strategy).set(base_rate)
+            post_warmup_elapsed = max(0.0, elapsed - warmup_seconds)
+            dynamic_rate = rate_for_elapsed(
+                profile_name=load_profile,
+                elapsed_s=post_warmup_elapsed,
+                fallback_rate=base_rate,
+            )
+
+            state.current_rate = dynamic_rate
+            CURRENT_RATE.labels(scenario_name, run_id, strategy).set(dynamic_rate)
+            append_rate_timeline_row(
+                timeline_file=timeline_file,
+                timestamp_ms=int(now * 1000),
+                elapsed_s=post_warmup_elapsed,
+                current_rate=dynamic_rate,
+                load_profile=load_profile,
+                strategy=strategy,
+                scenario_name=scenario_name,
+                run_id=run_id,
+            )
 
             time.sleep(0.5)  # control loop ticks every 500ms
 

@@ -27,11 +27,35 @@ variable "region" {
     us-east-1 (N. Virginia) tiene la mayor disponibilidad de instancias t3.
     Alternativas: eu-west-1, ap-southeast-1.
   EOT
-  type    = string
-  default = "us-east-1"
+  type        = string
+  default     = "us-east-1"
 }
 
 variable "ssh_public_key" {
   description = "Contenido de la clave SSH pública para acceso a las VMs. Ej: contenido de ~/.ssh/benchmark_aws.pub"
   type        = string
+}
+
+variable "enable_brazil_compute" {
+  description = "Enable advanced experiment with compute node in AWS Brazil (sa-east-1)."
+  type        = bool
+  default     = false
+}
+
+variable "brazil_region" {
+  description = "AWS region for the advanced remote compute experiment."
+  type        = string
+  default     = "sa-east-1"
+}
+
+variable "brazil_vpc_cidr" {
+  description = "CIDR block for Brazil compute VPC."
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "brazil_subnet_cidr" {
+  description = "CIDR block for Brazil compute subnet."
+  type        = string
+  default     = "10.1.1.0/24"
 }

@@ -65,6 +65,21 @@ output "vm_compute_public_ip" {
   value       = module.vm_compute.public_ip
 }
 
+output "vm_compute_brazil_ip" {
+  description = "Private IP of Brazil compute node"
+  value       = var.enable_brazil_compute ? module.vm_compute_brazil[0].private_ip : null
+}
+
+output "vm_compute_brazil_public_ip" {
+  description = "Public IP of Brazil compute node"
+  value       = var.enable_brazil_compute ? module.vm_compute_brazil[0].public_ip : null
+}
+
+output "vm_compute_brazil_instance_id" {
+  description = "Instance ID del nodo compute en Brasil"
+  value       = var.enable_brazil_compute ? module.vm_compute_brazil[0].instance_id : null
+}
+
 output "vm_sink_public_ip" {
   description = "IP pública del nodo PostgreSQL/Prometheus — para SSH"
   value       = module.vm_sink.public_ip
@@ -78,14 +93,17 @@ resource "local_file" "ansible_inventory" {
   file_permission = "0644"
 
   content = templatefile("${path.module}/templates/inventory.ini.tpl", {
-    vm_producers_public_ip = module.vm_producers.public_ip
-    vm_broker_public_ip    = module.vm_broker.public_ip
-    vm_compute_public_ip   = module.vm_compute.public_ip
-    vm_sink_public_ip      = module.vm_sink.public_ip
-    vm_producers_ip        = module.vm_producers.private_ip
-    vm_broker_ip           = module.vm_broker.private_ip
-    vm_compute_ip          = module.vm_compute.private_ip
-    vm_sink_ip             = module.vm_sink.private_ip
+    vm_producers_public_ip      = module.vm_producers.public_ip
+    vm_broker_public_ip         = module.vm_broker.public_ip
+    vm_compute_public_ip        = module.vm_compute.public_ip
+    vm_sink_public_ip           = module.vm_sink.public_ip
+    vm_compute_brazil_public_ip = var.enable_brazil_compute ? module.vm_compute_brazil[0].public_ip : ""
+    vm_producers_ip             = module.vm_producers.private_ip
+    vm_broker_ip                = module.vm_broker.private_ip
+    vm_compute_ip               = module.vm_compute.private_ip
+    vm_sink_ip                  = module.vm_sink.private_ip
+    vm_compute_brazil_ip        = var.enable_brazil_compute ? module.vm_compute_brazil[0].private_ip : ""
+    enable_brazil_compute       = var.enable_brazil_compute
   })
 }
 
@@ -107,12 +125,17 @@ resource "local_file" "outputs_env" {
     export CLOUD_VM_BROKER_PUBLIC_IP="${module.vm_broker.public_ip}"
     export CLOUD_VM_COMPUTE_PUBLIC_IP="${module.vm_compute.public_ip}"
     export CLOUD_VM_SINK_PUBLIC_IP="${module.vm_sink.public_ip}"
+    export CLOUD_VM_COMPUTE_BRAZIL_IP="${var.enable_brazil_compute ? module.vm_compute_brazil[0].private_ip : ""}"
+    export CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP="${var.enable_brazil_compute ? module.vm_compute_brazil[0].public_ip : ""}"
     export CLOUD_VM_PRODUCER_INSTANCE_ID="${module.vm_producers.instance_id}"
     export CLOUD_VM_BROKER_INSTANCE_ID="${module.vm_broker.instance_id}"
     export CLOUD_VM_COMPUTE_INSTANCE_ID="${module.vm_compute.instance_id}"
     export CLOUD_VM_SINK_INSTANCE_ID="${module.vm_sink.instance_id}"
+    export CLOUD_VM_COMPUTE_BRAZIL_INSTANCE_ID="${var.enable_brazil_compute ? module.vm_compute_brazil[0].instance_id : ""}"
     export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${module.vm_broker.private_ip}:9092"
     export KAFKA_BOOTSTRAP_SERVERS="${module.vm_broker.private_ip}:9092"
+    export CLOUD_COMPUTE_REGION_MODE="${var.enable_brazil_compute ? "brazil" : "primary"}"
+    export BRAZIL_REGION="${var.brazil_region}"
   EOT
 }
 

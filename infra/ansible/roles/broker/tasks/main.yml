@@ -24,7 +24,12 @@
       POSTGRES_PORT={{ postgres_port }}
       KAFKA_BROKER_ID={{ kafka_broker_id }}
       KAFKA_PORT=9092
-      KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{{ vm_broker_ip }}:9092
+      KAFKA_EXTERNAL_PORT=19092
+      KAFKA_EXTERNAL_HOST={{ vm_broker_public_ip | default(vm_broker_ip) }}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
+      KAFKA_ADVERTISED_LISTENERS=INTERNAL://{{ vm_broker_ip }}:9092,EXTERNAL://{{ vm_broker_public_ip | default(vm_broker_ip) }}:19092
       KAFKA_BOOTSTRAP_SERVERS={{ vm_broker_ip }}:9092
       KAFKA_NUM_PARTITIONS={{ kafka_num_partitions }}
       KAFKA_REPLICATION_FACTOR={{ kafka_replication_factor }}

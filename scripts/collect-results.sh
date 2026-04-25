@@ -44,8 +44,8 @@ SSH_KEY=${CLOUD_SSH_KEY_PATH:-~/.ssh/benchmark_aws}
 SSH_USER=${CLOUD_SSH_USER:-ubuntu}
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
 REMOTE="${SSH_USER}@${CLOUD_VM_SINK_PUBLIC_IP}"
-REMOTE_RESULTS="~/data-ingestion-strategies/results/"
-LOCAL_DEST="$SCRIPT_DIR/results-distributed"
+LOCAL_DEST="${RESULTS_BASE:-$SCRIPT_DIR/results-distributed}"
+REMOTE_RESULTS="~/data-ingestion-strategies/$(basename "$LOCAL_DEST")/"
 export LOCAL_DEST
 
 echo ""

@@ -14,6 +14,10 @@ NC='\033[0m'
 
 MODE="distributed"
 SUBCOMMAND=""
+SCOPE="official"
+LOAD_PROFILE="constant"
+COMPUTE_REGION="primary"
+RESULTS_DIR=""
 DO_PROVISION=false
 DO_DEPLOY=false
 SKIP_SETUP=false
@@ -66,6 +70,12 @@ Conveniencia:
 
 Opciones:
   --mode <local|distributed>     Modo de ejecución (default: distributed)
+  --scope <official|advanced>    Alcance del benchmark (default: official)
+  --load-profile <constant|bursty>
+                                  Perfil de carga del generator (default: constant)
+  --compute-region <primary|brazil>
+                                  Ubicación del nodo compute (default: primary)
+  --results-dir <path>           Directorio base de resultados
   --provision                    Ejecuta provision antes de run/full/deploy
   --deploy                       Ejecuta deploy antes de run/full
   --skip-setup                   En local, no hace setup/build/up automáticamente
@@ -135,7 +145,12 @@ build_local_images() {
 
 start_local_stack() {
     log "Levantando stack local"
-    "${DC[@]}" up -d
+    local results_host
+    results_host="$(realpath -m "$RESULTS_DIR")"
+    mkdir -p "$results_host"
+    sudo chown -R "$(id -un):$(id -gn)" "$results_host" >/dev/null 2>&1 || true
+    chmod 0777 "$results_host" >/dev/null 2>&1 || true
+    RESULTS_VOLUME_HOST="$results_host" "${DC[@]}" up -d
 }
 
 stop_local_stack() {
@@ -177,7 +192,11 @@ run_provision() {
     fi
     log "Provisionando infraestructura distribuida"
     terraform -chdir=infra/terraform init
-    terraform -chdir=infra/terraform apply -auto-approve
+    if [[ "$COMPUTE_REGION" == "brazil" ]]; then
+        terraform -chdir=infra/terraform apply -auto-approve -var="enable_brazil_compute=true"
+    else
+        terraform -chdir=infra/terraform apply -auto-approve
+    fi
 }
 
 run_deploy() {
@@ -194,7 +213,11 @@ run_deploy() {
         # shellcheck source=/dev/null
         source infra/terraform/outputs.env
         cd infra/ansible
-        ansible-playbook -i inventory.ini site.yml
+        if [[ "$COMPUTE_REGION" == "brazil" ]]; then
+            ansible-playbook -i inventory.ini site-advanced-brazil.yml
+        else
+            ansible-playbook -i inventory.ini site.yml
+        fi
     )
 }
 
@@ -212,7 +235,12 @@ run_experiment() {
     fi
 
     log "Ejecutando experimento ${MODE}"
-    MODE="$MODE" bash scripts/experiment.sh \
+    MODE="$MODE" \
+    SCOPE="$SCOPE" \
+    LOAD_PROFILE="$LOAD_PROFILE" \
+    COMPUTE_REGION="$COMPUTE_REGION" \
+    RESULTS_BASE="$RESULTS_DIR" \
+    bash scripts/experiment.sh \
         --strategies "$STRATEGIES" \
         --scenarios "$SCENARIOS" \
         --reps "$REPS" \
@@ -229,15 +257,11 @@ run_collect() {
     fi
     require_outputs_env
     log "Recolectando resultados distribuidos"
-    bash scripts/collect-results.sh
+    RESULTS_BASE="$RESULTS_DIR" bash scripts/collect-results.sh
 }
 
 results_dir() {
-    if [[ "$MODE" == "distributed" ]]; then
-        printf '%s\n' "results-distributed"
-    else
-        printf '%s\n' "results"
-    fi
+    printf '%s\n' "$RESULTS_DIR"
 }
 
 run_analyze() {
@@ -290,6 +314,22 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode)
             MODE="${2:-}"
+            shift 2
+            ;;
+        --scope)
+            SCOPE="${2:-}"
+            shift 2
+            ;;
+        --load-profile)
+            LOAD_PROFILE="${2:-}"
+            shift 2
+            ;;
+        --compute-region)
+            COMPUTE_REGION="${2:-}"
+            shift 2
+            ;;
+        --results-dir)
+            RESULTS_DIR="${2:-}"
             shift 2
             ;;
         --provision)
@@ -359,6 +399,35 @@ done
 if [[ "$MODE" != "local" && "$MODE" != "distributed" ]]; then
     err "--mode debe ser local o distributed"
     exit 1
+fi
+
+if [[ "$SCOPE" != "official" && "$SCOPE" != "advanced" ]]; then
+    err "--scope debe ser official o advanced"
+    exit 1
+fi
+
+if [[ "$LOAD_PROFILE" != "constant" && "$LOAD_PROFILE" != "bursty" ]]; then
+    err "--load-profile debe ser constant o bursty"
+    exit 1
+fi
+
+if [[ "$COMPUTE_REGION" != "primary" && "$COMPUTE_REGION" != "brazil" ]]; then
+    err "--compute-region debe ser primary o brazil"
+    exit 1
+fi
+
+if [[ "$SCOPE" == "official" ]]; then
+    LOAD_PROFILE="constant"
+fi
+
+if [[ -z "$RESULTS_DIR" ]]; then
+    if [[ "$SCOPE" == "advanced" ]]; then
+        RESULTS_DIR="results-advanced"
+    elif [[ "$MODE" == "distributed" ]]; then
+        RESULTS_DIR="results-distributed"
+    else
+        RESULTS_DIR="results"
+    fi
 fi
 
 case "$SUBCOMMAND" in

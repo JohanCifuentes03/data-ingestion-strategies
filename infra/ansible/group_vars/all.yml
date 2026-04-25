@@ -6,7 +6,7 @@
 # ── Repositorio ─────────────────────────────────────────────────
 repo_url:  "https://github.com/JohanCifuentes03/data-ingestion-strategies.git"
 repo_dest: "/home/ubuntu/data-ingestion-strategies"
-repo_branch: "main"
+repo_branch: "feature/advanced-experiments"
 
 # ── Docker ──────────────────────────────────────────────────────
 docker_compose_version: "2.24.0"  # mínimo requerido del plugin

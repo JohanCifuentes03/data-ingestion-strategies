@@ -267,6 +267,32 @@ def load_cloudwatch_snapshot(results_dir: Path) -> pd.DataFrame:
     return combined
 
 
+def load_generator_rate_timeline(results_dir: Path) -> pd.DataFrame:
+    frames = []
+    for csv_path in results_dir.rglob("generator_rate_timeline.csv"):
+        parts = csv_path.relative_to(results_dir).parts
+        if len(parts) < 4:
+            continue
+        df = pd.read_csv(csv_path, on_bad_lines="skip")
+        if df.empty or "elapsed_s" not in df.columns or "current_rate" not in df.columns:
+            continue
+        df["strategy"] = parts[0]
+        df["scenario"] = parts[1]
+        df["run_id"] = parts[2]
+        frames.append(df)
+
+    if not frames:
+        print("[WARN] Sin generator_rate_timeline.csv — figura advanced_load_profile_timeline omitida")
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["elapsed_s"] = pd.to_numeric(combined["elapsed_s"], errors="coerce")
+    combined["current_rate"] = pd.to_numeric(combined["current_rate"], errors="coerce")
+    combined = combined.dropna(subset=["elapsed_s", "current_rate"])
+    print(f"[INFO] generator timeline: {len(combined)} puntos cargados")
+    return combined
+
+
 # ════════════════════════════════════════════════════════════════════
 # HELPERS
 # ════════════════════════════════════════════════════════════════════
@@ -1196,6 +1222,59 @@ def figure_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
     _save_figure(fig, out, "kafka_consumer_lag")
 
 
+def figure_advanced_load_profile_timeline(timeline_df: pd.DataFrame, out: Path):
+    if timeline_df.empty:
+        print("  [SKIP] advanced_load_profile_timeline.png (sin timeline del generator)")
+        return
+
+    scenarios = _sort_scenarios(timeline_df["scenario"].unique())
+    fig, axes = plt.subplots(
+        1,
+        len(scenarios),
+        figsize=(max(5, len(scenarios) * 4.5), 4.2),
+        sharey=True,
+        squeeze=False,
+    )
+    axes = axes[0]
+
+    for i, scenario in enumerate(scenarios):
+        ax = axes[i]
+        scen_df = timeline_df[timeline_df["scenario"] == scenario].copy()
+        if scen_df.empty:
+            continue
+
+        for strategy in STRATEGY_ORDER:
+            strat_df = scen_df[scen_df["strategy"] == strategy].copy()
+            if strat_df.empty:
+                continue
+
+            strat_df = (
+                strat_df.groupby("elapsed_s", as_index=False)["current_rate"]
+                .mean()
+                .sort_values("elapsed_s")
+            )
+            ax.plot(
+                strat_df["elapsed_s"],
+                strat_df["current_rate"],
+                label=STRATEGY_LABELS_SHORT.get(strategy, strategy),
+                color=PALETTE.get(strategy, "#555555"),
+            )
+
+        ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
+        ax.set_xlabel("Tiempo transcurrido s", fontsize=9)
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
+        if i == 0:
+            ax.set_ylabel("Tasa objetivo ev/s", fontsize=9)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper right", framealpha=0.95)
+    fig.suptitle("Perfil de carga avanzado del generador", fontsize=11, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 0.92, 0.94])
+    _save_figure(fig, out, "advanced_load_profile_timeline")
+
+
 def figure_cloudwatch_overview(cloudwatch: pd.DataFrame, out: Path):
     """
     Heatmap compacto con promedios host-level de CloudWatch por nodo.
@@ -1858,6 +1937,7 @@ def main():
     fault_df = load_fault_recovery(results_dir)
     prom = load_prometheus_snapshot(results_dir)
     cloudwatch = load_cloudwatch_snapshot(results_dir)
+    timeline_df = load_generator_rate_timeline(results_dir)
 
     if not args.no_warmup_filter:
         df = filter_warmup(df)
@@ -1879,6 +1959,7 @@ def main():
     figure_generated_vs_sink(df, prom, out_dir)
     figure_resource_utilization(df, prom, cloudwatch, out_dir)
     figure_kafka_lag(df, prom, out_dir)
+    figure_advanced_load_profile_timeline(timeline_df, out_dir)
     table_latency_summary(df, out_dir)
 
     print(f"\n{'=' * 60}")
