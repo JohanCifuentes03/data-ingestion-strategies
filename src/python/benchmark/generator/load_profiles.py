@@ -13,11 +13,12 @@ class LoadSegment:
 
 BURSTY_PROFILE = [
     LoadSegment(0, 60, 2_000, 2_000),
-    LoadSegment(60, 90, 2_000, 30_000),
-    LoadSegment(90, 180, 30_000, 30_000),
-    LoadSegment(180, 210, 30_000, 5_000),
-    LoadSegment(210, 240, 5_000, 45_000),
-    LoadSegment(240, 300, 10_000, 10_000),
+    LoadSegment(60, 120, 2_000, 10_000),
+    LoadSegment(120, 180, 10_000, 10_000),
+    LoadSegment(180, 210, 10_000, 1_000),
+    LoadSegment(210, 240, 1_000, 1_000),
+    LoadSegment(240, 270, 1_000, 5_000),
+    LoadSegment(270, 300, 5_000, 5_000),
 ]
 
 
