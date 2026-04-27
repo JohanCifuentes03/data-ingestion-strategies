@@ -62,9 +62,21 @@ sync_generator_summary_from_producer() {
     fi
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     [ -z "$producer_ip" ] && return
+    
+    log "Sincronizando generator_summary.json desde producer ($producer_ip)..."
+    
+    # First check if file exists on remote
+    remote_shell "$producer_ip" "ls -la ~/data-ingestion-strategies/results/generator_summary.json 2>/dev/null || echo 'FILE_NOT_FOUND'" | head -1
+    
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
         "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/results/generator_summary.json" \
-        "$GENERATOR_SUMMARY_GLOBAL" >/dev/null 2>&1 || true
+        "$GENERATOR_SUMMARY_GLOBAL" 2>&1
+    
+    if [ $? -eq 0 ] && [ -f "$GENERATOR_SUMMARY_GLOBAL" ]; then
+        log "Generator summary sincronizado exitosamente"
+    else
+        warn "Fallo al sincronizar generator_summary.json desde producer"
+    fi
 }
 
 archive_run_to_sink() {
@@ -207,6 +219,7 @@ start_generator_for_scenario() {
                  STRATEGY='${STRATEGY}' \
                  GENERATOR_RUN_DURATION_SECONDS='${GENERATOR_RUN_DURATION_SECONDS}' \
                  GENERATOR_WARMUP_SECONDS='${GENERATOR_WARMUP_SECONDS}' \
+                 GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
                  docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
