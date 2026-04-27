@@ -115,7 +115,7 @@ def _financial_tick_event(payload_size: int, event_id: str, payload_base: str) -
         "bid": round(price * random.uniform(0.999, 1.0), 4),
         "ask": round(price * random.uniform(1.0, 1.001), 4),
         "volume": round(random.uniform(0.001, 100.0), 6),
-        "trade_id": event_id,
+        "trade_id": str(uuid.uuid4()),
         "payload": payload_base,
     }
 
@@ -230,6 +230,8 @@ def producer_thread(
     seq = 0
     payload_size = state.next_payload_size()
     payload_base = _rand_str(max(0, payload_size - 200))
+    uuid_batch = [str(uuid.uuid4()) for _ in range(1000)]
+    uuid_idx = 0
 
     while state.running:
         try:
@@ -243,8 +245,11 @@ def producer_thread(
             produced_at_ms = int(time.time() * 1000)
 
             for _ in range(events_per_window):
-                seq += 1
-                event_id = f"{run_id}-{thread_id}-{seq}"
+                if uuid_idx >= len(uuid_batch):
+                    uuid_batch = [str(uuid.uuid4()) for _ in range(1000)]
+                    uuid_idx = 0
+                event_id = uuid_batch[uuid_idx]
+                uuid_idx += 1
                 builder = SCHEMA_BUILDERS.get(state.schema, _iot_sensor_event)
                 event_dict = builder(payload_size, event_id, payload_base)
                 event_dict["strategy"] = strategy
