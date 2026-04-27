@@ -86,9 +86,9 @@ def _rand_str(n: int) -> str:
     return "".join(random.choices(string.ascii_letters + string.digits, k=n))
 
 
-def _iot_sensor_event(payload_size: int) -> dict:
+def _iot_sensor_event(payload_size: int, event_id: str, payload_base: str) -> dict:
     return {
-        "event_id": str(uuid.uuid4()),
+        "event_id": event_id,
         "produced_at": int(time.time() * 1000),
         "schema": "iot_sensor",
         "device_id": f"sensor-{random.randint(1, 9999):04d}",
@@ -97,16 +97,16 @@ def _iot_sensor_event(payload_size: int) -> dict:
         "pressure_hpa": round(random.uniform(950.0, 1050.0), 2),
         "battery_v": round(random.uniform(2.5, 4.2), 3),
         "status": random.choice(["ok", "ok", "ok", "warn", "error"]),
-        "payload": _rand_str(max(0, payload_size - 120)),
+        "payload": payload_base,
     }
 
 
-def _financial_tick_event(payload_size: int) -> dict:
+def _financial_tick_event(payload_size: int, event_id: str, payload_base: str) -> dict:
     symbols = ["BTC-USD", "ETH-USD", "SOL-USD", "AAPL", "MSFT", "GOOG", "AMZN"]
     exchanges = ["binance", "coinbase", "kraken", "nasdaq", "nyse"]
     price = round(random.uniform(1.0, 80000.0), 4)
     return {
-        "event_id": str(uuid.uuid4()),
+        "event_id": event_id,
         "produced_at": int(time.time() * 1000),
         "schema": "financial_tick",
         "symbol": random.choice(symbols),
@@ -115,15 +115,15 @@ def _financial_tick_event(payload_size: int) -> dict:
         "bid": round(price * random.uniform(0.999, 1.0), 4),
         "ask": round(price * random.uniform(1.0, 1.001), 4),
         "volume": round(random.uniform(0.001, 100.0), 6),
-        "trade_id": str(uuid.uuid4()),
-        "payload": _rand_str(max(0, payload_size - 200)),
+        "trade_id": event_id,
+        "payload": payload_base,
     }
 
 
-def _health_monitor_event(payload_size: int) -> dict:
+def _health_monitor_event(payload_size: int, event_id: str, payload_base: str) -> dict:
     hr = random.randint(40, 180)
     return {
-        "event_id": str(uuid.uuid4()),
+        "event_id": event_id,
         "produced_at": int(time.time() * 1000),
         "schema": "health_monitor",
         "patient_id": f"P-{random.randint(1000, 9999)}",
@@ -133,7 +133,7 @@ def _health_monitor_event(payload_size: int) -> dict:
         "steps_delta": random.randint(0, 20),
         "alert": hr > 150 or hr < 45,
         "location": random.choice(["home", "hospital", "clinic", "ambulatory"]),
-        "payload": _rand_str(max(0, payload_size - 200)),
+        "payload": payload_base,
     }
 
 
@@ -146,7 +146,7 @@ SCHEMA_BUILDERS = {
 
 def build_event(schema: str, payload_size: int) -> bytes:
     builder = SCHEMA_BUILDERS.get(schema, _iot_sensor_event)
-    return json.dumps(builder(payload_size)).encode("utf-8")
+    return json.dumps(builder(payload_size, str(uuid.uuid4()), _rand_str(max(0, payload_size - 200)))).encode("utf-8")
 
 
 # ── Kafka helpers ───────────────────────────────────────────────────
@@ -212,10 +212,9 @@ def producer_thread(
     run_id: str,
     strategy: str,
     state: SharedState,
-    target_rate_fn,  # callable() → int (events/s for this thread)
-    interval: float = 0.1,  # send window in seconds (100ms → fine-grained pacing)
+    target_rate_fn,
+    interval: float = 0.1,
 ):
-    """Each thread manages its own Kafka Producer and sends events independently."""
     try:
         producer = configure_producer(bootstrap_servers)
     except Exception as exc:
@@ -228,49 +227,55 @@ def producer_thread(
         if err:
             pass
 
+    seq = 0
+    payload_size = state.next_payload_size()
+    payload_base = _rand_str(max(0, payload_size - 200))
+
     while state.running:
         try:
             thread_rate = target_rate_fn() // max(1, state._n_threads)  # type: ignore[attr-defined]
             events_per_window = max(1, int(thread_rate * interval))
             t_start = time.perf_counter()
 
+            local_sent = 0
+            local_bytes = 0
+            local_errors = 0
+            produced_at_ms = int(time.time() * 1000)
+
             for _ in range(events_per_window):
-                schema = state.schema
-                payload_size = state.next_payload_size()
-                # Build dict first so we can extract the key cleanly,
-                # then serialize — avoids brittle byte-offset slicing.
-                builder = SCHEMA_BUILDERS.get(schema, _iot_sensor_event)
-                event_dict = builder(payload_size)
+                seq += 1
+                event_id = f"{run_id}-{thread_id}-{seq}"
+                builder = SCHEMA_BUILDERS.get(state.schema, _iot_sensor_event)
+                event_dict = builder(payload_size, event_id, payload_base)
                 event_dict["strategy"] = strategy
                 event_dict["scenario"] = scenario_name
                 event_dict["run_id"] = run_id
+                event_dict["produced_at"] = produced_at_ms
                 raw = json.dumps(event_dict).encode("utf-8")
-                if len(raw) < payload_size:
-                    deficit = payload_size - len(raw)
-                    event_dict["payload"] = event_dict.get("payload", "") + _rand_str(deficit)
-                    raw = json.dumps(event_dict).encode("utf-8")
-                key = event_dict["event_id"].encode("utf-8")
+                key = event_id.encode("utf-8")
 
-                t0 = time.perf_counter()
                 try:
                     producer.produce(topic, value=raw, key=key, on_delivery=on_delivery)
-                    producer.poll(0)
-                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                    PRODUCE_LAT_MS.labels(scenario_name, run_id, strategy).observe(elapsed_ms)
-                    MESSAGES_TOTAL.labels(scenario_name, run_id, strategy).inc()
-                    BYTES_TOTAL.labels(scenario_name, run_id, strategy).inc(len(raw))
-                    with state._lock:
-                        state.generated_events += 1
-                        state.generated_bytes += len(raw)
+                    local_sent += 1
+                    local_bytes += len(raw)
                 except BufferError:
                     producer.poll(0.01)
-                except Exception as exc:
-                    log.error("Thread %d: produce error: %s", thread_id, exc)
-                    ERROR_TOTAL.labels(scenario_name, run_id, strategy).inc()
-                    with state._lock:
-                        state.produce_errors += 1
+                except Exception:
+                    local_errors += 1
 
-            producer.flush(0)  # non-blocking flush
+            producer.poll(0)
+
+            if local_sent:
+                MESSAGES_TOTAL.labels(scenario_name, run_id, strategy).inc(local_sent)
+                BYTES_TOTAL.labels(scenario_name, run_id, strategy).inc(local_bytes)
+            if local_errors:
+                ERROR_TOTAL.labels(scenario_name, run_id, strategy).inc(local_errors)
+                log.error("Thread %d: %d produce errors in window", thread_id, local_errors)
+
+            with state._lock:
+                state.generated_events += local_sent
+                state.generated_bytes += local_bytes
+                state.produce_errors += local_errors
 
             elapsed = time.perf_counter() - t_start
             sleep_for = max(0.0, interval - elapsed)

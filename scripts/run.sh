@@ -194,7 +194,13 @@ prepare_run_topic() {
 start_generator_for_scenario() {
     local scenario="$1"
     set_generator_defaults "$scenario"
-    log "Iniciando generator (scenario=${scenario}, rate=${GENERATOR_DEFAULT_RATE} ev/s, payload=${GENERATOR_DEFAULT_PAYLOAD}B)"
+    case "$scenario" in
+        low-load)    export GENERATOR_THREADS="${GENERATOR_THREADS:-4}" ;;
+        medium-load) export GENERATOR_THREADS="${GENERATOR_THREADS:-8}" ;;
+        high-load)   export GENERATOR_THREADS="${GENERATOR_THREADS:-16}" ;;
+        *)           export GENERATOR_THREADS="${GENERATOR_THREADS:-4}" ;;
+    esac
+    log "Iniciando generator (scenario=${scenario}, rate=${GENERATOR_DEFAULT_RATE} ev/s, payload=${GENERATOR_DEFAULT_PAYLOAD}B, threads=${GENERATOR_THREADS})"
     (
         export GENERATOR_SCENARIO="$scenario"
         export GENERATOR_EVENT_RATE="$GENERATOR_DEFAULT_RATE"
@@ -219,8 +225,9 @@ start_generator_for_scenario() {
                  STRATEGY='${STRATEGY}' \
                  GENERATOR_RUN_DURATION_SECONDS='${GENERATOR_RUN_DURATION_SECONDS}' \
                  GENERATOR_WARMUP_SECONDS='${GENERATOR_WARMUP_SECONDS}' \
-                 GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
-                 docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
+                  GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
+                  GENERATOR_THREADS='${GENERATOR_THREADS}' \
+                  docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
         fi
