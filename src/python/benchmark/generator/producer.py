@@ -451,6 +451,7 @@ def main():
         "load_profile": load_profile,
     }
 
+    log.info("Writing generator summary to %s", summary_path)
     try:
         summary_file = Path(summary_path)
         summary_file.parent.mkdir(parents=True, exist_ok=True)
