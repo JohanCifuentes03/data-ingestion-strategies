@@ -26,8 +26,7 @@ public final class JdbcEventWriter {
             ON CONFLICT (event_id) DO NOTHING
             """;
 
-    public static void writeBatch(String url, Properties properties, List<Event> events,
-            String strategy, String scenario, String runId) {
+    public static void writeBatch(String url, Properties properties, List<Event> events) {
         if (events.isEmpty()) {
             return;
         }
@@ -38,9 +37,9 @@ public final class JdbcEventWriter {
                 statement.setObject(1, event.getEventId());
                 statement.setLong(2, event.getProducedAt());
                 statement.setString(3, event.getPayload());
-                statement.setString(4, strategy);
-                statement.setString(5, scenario);
-                statement.setString(6, runId);
+                statement.setString(4, event.getStrategy());
+                statement.setString(5, event.getScenario());
+                statement.setString(6, event.getRunId());
                 statement.addBatch();
                 pending++;
                 if (pending >= JDBC_BATCH_SIZE) {
