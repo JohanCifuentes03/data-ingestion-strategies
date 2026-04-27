@@ -72,16 +72,12 @@ public final class FlinkStreamingJob {
                 KafkaSource<String> source = KafkaSource.<String>builder()
                                 .setBootstrapServers(kafkaBootstrap)
                                 .setTopics(topic)
-                                .setGroupId("flink-streaming-" + scenario)
+                                .setGroupId("flink-streaming-" + scenario + "-" + runId)
                                 .setStartingOffsets(OffsetsInitializer.earliest())
                                 .setValueOnlyDeserializer(new SimpleStringSchema())
                                 .setProperty("fetch.min.bytes", "1")
                                 .setProperty("fetch.max.wait.ms", "100")
                                 .build();
-
-                final String strategyVal = "streaming";
-                final String scenarioVal = scenario;
-                final String runIdVal = runId;
 
                 env.fromSource(source, WatermarkStrategy.noWatermarks(), "KafkaSource")
                                 .map(Event::fromJson)
@@ -94,9 +90,9 @@ public final class FlinkStreamingJob {
                                                         statement.setObject(1, event.getEventId());
                                                         statement.setLong(2, event.getProducedAt());
                                                         statement.setString(3, event.getPayload());
-                                                        statement.setString(4, strategyVal);
-                                                        statement.setString(5, scenarioVal);
-                                                        statement.setString(6, runIdVal);
+                                                        statement.setString(4, event.getStrategy());
+                                                        statement.setString(5, event.getScenario());
+                                                        statement.setString(6, event.getRunId());
                                                 },
                                                 JdbcExecutionOptions.builder()
                                                                 .withBatchSize(2000)
