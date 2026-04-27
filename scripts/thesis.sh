@@ -143,6 +143,24 @@ build_local_images() {
     "${DC[@]}" build generator probe
 }
 
+ensure_local_results_permissions() {
+    mkdir -p results
+    if [[ -w results ]]; then
+        return 0
+    fi
+
+    warn "Corrigiendo permisos de results/ creados por contenedores"
+    docker run --rm \
+        -v "$ROOT_DIR/results:/results" \
+        alpine:3.20 \
+        sh -c "chown -R $(id -u):$(id -g) /results && chmod -R u+rwX /results" >/dev/null
+
+    if [[ ! -w results ]]; then
+        err "No se pudieron corregir permisos de results/"
+        exit 1
+    fi
+}
+
 start_local_stack() {
     log "Levantando stack local"
     local results_host
@@ -178,6 +196,7 @@ setup_local_stack() {
         return 0
     fi
     log "Preparando stack local"
+    ensure_local_results_permissions
     ensure_env_file
     ensure_python_env
     compile_jobs
@@ -267,13 +286,19 @@ results_dir() {
 run_analyze() {
     local rdir
     rdir=$(results_dir)
+    if [[ "$MODE" == "local" ]]; then
+        ensure_local_results_permissions
+    fi
     log "Analizando resultados en ${rdir}"
-    .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$rdir" --output "$rdir/figures"
+    .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$rdir" --output "$rdir/figures" --scope official --validate
 }
 
 run_validate() {
     local rdir
     rdir=$(results_dir)
+    if [[ "$MODE" == "local" ]]; then
+        ensure_local_results_permissions
+    fi
     log "Validando resultados en ${rdir}"
     .venv/bin/python -m benchmark.validation.validator --results-dir "$rdir"
 }

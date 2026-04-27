@@ -315,12 +315,14 @@ bash scripts/thesis.sh destroy --mode distributed
 ## Results & Metrics
 
 ### Primary Metrics
-- **End-to-end Latency**: Time from event production to visibility in sink (p50, p90, p99, p99.9)
-- **Throughput**: Events processed per second
-- **Resource Usage**: CPU, memory, network I/O per strategy
+- **End-to-end Latency**: Time from event production to visibility in sink (p50, p95, p99)
+- **Throughput**:
+  - generated real (`generated_events / generation_duration_seconds`)
+  - visible equivalente normalizado a ventana oficial (`visible_events / official_duration_seconds`)
+- **Resource Usage**: average CPU cores and memory RSS by strategy/scenario
 
 ### Secondary Metrics
-- **Consumer Lag**: Kafka offset lag
+- **Consumer Lag**: diagnostic-only, only when real exporter coverage exists
 
 Figures are exported in publication-ready formats:
 - **PNG**: Quick preview for notebooks/slides
@@ -328,10 +330,19 @@ Figures are exported in publication-ready formats:
 
 Current compact figure set (thesis-focused):
 - `latency_distribution_boxplot.*`: latency distribution with p50/p95/p99 annotations
-- `generated_vs_sink_throughput.*`: generated throughput vs sink-visible throughput
-- `resource_efficiency_scatter.*`: CPU vs memory-per-event efficiency by run
-- `kafka_consumer_lag.*`: lag/backpressure by strategy and scenario
+- `generated_vs_sink_throughput.*`: generated-real throughput vs sink-visible throughput (official window)
+- `delivery_capacity_by_scenario.*`: target vs generated-real vs visible-equivalent (window-normalized) throughput
+- `delivery_ratio_by_scenario.*`: visible/generated delivery ratio (%) after drain
+- `latency_slo_compliance.*`: latency SLO compliance (<=500ms, <=2s, <=10s)
+- `time_to_drain_by_scenario.*`: time from generation end to processing drain completion
+- `resource_usage_compute_node.*`: average CPU cores and memory RSS by scenario
 - `latency_summary_table.*`: summary table (CSV + figure)
+- `statistical_tests.csv`: Kruskal + pairwise Mann-Whitney (Bonferroni-adjusted)
+
+Diagnostic figures (not part of the primary comparison conclusions):
+- `kafka_consumer_lag.*`: only where real lag metrics are available
+- `backlog_estimado.*`: diagnostic estimate, not a primary thesis metric
+- `cpu_cost_per_million_visible_events.*`: diagnostic compute-cost view
 
 ## Notes
 

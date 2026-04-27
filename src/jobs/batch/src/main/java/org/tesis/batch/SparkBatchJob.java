@@ -34,7 +34,10 @@ public final class SparkBatchJob {
                 return new StructType(new StructField[] {
                                 DataTypes.createStructField("event_id", DataTypes.StringType, false),
                                 DataTypes.createStructField("produced_at", DataTypes.LongType, false),
-                                DataTypes.createStructField("payload", DataTypes.StringType, false)
+                                DataTypes.createStructField("payload", DataTypes.StringType, false),
+                                DataTypes.createStructField("strategy", DataTypes.StringType, false),
+                                DataTypes.createStructField("scenario", DataTypes.StringType, false),
+                                DataTypes.createStructField("run_id", DataTypes.StringType, false)
                 });
         }
 
@@ -48,7 +51,6 @@ public final class SparkBatchJob {
                 String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
                 String scenario = config.getOrDefault("scenario", "low-load");
-                String runId = config.getOrDefault("run.id", "run_1");
 
                 SparkSession spark = SparkSession.builder()
                                 .appName("SparkBatchJob-" + scenario)
@@ -66,18 +68,12 @@ public final class SparkBatchJob {
                 Dataset<Row> parsed = kafkaDataset
                                 .selectExpr("CAST(value AS STRING) AS json")
                                 .select(functions.from_json(functions.col("json"), schema).alias("event"))
-                                .select("event.*")
-                                .withColumn("strategy", functions.lit("batch"))
-                                .withColumn("scenario", functions.lit(scenario))
-                                .withColumn("run_id", functions.lit(runId));
+                                .select("event.*");
 
                 // Use foreachPartition + JdbcEventWriter so we get ON CONFLICT DO NOTHING,
                 // which makes the job safely re-runnable without duplicate key failures.
                 Properties jdbcProps = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
                 final String jdbcUrlFinal = jdbcUrl;
-                final String scenarioFinal = scenario;
-                final String runIdFinal = runId;
-
                 parsed.foreachPartition(rows -> {
                         List<org.tesis.common.Event> batch = new ArrayList<>();
                         rows.forEachRemaining(row -> {
@@ -85,12 +81,15 @@ public final class SparkBatchJob {
                                         java.util.UUID eventId = java.util.UUID.fromString(row.getString(0));
                                         long producedAt = row.getLong(1);
                                         String payload = row.isNullAt(2) ? "" : row.getString(2);
-                                        batch.add(new org.tesis.common.Event(eventId, producedAt, payload));
+                                        String eventStrategy = row.getString(3);
+                                        String eventScenario = row.getString(4);
+                                        String eventRunId = row.getString(5);
+                                        batch.add(new org.tesis.common.Event(eventId, producedAt, payload, eventStrategy, eventScenario, eventRunId));
                                 } catch (Exception ignored) {
                                         // skip malformed rows
                                 }
                         });
-                        JdbcEventWriter.writeBatch(jdbcUrlFinal, jdbcProps, batch, "batch", scenarioFinal, runIdFinal);
+                        JdbcEventWriter.writeBatch(jdbcUrlFinal, jdbcProps, batch);
                 });
 
                 spark.close();

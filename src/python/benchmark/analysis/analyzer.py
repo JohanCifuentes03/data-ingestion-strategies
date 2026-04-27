@@ -1,1970 +1,1070 @@
 #!/usr/bin/env python3
-"""
-Análisis estadístico y generación de figuras para la tesis.
+"""Official benchmark analyzer for thesis figures and validation."""
 
-Lee latency_samples.csv y prometheus_snapshot.csv en results/ y exporta un
-set compacto de figuras académicas de alto valor:
-
-  - Distribución de latencia E2E (boxplot anotado)
-  - Throughput generado vs visible en sink
-  - Kafka consumer lag (observado o estimado)
-  - Eficiencia de recursos (CPU vs MB/evento)
-  - Tabla resumen de latencia (CSV + PNG)
-
-Uso:
-    python -m benchmark.analysis.analyzer
-    python -m benchmark.analysis.analyzer --results-dir results --output results/figures
-"""
+from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-
-# Forzar UTF-8 en Windows para evitar errores de codec con ✓, ✗, etc.
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
-    import io
-
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
-import seaborn as sns
-from matplotlib.patches import Patch
-
-# ── Estilo global (Publication-Ready for IEEE/ACM) ───────────────────
-# Configuración optimizada para papers académicos y tesis
-plt.rcParams.update({
-    # Figure settings
-    "figure.dpi": 150,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.1,
-    "savefig.format": "png",  # También genera PDF para LaTeX
-    
-    # Font settings (compatible con LaTeX)
-    "font.family": "serif",
-    "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
-    "font.size": 10,
-    "axes.titlesize": 11,
-    "axes.labelsize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 9,
-    "legend.title_fontsize": 10,
-    
-    # Axes settings
-    "axes.titleweight": "bold",
-    "axes.labelweight": "normal",
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.linewidth": 0.8,
-    "axes.grid": True,
-    "axes.axisbelow": True,
-    
-    # Grid settings
-    "grid.alpha": 0.3,
-    "grid.linewidth": 0.5,
-    "grid.linestyle": "--",
-    
-    # Line settings
-    "lines.linewidth": 1.5,
-    "lines.markersize": 6,
-    
-    # Legend settings
-    "legend.framealpha": 0.9,
-    "legend.edgecolor": "0.8",
-    "legend.fancybox": False,
-    
-    # Tick settings
-    "xtick.direction": "out",
-    "ytick.direction": "out",
-    "xtick.major.width": 0.8,
-    "ytick.major.width": 0.8,
-})
-
-sns.set_theme(
-    style="whitegrid",
-    font_scale=1.0,
-    rc={
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    },
-)
-
-# Paleta de colores accesible (colorblind-friendly, print-safe)
-PALETTE = {
-    "batch": "#0077BB",      # Azul oscuro (distinguible en B&W)
-    "microbatch": "#EE7733", # Naranja (distinguible en B&W)  
-    "streaming": "#009988",  # Verde azulado (distinguible en B&W)
-}
-
-# Patrones de relleno para gráficos en blanco y negro
-HATCHES = {
-    "batch": "",       # Sólido
-    "microbatch": "//", # Diagonal
-    "streaming": "xx",  # Cruzado
-}
+from scipy.stats import kruskal, mannwhitneyu
 
 STRATEGY_ORDER = ["batch", "microbatch", "streaming"]
-STRATEGY_LABELS = {
-    "batch": "Batch\n(Spark)",
-    "microbatch": "Micro-batch\n(Spark SS)",
-    "streaming": "Streaming\n(Flink)",
+SCENARIO_ORDER = ["low-load", "medium-load", "high-load"]
+SCENARIO_TARGET_EPS = {
+    "low-load": 2000,
+    "medium-load": 10000,
+    "high-load": 30000,
 }
-
-# Labels más cortos para figuras compactas
-STRATEGY_LABELS_SHORT = {
+SAVE_FORMATS = ["png", "pdf"]
+STRATEGY_LABELS = {
     "batch": "Batch",
     "microbatch": "Micro-batch",
     "streaming": "Streaming",
 }
-
-SCENARIO_ORDER = [
-    "low-load",
-    "medium-load",
-    "high-load",
-]
-
-# Labels de escenarios más legibles
 SCENARIO_LABELS = {
-    "low-load": "Baja",
-    "medium-load": "Media",
-    "high-load": "Alta",
+    "low-load": "Carga baja",
+    "medium-load": "Carga media",
+    "high-load": "Carga alta",
+}
+STRATEGY_COLORS = {
+    "batch": "#2f2f2f",
+    "microbatch": "#7a7a7a",
+    "streaming": "#c7c7c7",
+}
+SERIES_COLORS = {
+    "primary_light": "#bdbdbd",
+    "primary_dark": "#4a4a4a",
+    "secondary_light": "#d9d9d9",
+    "secondary_dark": "#595959",
 }
 
-FIG_W = 4.5  # ancho por subgráfico (IEEE column width ~3.5in)
-FIG_H = 3.5  # altura estándar
-WARMUP_MS = 30_000  # 30 s de warmup excluidos por run (no-batch)
-WARMUP_ADAPTIVE_FRACTION = 0.10  # usar 10% de la ventana real del run
-WARMUP_ADAPTIVE_MIN_MS = 1_000  # evitar warmup cero en runs cortos
 
-# Formatos de salida
-SAVE_FORMATS = ["png", "pdf"]  # PDF para LaTeX, PNG para preview
+@dataclass
+class ValidationState:
+    ok: int = 0
+    warn: int = 0
+    err: int = 0
 
-# Estilo de publicación en escala de grises (no depender del color)
-GRAYSCALE_FACE = {
-    "batch": "#BDBDBD",
-    "microbatch": "#9E9E9E",
-    "streaming": "#757575",
-}
+    def report_ok(self, msg: str):
+        self.ok += 1
+        print(f"[OK] {msg}")
 
-# Umbral de Kafka Consumer Lag a partir del cual se considera crítico
-KAFKA_LAG_THRESHOLD = 10_000  # mensajes
+    def report_warn(self, msg: str):
+        self.warn += 1
+        print(f"[WARN] {msg}")
+
+    def report_err(self, msg: str):
+        self.err += 1
+        print(f"[ERROR] {msg}")
 
 
-# ════════════════════════════════════════════════════════════════════
-# DATA LOADING
-# ════════════════════════════════════════════════════════════════════
+def _sort_by_known(values: list[str], known: list[str]) -> list[str]:
+    present = set(values)
+    ordered = [v for v in known if v in present]
+    tail = sorted(v for v in values if v not in known)
+    return ordered + tail
+
+
+def _save_figure(fig, out_dir: Path, basename: str):
+    for ext in SAVE_FORMATS:
+        fig.savefig(out_dir / f"{basename}.{ext}", bbox_inches="tight", dpi=300 if ext == "png" else None)
+    plt.close(fig)
+    print(f"[OK] {basename}.png")
+
+
+def _load_json_records(results_dir: Path, filename: str) -> pd.DataFrame:
+    rows = []
+    for path in results_dir.rglob(filename):
+        rel = path.relative_to(results_dir).parts
+        if len(rel) < 4:
+            continue
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
+        try:
+            with open(path, encoding="utf-8") as handle:
+                row = json.load(handle)
+            if "strategy" not in row:
+                row["strategy"] = strategy
+            if "scenario" not in row:
+                row["scenario"] = scenario
+            if "run_id" not in row:
+                row["run_id"] = run_id
+            rows.append(row)
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
 
 
 def load_latency(results_dir: Path) -> pd.DataFrame:
-    """Recorre results/<strategy>/<scenario>/<run_N>/latency_samples.csv"""
     frames = []
     for csv_path in results_dir.rglob("latency_samples.csv"):
-        parts = csv_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        rel = csv_path.relative_to(results_dir).parts
+        if len(rel) < 4:
             continue
-        strategy, scenario, run_dir = parts[0], parts[1], parts[2]
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
         df = pd.read_csv(csv_path, on_bad_lines="skip")
-        if "latency_ms" not in df.columns or df.empty:
+        if df.empty:
             continue
-        df["strategy"] = strategy
-        df["scenario"] = scenario
-        df["run_id"] = run_dir
+        for key, val in [("strategy", strategy), ("scenario", scenario), ("run_id", run_id)]:
+            if key not in df.columns:
+                df[key] = val
         frames.append(df)
-
     if not frames:
-        print("[ERROR] Sin archivos latency_samples.csv con datos.")
-        sys.exit(1)
-
-    combined = pd.concat(frames, ignore_index=True)
-    combined["latency_ms"] = pd.to_numeric(combined["latency_ms"], errors="coerce")
-    combined = combined.dropna(subset=["latency_ms"])
-    combined = combined[combined["latency_ms"] > 0]
-
-    strats = sorted(combined["strategy"].unique())
-    scens = sorted(combined["scenario"].unique())
-    print(
-        f"[INFO] latency: {len(combined):,} registros | estrategias={strats} | escenarios={scens}"
-    )
-    return combined
-
-
-def load_fault_recovery(results_dir: Path) -> pd.DataFrame:
-    """
-    Lee results/fault_recovery.csv con columnas:
-      strategy, scenario, run_id, recovery_time_s, status
-    Si no existe devuelve DataFrame vacío (las gráficas lo manejan con gracia).
-    """
-    csv_path = results_dir / "fault_recovery.csv"
-    if not csv_path.exists():
-        print("[WARN] fault_recovery.csv no encontrado — chart 03 omitido")
         return pd.DataFrame()
-    df = pd.read_csv(csv_path, on_bad_lines="skip")
-    df["recovery_time_s"] = pd.to_numeric(df["recovery_time_s"], errors="coerce")
-    df = df.dropna(subset=["recovery_time_s"])
-    print(f"[INFO] fault_recovery: {len(df)} registros")
+    df = pd.concat(frames, ignore_index=True)
+    if "latency_ms" in df.columns:
+        df["latency_ms"] = pd.to_numeric(df["latency_ms"], errors="coerce")
+        df = df.dropna(subset=["latency_ms"])
+    for col in ["produced_at", "visible_at"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
 def load_prometheus_snapshot(results_dir: Path) -> pd.DataFrame:
-    """
-    Recorre results/<strategy>/<scenario>/<run>/prometheus_snapshot.csv
-    con columnas: strategy, scenario, run_id, metric, value, unit
-    """
     frames = []
     for csv_path in results_dir.rglob("prometheus_snapshot.csv"):
-        parts = csv_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+        rel = csv_path.relative_to(results_dir).parts
+        if len(rel) < 4:
             continue
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
         df = pd.read_csv(csv_path, on_bad_lines="skip")
         if df.empty:
             continue
+        if "strategy" not in df.columns:
+            df["strategy"] = strategy
+        if "scenario" not in df.columns:
+            df["scenario"] = scenario
+        if "run_id" not in df.columns:
+            df["run_id"] = run_id
+        if "value" in df.columns:
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
         frames.append(df)
-
-    if not frames:
-        print(
-            "[WARN] Sin prometheus_snapshot.csv — charts 05/06 usarán datos derivados de latencia"
-        )
-        return pd.DataFrame()
-
-    combined = pd.concat(frames, ignore_index=True)
-    combined["value"] = pd.to_numeric(combined["value"], errors="coerce")
-    print(f"[INFO] prometheus: {len(combined)} métricas cargadas")
-    return combined
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def load_cloudwatch_snapshot(results_dir: Path) -> pd.DataFrame:
-    """
-    Recorre results/<strategy>/<scenario>/<run>/cloudwatch_snapshot.csv
-    con columnas:
-      strategy, scenario, run_id, node, instance_id, metric, value, unit, start_utc, end_utc
-    """
+def load_run_metadata(results_dir: Path) -> pd.DataFrame:
+    return _load_json_records(results_dir, "run_metadata.json")
+
+
+def load_run_summaries(results_dir: Path) -> pd.DataFrame:
+    return _load_json_records(results_dir, "run_summary.json")
+
+
+def load_generator_summaries(results_dir: Path) -> pd.DataFrame:
+    return _load_json_records(results_dir, "generator_summary.json")
+
+
+def load_kafka_lag_timeseries(results_dir: Path) -> pd.DataFrame:
     frames = []
-    for csv_path in results_dir.rglob("cloudwatch_snapshot.csv"):
-        parts = csv_path.relative_to(results_dir).parts
-        if len(parts) < 4:
+    for csv_path in results_dir.rglob("kafka_lag_timeseries.csv"):
+        rel = csv_path.relative_to(results_dir).parts
+        if len(rel) < 4:
             continue
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
         df = pd.read_csv(csv_path, on_bad_lines="skip")
         if df.empty:
             continue
+        for key, val in [("strategy", strategy), ("scenario", scenario), ("run_id", run_id)]:
+            if key not in df.columns:
+                df[key] = val
+        if "lag" in df.columns:
+            df["lag"] = pd.to_numeric(df["lag"], errors="coerce")
+        if "lag_source" not in df.columns:
+            df["lag_source"] = "unknown"
         frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    if not frames:
-        print("[WARN] Sin cloudwatch_snapshot.csv — se usará solo Prometheus para recursos")
-        return pd.DataFrame()
 
-    combined = pd.concat(frames, ignore_index=True)
-    combined["value"] = pd.to_numeric(combined["value"], errors="coerce")
-    print(f"[INFO] cloudwatch: {len(combined)} métricas cargadas")
-    return combined
-
-
-def load_generator_rate_timeline(results_dir: Path) -> pd.DataFrame:
-    frames = []
-    for csv_path in results_dir.rglob("generator_rate_timeline.csv"):
-        parts = csv_path.relative_to(results_dir).parts
-        if len(parts) < 4:
-            continue
-        df = pd.read_csv(csv_path, on_bad_lines="skip")
-        if df.empty or "elapsed_s" not in df.columns or "current_rate" not in df.columns:
-            continue
-        df["strategy"] = parts[0]
-        df["scenario"] = parts[1]
-        df["run_id"] = parts[2]
-        frames.append(df)
-
-    if not frames:
-        print("[WARN] Sin generator_rate_timeline.csv — figura advanced_load_profile_timeline omitida")
-        return pd.DataFrame()
-
-    combined = pd.concat(frames, ignore_index=True)
-    combined["elapsed_s"] = pd.to_numeric(combined["elapsed_s"], errors="coerce")
-    combined["current_rate"] = pd.to_numeric(combined["current_rate"], errors="coerce")
-    combined = combined.dropna(subset=["elapsed_s", "current_rate"])
-    print(f"[INFO] generator timeline: {len(combined)} puntos cargados")
-    return combined
-
-
-# ════════════════════════════════════════════════════════════════════
-# HELPERS
-# ════════════════════════════════════════════════════════════════════
-
-
-def _sort_scenarios(scenarios):
-    known = [s for s in SCENARIO_ORDER if s in scenarios]
-    unknown = sorted(s for s in scenarios if s not in SCENARIO_ORDER)
-    return known + unknown
-
-
-def filter_warmup(df: pd.DataFrame, warmup_ms: int = WARMUP_MS) -> pd.DataFrame:
-    """
-    Excluye muestras del período de calentamiento de cada run.
-    Batch está exento porque todos sus eventos se producen antes del job.
-    """
-    if df.empty:
-        return df
-    parts = []
-    adaptive_notes = []
-    for (strategy, scenario, run_id), grp in df.groupby(
-        ["strategy", "scenario", "run_id"], observed=True
-    ):
-        if strategy == "batch":
-            parts.append(grp)
-        else:
-            if "produced_at" in grp.columns:
-                t0 = grp["produced_at"].min()
-                span_ms = grp["produced_at"].max() - t0
-                adaptive_ms = max(
-                    WARMUP_ADAPTIVE_MIN_MS,
-                    int(span_ms * WARMUP_ADAPTIVE_FRACTION),
-                )
-                warmup_effective_ms = min(warmup_ms, adaptive_ms)
-                if warmup_effective_ms != warmup_ms:
-                    adaptive_notes.append(
-                        f"{strategy}/{scenario}/{run_id}: {warmup_effective_ms/1000:.1f}s (span={span_ms/1000:.1f}s)"
-                    )
-
-                filtered = grp[grp["produced_at"] >= t0 + warmup_effective_ms]
-                if not filtered.empty:
-                    parts.append(filtered)
-                else:
-                    parts.append(grp)  # Fallback: si el warmup elimina todo, mantenemos original
-            else:
-                parts.append(grp)
-
-    combined = (
-        pd.concat(parts, ignore_index=True)
-        if parts
-        else pd.DataFrame(columns=df.columns)
-    )
-    removed = len(df) - len(combined)
-    if removed > 0:
-        print(
-            f"[INFO] Warmup filter: {removed:,} muestras eliminadas (max={warmup_ms/1000:.0f}s, adaptive={WARMUP_ADAPTIVE_FRACTION*100:.0f}% span)"
-        )
-        if adaptive_notes:
-            preview = ", ".join(adaptive_notes[:6])
-            if len(adaptive_notes) > 6:
-                preview += ", ..."
-            print(f"[INFO] Warmup adaptativo por run: {preview}")
-    return combined
-
-
-def filter_low_sample_runs(df: pd.DataFrame, prom: pd.DataFrame, min_samples: int = 1000):
-    """Remove runs with too few latency samples to avoid misleading figures."""
-    if df.empty:
-        return df, prom
-    run_counts = (
-        df.groupby(["strategy", "scenario", "run_id"], observed=True)
-        .size()
-        .reset_index(name="samples")
-    )
-    valid = run_counts[run_counts["samples"] >= min_samples][["strategy", "scenario", "run_id"]]
-    invalid = run_counts[run_counts["samples"] < min_samples]
-
-    merged = df.merge(valid, on=["strategy", "scenario", "run_id"], how="inner")
-    if not invalid.empty:
-        dropped = ", ".join(
-            f"{r.strategy}/{r.scenario}/{r.run_id} (N={int(r.samples)})"
-            for r in invalid.itertuples(index=False)
-        )
-        print(f"[WARN] Excluyendo runs con pocas muestras (<{min_samples}): {dropped}")
-
-    if prom is not None and not prom.empty:
-        prom = prom.merge(valid, on=["strategy", "scenario", "run_id"], how="inner")
-    return merged, prom
-
-
-def _fmt_ms(x, _):
-    return f"{x:,.0f}"
-
-
-def _save_figure(fig, out: Path, basename: str, formats: list = None):
-    """Helper para guardar figuras en múltiples formatos."""
-    if formats is None:
-        formats = SAVE_FORMATS
-    for fmt in formats:
-        filepath = out / f"{basename}.{fmt}"
-        fig.savefig(filepath, bbox_inches="tight", dpi=300 if fmt == "png" else None)
-    plt.close(fig)
-    fmts_str = "/".join(f".{f}" for f in formats)
-    print(f"  [OK] {basename}{fmts_str}")
-
-
-# ════════════════════════════════════════════════════════════════════
-# ESTADÍSTICAS
-# ════════════════════════════════════════════════════════════════════
-
-
-def run_statistics(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Por escenario:
-      - Kruskal-Wallis H entre las 3 estrategias
-      - Mann-Whitney U pairwise con corrección Bonferroni
-    """
-    from itertools import combinations
-
-    records = []
-    for scenario in _sort_scenarios(df["scenario"].unique()):
-        sub = df[df["scenario"] == scenario]
-        groups = {
-            s: sub[sub["strategy"] == s]["latency_ms"].values
-            for s in STRATEGY_ORDER
-            if s in sub["strategy"].unique()
-        }
-        if len(groups) < 2:
-            continue
-
-        kw_stat, kw_p = stats.kruskal(*groups.values())
-        pairs = list(combinations(groups.keys(), 2))
-        bonf = len(pairs)
-        pairwise = {}
-        for a, b in pairs:
-            _, p = stats.mannwhitneyu(groups[a], groups[b], alternative="two-sided")
-            pairwise[f"{a}_vs_{b}_p_adj"] = round(min(p * bonf, 1.0), 6)
-
-        records.append(
-            {
-                "escenario": SCENARIO_LABELS.get(scenario, scenario),
-                "kruskal_H": round(kw_stat, 4),
-                "kruskal_p": round(kw_p, 6),
-                "significant": "si" if kw_p < 0.05 else "no",
-                **pairwise,
-            }
-        )
-
-    return pd.DataFrame(records)
-
-
-# ════════════════════════════════════════════════════════════════════
-# FIGURE — Boxplot anotado: Latencia E2E
-# ════════════════════════════════════════════════════════════════════
-
-
-def figure_latency_boxplot(df: pd.DataFrame, out: Path):
-    """
-    Boxplot por estrategia y escenario con anotaciones directas de
-    p50 / p95 / p99 + IQR y CV% impresos en cada caja.
-    Publication-ready con soporte para LaTeX.
-    """
-    scenarios = _sort_scenarios(df["scenario"].unique())
-    n = len(scenarios)
-    fig_width = min(FIG_W * n, 14)
-    fig, axes = plt.subplots(1, n, figsize=(fig_width, FIG_H + 0.5), sharey=True, squeeze=False)
-    axes = axes[0]
-
-    for i, scenario in enumerate(scenarios):
-        sub = df[df["scenario"] == scenario]
-        order = [s for s in STRATEGY_ORDER if s in sub["strategy"].unique()]
-        if not order:
-            continue
-
-        bp = axes[i].boxplot(
-            [sub[sub["strategy"] == s]["latency_ms"].values for s in order],
-            positions=range(len(order)),
-            patch_artist=True,
-            showfliers=False,
-            widths=0.5,
-            medianprops=dict(color="#D32F2F", linewidth=2),
-            whiskerprops=dict(linewidth=1.0, color="#333"),
-            capprops=dict(linewidth=1.0, color="#333"),
-            boxprops=dict(linewidth=1.0),
-        )
-
-        for patch, strat in zip(bp["boxes"], order):
-            patch.set_facecolor(GRAYSCALE_FACE.get(strat, "#9E9E9E"))
-            patch.set_alpha(0.9)
-            patch.set_hatch(HATCHES.get(strat, ""))
-            patch.set_edgecolor("#333")
-
-        # Etiquetas compactas por caja: cuartiles Q1, Q2, Q3
-        for x_idx, strat in enumerate(order):
-            lat = sub[sub["strategy"] == strat]["latency_ms"]
-            if lat.empty:
-                continue
-            q1 = lat.quantile(0.25)
-            q2 = lat.quantile(0.50)
-            q3 = lat.quantile(0.75)
-            axes[i].text(
-                x_idx + 0.28,
-                q2,
-                f"Q1 {q1:.0f}\nQ2 {q2:.0f}\nQ3 {q3:.0f}",
-                ha="left",
-                va="center",
-                fontsize=7.5,
-                color="#222",
-            )
-
-        scenario_label = SCENARIO_LABELS.get(scenario, scenario)
-        axes[i].set_title(scenario_label, fontsize=10, fontweight="bold", pad=6)
-        axes[i].set_xlabel("")
-        axes[i].set_xticks(range(len(order)))
-        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
-        axes[i].set_yscale("log")
-        axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(_fmt_ms))
-        axes[i].grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
-        if i == 0:
-            axes[i].set_ylabel("Latencia E2E ms", fontsize=10)
-
-    fig.suptitle(
-        "Distribucion de latencia E2E\nEje Y en escala logaritmica",
-        fontsize=11,
-        fontweight="bold",
-        y=0.98,
-    )
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
-    _save_figure(fig, out, "latency_distribution_boxplot")
-
-
-# ════════════════════════════════════════════════════════════════════
-# FIGURE — Generated vs Sink Visible Throughput
-# ════════════════════════════════════════════════════════════════════
-
-
-def figure_generated_vs_sink(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
-    """Compare throughput generated vs sink-visible per strategy and scenario."""
-    records = []
-    for (strategy, scenario, run_id), grp in df.groupby(["strategy", "scenario", "run_id"]):
-        if "visible_at" in grp.columns and "produced_at" in grp.columns:
-            dur = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-            tput_visible = len(grp) / dur if dur > 0 else 0.0
-        else:
-            tput_visible = len(grp) / 60.0
-        records.append(
-            {
-                "strategy": strategy,
-                "scenario": scenario,
-                "run_id": run_id,
-                "tput_visible": tput_visible,
-            }
-        )
-
-    base = pd.DataFrame(records)
-    if base.empty:
-        print("  [SKIP] generated_vs_sink_throughput.png (sin datos)")
-        return
-
-    if not prom.empty and "metric" in prom.columns:
-        prod = prom[prom["metric"] == "tput_produced_eps"].copy()
-        sink = prom[prom["metric"] == "tput_sink_eps"].copy()
-        prod = prod.groupby(["strategy", "scenario", "run_id"], as_index=False)["value"].mean().rename(columns={"value": "tput_generated"})
-        sink = sink.groupby(["strategy", "scenario", "run_id"], as_index=False)["value"].mean().rename(columns={"value": "tput_sink_write"})
-        base = base.merge(prod, on=["strategy", "scenario", "run_id"], how="left")
-        base = base.merge(sink, on=["strategy", "scenario", "run_id"], how="left")
-    else:
-        base["tput_generated"] = np.nan
-        base["tput_sink_write"] = np.nan
-
-    base["tput_generated"] = pd.to_numeric(base["tput_generated"], errors="coerce")
-    base["tput_sink_write"] = pd.to_numeric(base["tput_sink_write"], errors="coerce")
-
-    # Use only trustworthy generated values from producer telemetry.
-    base["generated_valid"] = base["tput_generated"].notna() & (base["tput_generated"] > 0)
-    base["tput_generated_clean"] = base["tput_generated"].where(base["generated_valid"], np.nan)
-    base["tput_sink_write"] = base["tput_sink_write"].where(base["tput_sink_write"] > 0, np.nan)
-
-    agg = base.groupby(["strategy", "scenario"], as_index=False).agg(
-        generated=("tput_generated_clean", "mean"),
-        sink_visible=("tput_visible", "mean"),
-        generated_coverage=("generated_valid", "mean"),
-    )
-    agg["generated_coverage"] = (agg["generated_coverage"] * 100).round(1)
-    agg["delivery_ratio_pct"] = np.where(
-        agg["generated"].notna() & (agg["generated"] > 0),
-        100 * agg["sink_visible"] / agg["generated"],
-        np.nan,
-    )
-
-    scenarios = _sort_scenarios(agg["scenario"].unique())
-    fig, axes = plt.subplots(1, len(scenarios), figsize=(max(5, len(scenarios) * 4.0), 4.8), sharey=True, squeeze=False)
-    axes = axes[0]
-
-    for i, scenario in enumerate(scenarios):
-        sub = agg[agg["scenario"] == scenario]
-        order = [s for s in STRATEGY_ORDER if s in sub["strategy"].values]
-        sub = sub.set_index("strategy").reindex(order)
-        x = np.arange(len(order))
-        w = 0.36
-
-        has_generated = sub["generated"].notna()
-        b1 = axes[i].bar(
-            x - w / 2,
-            sub["generated"].fillna(0),
-            width=w,
-            color="#BDBDBD",
-            edgecolor="#222",
-            hatch="//",
-            label="Generado",
-        )
-        b2 = axes[i].bar(
-            x + w / 2,
-            sub["sink_visible"].fillna(0),
-            width=w,
-            color="#616161",
-            edgecolor="#222",
-            hatch="",
-            label="Visible en sink",
-        )
-
-        for idx, (rect, ratio, cov, gen, gen_ok) in enumerate(
-            zip(
-                b2,
-                sub["delivery_ratio_pct"],
-                sub["generated_coverage"],
-                sub["generated"],
-                has_generated,
-            )
-        ):
-            if pd.notna(ratio):
-                txt = f"{ratio:.0f}%"
-                if cov < 100:
-                    txt = f"{ratio:.0f}%*"
-            else:
-                txt = "N/A"
-            axes[i].text(
-                rect.get_x() + rect.get_width() / 2,
-                rect.get_height() * 1.02 if rect.get_height() > 0 else 1,
-                txt,
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        # Mark missing generated telemetry explicitly
-        for rect, ok in zip(b1, has_generated):
-            if not ok:
-                axes[i].text(
-                    rect.get_x() + rect.get_width() / 2,
-                    1,
-                    "Sin telemetria\nde generacion",
-                    ha="center",
-                    va="bottom",
-                    fontsize=7,
-                    color="#444",
-                )
-
-        axes[i].set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
-        axes[i].set_xticks(x)
-        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
-        axes[i].yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        axes[i].grid(axis="y", linestyle="--", alpha=0.3)
-        if i == 0:
-            axes[i].set_ylabel("Promedio de eventos por segundo")
-
-    handles = [
-        Patch(facecolor="#BDBDBD", edgecolor="#222", hatch="//", label="Generado"),
-        Patch(facecolor="#616161", edgecolor="#222", hatch="", label="Visible en sink"),
-    ]
-    fig.legend(handles=handles, loc="upper right", framealpha=0.95)
-    fig.suptitle("Promedio de eventos por segundo generado y visible", fontsize=12, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 0.9, 0.95])
-    _save_figure(fig, out, "generated_vs_sink_throughput")
-
-
-
-
-# ════════════════════════════════════════════════════════════════════
-# CHART 03 — Tiempo de recuperación ante fallos
-# ════════════════════════════════════════════════════════════════════
-
-
-def chart_fault_recovery(fault_df: pd.DataFrame, out: Path):
-    """
-    Barras horizontales agrupadas por estrategia.
-    Muestra media ± std del tiempo de recuperación en segundos.
-    """
-    if fault_df.empty:
-        print("  [SKIP] 03_fault_recovery.png (sin datos)")
-        return
-
-    agg = (
-        fault_df.groupby("strategy")["recovery_time_s"]
-        .agg(["mean", "std"])
-        .reset_index()
-    )
-    agg.columns = ["strategy", "mean", "std"]
-    agg = agg[agg["strategy"].isin(STRATEGY_ORDER)]
-    agg = (
-        agg.set_index("strategy")
-        .reindex([s for s in STRATEGY_ORDER if s in agg.index])
-        .reset_index()
-    )
-
-    fig, ax = plt.subplots(figsize=(7, max(3, len(agg) * 1.2)))
-
-    colors = [PALETTE.get(s, "#90A4AE") for s in agg["strategy"]]
-    bars = ax.barh(
-        [STRATEGY_LABELS.get(s, s).replace("\n", " ") for s in agg["strategy"]],
-        agg["mean"],
-        xerr=agg["std"].fillna(0),
-        color=colors,
-        alpha=0.82,
-        height=0.5,
-        error_kw=dict(elinewidth=1.4, capsize=5, ecolor="#333"),
-        zorder=3,
-    )
-
-    # Etiquetas de valor
-    for bar, (_, row) in zip(bars, agg.iterrows()):
-        ax.text(
-            row["mean"] + (agg["mean"].max() * 0.02),
-            bar.get_y() + bar.get_height() / 2,
-            f"{row['mean']:.1f}s",
-            va="center",
-            ha="left",
-            fontsize=10,
-            color="#333",
-        )
-
-    ax.set_xlabel("Tiempo de recuperación (s)", fontsize=11)
-    ax.set_title(
-        "Chart 03 — Tiempo de Recuperación ante Fallos\n"
-        "(media ± std; escenario: medium-load)",
-        fontsize=12,
-    )
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:.0f}s"))
-    ax.invert_yaxis()
-
-    fig.tight_layout()
-    fig.savefig(out / "03_fault_recovery.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 03_fault_recovery.png")
-
-
-# ════════════════════════════════════════════════════════════════════
-# CHART 04 — Eficiencia de escalado
-# ════════════════════════════════════════════════════════════════════
-
-
-def chart_scaling_efficiency(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
-    """
-    Calcula eficiencia = (tput_N / tput_1) / N * 100 por estrategia.
-    Busca datos en runs con run_id "scaling_1w", "scaling_2w", "scaling_3w".
-    Si no existen, genera datos de ejemplo como placeholder.
-    """
-    # Intentar cargar datos de scaling desde latency_samples
-    scaling_df = df[df["run_id"].str.startswith("scaling_", na=False)].copy()
-
-    if scaling_df.empty and not prom.empty and "metric" in prom.columns:
-        # Intentar desde prometheus_snapshot
-        n_workers_prom = prom[prom["metric"] == "n_workers"]
-        tput_prom = prom[prom["metric"] == "tput_produced_eps"]
-        if not n_workers_prom.empty and not tput_prom.empty:
-            scaling_df = tput_prom.merge(
-                n_workers_prom[["strategy", "scenario", "run_id", "value"]].rename(
-                    columns={"value": "n_workers"}
-                ),
-                on=["strategy", "scenario", "run_id"],
-                how="inner",
-            )
-
-    # Calcular throughput por run desde latency_samples si tenemos datos de scaling
-    records = []
-    if not scaling_df.empty and "run_id" in scaling_df.columns:
-        for (strategy, run_id), grp in scaling_df.groupby(["strategy", "run_id"]):
-            n_str = run_id.replace("scaling_", "").replace("w", "")
-            try:
-                n_w = int(n_str)
-            except ValueError:
-                continue
-            if "visible_at" in grp.columns and "produced_at" in grp.columns:
-                dur = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-                tput = len(grp) / dur if dur > 0 else 0.0
-            else:
-                tput = len(grp) / 120.0  # 2 min por defecto
-            records.append({"strategy": strategy, "n_workers": n_w, "tput": tput})
-
-    if not records:
-        print("  [SKIP] 04_scaling_efficiency.png (sin datos de profiling)")
-        return
-
-    sc_df = pd.DataFrame(records)
-
-    # Calcular eficiencia respecto a 1 worker
-    eff_records = []
+def _lag_coverage_by_strategy(lag_ts: pd.DataFrame) -> dict[str, bool]:
+    coverage = {strategy: False for strategy in STRATEGY_ORDER}
+    if lag_ts.empty or "lag_source" not in lag_ts.columns:
+        return coverage
+    real = lag_ts[lag_ts["lag_source"] == "real_prometheus"]
     for strategy in STRATEGY_ORDER:
-        sub = sc_df[sc_df["strategy"] == strategy]
-        if sub.empty:
+        coverage[strategy] = not real[real["strategy"] == strategy].empty
+    return coverage
+
+
+def load_resources_timeseries(results_dir: Path) -> pd.DataFrame:
+    frames = []
+    for csv_path in results_dir.rglob("resources_timeseries.csv"):
+        rel = csv_path.relative_to(results_dir).parts
+        if len(rel) < 4:
             continue
-        base_row = sub[sub["n_workers"] == 1]
-        if base_row.empty:
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
+        df = pd.read_csv(csv_path, on_bad_lines="skip")
+        if df.empty:
             continue
-        base = base_row["tput"].mean()
-        if base == 0:
+        for key, val in [("strategy", strategy), ("scenario", scenario), ("run_id", run_id)]:
+            if key not in df.columns:
+                df[key] = val
+        for col in ["cpu_cores", "mem_rss_bytes"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def apply_scope_filter(df: pd.DataFrame, scope: str) -> pd.DataFrame:
+    if df.empty or scope != "official" or "scenario" not in df.columns:
+        return df
+    return df[df["scenario"].isin(SCENARIO_ORDER)].copy()
+
+
+def build_run_inventory(results_dir: Path, scope: str) -> pd.DataFrame:
+    rows = []
+    for lat_path in results_dir.rglob("latency_samples.csv"):
+        rel = lat_path.relative_to(results_dir).parts
+        if len(rel) < 4:
             continue
-        for _, row in sub.iterrows():
-            n = row["n_workers"]
-            eff = (row["tput"] / base) / n * 100
-            eff_records.append(
-                {"strategy": strategy, "n_workers": n, "efficiency_pct": eff}
+        strategy, scenario, run_id = rel[0], rel[1], rel[2]
+        if scope == "official" and scenario not in SCENARIO_ORDER:
+            continue
+        rows.append({"strategy": strategy, "scenario": scenario, "run_id": run_id, "run_dir": str(lat_path.parent)})
+    return pd.DataFrame(rows).drop_duplicates() if rows else pd.DataFrame(columns=["strategy", "scenario", "run_id", "run_dir"])
+
+
+def run_validations(
+    results_dir: Path,
+    scope: str,
+    latency: pd.DataFrame,
+    run_metadata: pd.DataFrame,
+    run_summary: pd.DataFrame,
+    generator_summary: pd.DataFrame,
+    lag_ts: pd.DataFrame,
+) -> ValidationState:
+    state = ValidationState()
+    runs = build_run_inventory(results_dir, scope)
+    required = ["latency_samples.csv", "run_metadata.json", "run_summary.json", "generator_summary.json"]
+    missing = 0
+    for row in runs.itertuples(index=False):
+        run_dir = Path(row.run_dir)
+        for file in required:
+            if not (run_dir / file).exists():
+                missing += 1
+                state.report_warn(f"Missing {file} in {row.strategy}/{row.scenario}/{row.run_id}")
+    if missing == 0:
+        state.report_ok(f"{len(runs)}/{len(runs)} corridas oficiales validas")
+
+    if not run_summary.empty:
+        vis = pd.to_numeric(run_summary.get("visible_events", 0), errors="coerce").fillna(0)
+        gen = pd.to_numeric(run_summary.get("generated_events", 0), errors="coerce").fillna(0)
+        if bool((vis > gen).any()):
+            state.report_err("Hay corridas con visible_events > generated_events")
+        else:
+            state.report_ok("No hay eventos visibles > generados")
+
+        dr = pd.to_numeric(run_summary.get("delivery_ratio_pct", np.nan), errors="coerce")
+        invalid_dr = dr[(dr < 0) | (dr > 100)]
+        if invalid_dr.empty:
+            state.report_ok("Delivery ratio dentro de [0,100]")
+        else:
+            state.report_err("Delivery ratio fuera de rango [0,100]")
+
+        if not latency.empty:
+            lat_counts = (
+                latency.groupby(["strategy", "scenario", "run_id"], observed=True)
+                .size()
+                .reset_index(name="latency_rows")
             )
+            merged = run_summary.merge(lat_counts, on=["strategy", "scenario", "run_id"], how="left")
+            vis_vals = pd.to_numeric(merged.get("visible_events", 0), errors="coerce").fillna(0)
+            lat_vals = pd.to_numeric(merged.get("latency_rows", 0), errors="coerce").fillna(0)
+            if bool((vis_vals != lat_vals).any()):
+                state.report_err("visible_events no coincide con latency_samples.csv exportado")
+            else:
+                state.report_ok("visible_events coincide con latency_samples.csv exportado")
 
-    eff_df = pd.DataFrame(eff_records)
-    if eff_df.empty:
-        print("  [SKIP] 04_scaling_efficiency.png (datos insuficientes)")
-        return
+    if not run_metadata.empty and "official_duration_seconds" in run_metadata.columns:
+        dvals = pd.to_numeric(run_metadata["official_duration_seconds"], errors="coerce").dropna().unique()
+        if len(dvals) == 1 and int(dvals[0]) == 300:
+            state.report_ok("Todos los escenarios tienen duracion oficial = 300 s")
+        elif len(dvals) == 1:
+            state.report_warn(f"Duracion oficial uniforme pero distinta de 300s: {int(dvals[0])}")
+        else:
+            state.report_err("Duracion oficial no uniforme entre corridas")
 
-    fig, ax = plt.subplots(figsize=(7, 5))
-    x = np.arange(eff_df["n_workers"].nunique())
-    n_workers_vals = sorted(eff_df["n_workers"].unique())
-    w = 0.25
+    if not run_summary.empty and "generation_duration_seconds" in run_summary.columns:
+        gen_dur = pd.to_numeric(run_summary["generation_duration_seconds"], errors="coerce")
+        off_dur = pd.to_numeric(run_summary.get("official_duration_seconds", np.nan), errors="coerce")
+        mismatch = (gen_dur - off_dur).abs() > 1.0
+        if bool(mismatch.fillna(False).any()):
+            state.report_err("generation_duration_seconds no coincide con official_duration_seconds")
+        else:
+            state.report_ok("generation_duration_seconds coincide con la duracion oficial")
 
-    for k, strategy in enumerate(STRATEGY_ORDER):
-        sub = eff_df[eff_df["strategy"] == strategy]
-        if sub.empty:
-            continue
-        effs = [
-            sub[sub["n_workers"] == n]["efficiency_pct"].mean()
-            if not sub[sub["n_workers"] == n].empty
-            else np.nan
-            for n in n_workers_vals
-        ]
-        offset = (k - 1) * w
-        bars = ax.bar(
-            x + offset,
-            effs,
-            w,
-            label=STRATEGY_LABELS.get(strategy, strategy).replace("\n", " "),
-            color=PALETTE.get(strategy, "#90A4AE"),
-            alpha=0.82,
-            zorder=3,
-        )
-        for bar, val in zip(bars, effs):
-            if not np.isnan(val):
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + 0.5,
-                    f"{val:.0f}%",
-                    ha="center",
-                    va="bottom",
-                    fontsize=8.5,
-                )
-
-    # Línea de eficiencia perfecta (100%)
-    ax.axhline(
-        100,
-        color="#E53935",
-        linestyle="--",
-        linewidth=1.4,
-        label="Eficiencia ideal (100%)",
-        alpha=0.85,
-    )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [f"{n} worker{'s' if n > 1 else ''}" for n in n_workers_vals], fontsize=10
-    )
-    ax.set_ylabel("Eficiencia de escalado (%)")
-    ax.set_ylim(0, 115)
-    ax.legend(fontsize=9, framealpha=0.9)
-    ax.set_title(
-        "Chart 04 — Eficiencia de Escalado Horizontal\n"
-        "Efic. = (tput_N / tput_1) / N × 100%",
-        fontsize=12,
-    )
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:.0f}%"))
-
-    fig.tight_layout()
-    fig.savefig(out / "04_scaling_efficiency.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 04_scaling_efficiency.png")
-
-
-# ════════════════════════════════════════════════════════════════════
-# FIGURE — Resource Efficiency (CPU vs MB/event)
-# ════════════════════════════════════════════════════════════════════
-
-
-def figure_resource_utilization(df: pd.DataFrame, prom: pd.DataFrame, cloudwatch: pd.DataFrame, out: Path):
-    """
-    Scatter: eje X = CPU total (cores), eje Y = memoria RSS MB por evento.
-    Cada punto = un run. Colorear por estrategia.
-    Si no hay datos de Prometheus, derivar estimaciones desde latency_samples.
-    """
-    records = []
-
-    if not prom.empty and "metric" in prom.columns:
-        cpu_df = prom[prom["metric"] == "cpu_total_cores"].copy()
-        mem_df = prom[prom["metric"] == "mem_rss_bytes"].copy()
-        e2e_df_prom = prom[prom["metric"] == "tput_sink_eps"].copy()
-        if e2e_df_prom.empty:
-            e2e_df_prom = prom[prom["metric"] == "tput_produced_eps"].copy()
-
-        for (strategy, scenario, run_id), grp_cpu in cpu_df.groupby(
-            ["strategy", "scenario", "run_id"]
-        ):
-            cpu_val = grp_cpu["value"].mean()
-            mem_row = mem_df[
-                (mem_df["strategy"] == strategy)
-                & (mem_df["scenario"] == scenario)
-                & (mem_df["run_id"] == run_id)
-            ]
-            tput_row = e2e_df_prom[
-                (e2e_df_prom["strategy"] == strategy)
-                & (e2e_df_prom["scenario"] == scenario)
-                & (e2e_df_prom["run_id"] == run_id)
-            ]
-            mem_val = mem_row["value"].mean() if not mem_row.empty else np.nan
-            tput_val = tput_row["value"].mean() if not tput_row.empty else 1.0
-            if np.isnan(mem_val):
-                continue
-            if np.isnan(tput_val) or tput_val <= 0:
-                run_lat = df[
-                    (df["strategy"] == strategy)
-                    & (df["scenario"] == scenario)
-                    & (df["run_id"] == run_id)
-                ]
-                if not run_lat.empty and "visible_at" in run_lat.columns and "produced_at" in run_lat.columns:
-                    run_dur = (run_lat["visible_at"].max() - run_lat["produced_at"].min()) / 1000.0
-                    tput_val = len(run_lat) / run_dur if run_dur > 0 else np.nan
-            mem_mb_per_event = (mem_val / 1_048_576 / tput_val) if (not np.isnan(tput_val) and tput_val > 0) else np.nan
-            records.append(
-                {
-                    "strategy": strategy,
-                    "scenario": scenario,
-                    "run_id": run_id,
-                    "cpu_cores": cpu_val,
-                    "mem_mb_per_event": mem_mb_per_event,
-                    "source": "prometheus",
-                }
-            )
-
-    # Fallback: si Prometheus no trajo recursos útiles, usar CloudWatch host-level.
-    prom_valid = False
-    if records:
-        tmp_df = pd.DataFrame(records)
-        prom_valid = bool(
-            ((tmp_df["cpu_cores"] > 0) & (tmp_df["mem_mb_per_event"] > 0)).any()
-        )
-
-    if (not prom_valid) and (cloudwatch is not None) and (not cloudwatch.empty):
-        print("  [INFO] Recursos desde CloudWatch (fallback), Prometheus sin datos útiles")
-        cw = cloudwatch.copy()
-        cpu = cw[cw["metric"] == "CPUUtilization"].copy()
-        mem = cw[cw["metric"] == "mem_used_percent"].copy()
-
-        for (strategy, scenario, run_id), grp_cpu in cpu.groupby(["strategy", "scenario", "run_id"]):
-            cpu_pct = grp_cpu["value"].mean()
-            mem_row = mem[
-                (mem["strategy"] == strategy)
-                & (mem["scenario"] == scenario)
-                & (mem["run_id"] == run_id)
-            ]
-            mem_pct = mem_row["value"].mean() if not mem_row.empty else np.nan
-            if np.isnan(cpu_pct) or np.isnan(mem_pct):
-                continue
-
-            # Conversión aproximada para mantener ejes comparables con Prometheus:
-            # - cpu_cores ~ fracción de 4 cores (normalizado cloud-level)
-            cpu_cores = max(0.0, (cpu_pct / 100.0) * 4.0)
-
-            run_lat = df[
-                (df["strategy"] == strategy)
-                & (df["scenario"] == scenario)
-                & (df["run_id"] == run_id)
-            ]
-            if run_lat.empty or "visible_at" not in run_lat.columns or "produced_at" not in run_lat.columns:
-                continue
-            run_dur = (run_lat["visible_at"].max() - run_lat["produced_at"].min()) / 1000.0
-            tput_val = len(run_lat) / run_dur if run_dur > 0 else np.nan
-            if np.isnan(tput_val) or tput_val <= 0:
-                continue
-
-            # Aproximación: mem_pct -> MB ocupados de host (suponiendo 8 GiB nominales promedio en cluster)
-            mem_mb = (mem_pct / 100.0) * 8192.0
-            mem_mb_per_event = mem_mb / tput_val if tput_val > 0 else np.nan
-            if np.isnan(mem_mb_per_event):
-                continue
-
-            records.append(
-                {
-                    "strategy": strategy,
-                    "scenario": scenario,
-                    "run_id": run_id,
-                    "cpu_cores": cpu_cores,
-                    "mem_mb_per_event": mem_mb_per_event,
-                    "source": "cloudwatch",
-                }
-            )
-
-    if not records:
-        print("  [SKIP] resource_efficiency_scatter.png (sin datos)")
-        return
-
-    res_df = pd.DataFrame(records).dropna(subset=["cpu_cores", "mem_mb_per_event"])
-    if res_df.empty:
-        print("  [SKIP] resource_efficiency_scatter.png")
-        return
-
-    valid_points = res_df[(res_df["cpu_cores"] > 0) & (res_df["mem_mb_per_event"] > 0)]
-    if valid_points.empty:
-        print("  [SKIP] resource_efficiency_scatter.png (recursos no válidos: CPU/Mem en cero)")
-        return
-    res_df = valid_points
-
-    scenarios = _sort_scenarios(res_df["scenario"].unique())
-    n = len(scenarios)
-    fig, axes = plt.subplots(1, n, figsize=(max(9, 4.2 * n), 5.6), sharey=True, squeeze=False)
-    axes = axes[0]
-
-    marker_map = {"batch": "o", "microbatch": "s", "streaming": "D"}
-
-    source_note = "Prometheus"
-    if "source" in res_df.columns and (res_df["source"] == "cloudwatch").any():
-        source_note = "CloudWatch"
-
-    for i, scenario in enumerate(scenarios):
-        ax = axes[i]
-        scen_df = res_df[res_df["scenario"] == scenario]
-
-        plotted_points = []
-        for strategy in STRATEGY_ORDER:
-            sub = scen_df[scen_df["strategy"] == strategy]
+    if not run_metadata.empty and "target_eps" in run_metadata.columns:
+        ok = True
+        for scenario, expected in SCENARIO_TARGET_EPS.items():
+            sub = run_metadata[run_metadata["scenario"] == scenario]
             if sub.empty:
                 continue
-
-            cx = sub["cpu_cores"].mean()
-            cy = sub["mem_mb_per_event"].mean()
-
-            ax.scatter(
-                [cx],
-                [cy],
-                label=STRATEGY_LABELS_SHORT.get(strategy, strategy),
-                color=GRAYSCALE_FACE.get(strategy, "#9E9E9E"),
-                s=170,
-                alpha=0.92,
-                edgecolors="#222",
-                linewidths=1.0,
-                marker=marker_map.get(strategy, "o"),
-                zorder=4,
-            )
-
-            plotted_points.append((strategy, cx, cy))
-
-        # Etiquetas compactas C/M con offsets anti-colisión
-        base_offsets = {
-            "batch": (6, 6),
-            "microbatch": (-28, 8),
-            "streaming": (6, -12),
-        }
-        candidate_offsets = [
-            (6, 6),
-            (-28, 8),
-            (6, -12),
-            (-28, -12),
-            (20, 14),
-            (-36, 14),
-        ]
-
-        x_vals = [p[1] for p in plotted_points]
-        y_vals = [p[2] for p in plotted_points]
-        x_span = (max(x_vals) - min(x_vals)) if len(x_vals) >= 2 else 1.0
-        y_span = (max(y_vals) - min(y_vals)) if len(y_vals) >= 2 else 1.0
-        x_near = max(0.06, x_span * 0.22)
-        y_near = max(0.001, y_span * 0.22)
-
-        used_offsets = []
-        for strategy, cx, cy in plotted_points:
-            offset = base_offsets.get(strategy, (6, 6))
-            for _, px, py, p_off in used_offsets:
-                if abs(cx - px) <= x_near and abs(cy - py) <= y_near and p_off == offset:
-                    for cand in candidate_offsets:
-                        if cand != p_off:
-                            offset = cand
-                            break
-
-            ax.annotate(
-                f"C {cx:.2f} M {cy:.3f}",
-                xy=(cx, cy),
-                xytext=offset,
-                textcoords="offset points",
-                fontsize=7,
-                color="#222",
-                bbox=dict(facecolor="white", edgecolor="#777", boxstyle="round,pad=0.10", alpha=0.75),
-                zorder=5,
-            )
-            used_offsets.append((strategy, cx, cy, offset))
-
-        ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
-        ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
-        ax.set_xlabel("CPU total cores", fontsize=10)
-        if i == 0:
-            ax.set_ylabel("Memoria RSS por evento MB evento", fontsize=10)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    uniq = {}
-    for h, l in zip(handles, labels):
-        if l not in uniq:
-            uniq[l] = h
-    fig.legend(list(uniq.values()), list(uniq.keys()), loc="upper right", framealpha=0.95, title=source_note)
-
-    fig.suptitle("Eficiencia de recursos", fontsize=11, fontweight="bold", y=0.98)
-    fig.tight_layout(rect=[0, 0, 0.90, 0.94])
-    _save_figure(fig, out, "resource_efficiency_scatter")
-
-
-# ════════════════════════════════════════════════════════════════════
-# FIGURE — Kafka Consumer Lag / Backpressure
-# ════════════════════════════════════════════════════════════════════
-
-
-def figure_kafka_lag(df: pd.DataFrame, prom: pd.DataFrame, out: Path):
-    """
-    Barras de Kafka Consumer Lag promedio por estrategia × escenario
-    con línea de umbral rojo en KAFKA_LAG_THRESHOLD.
-    Si no hay datos Prometheus, estima el lag desde la diferencia
-    entre eventos producidos y visibles por run.
-    """
-    records = []
-
-    def _fallback_lag_estimate(strategy: str, scenario: str) -> tuple[float, float]:
-        sub = df[(df["strategy"] == strategy) & (df["scenario"] == scenario)]
-        if sub.empty:
-            return 0.0, 0.0
-        by_run = []
-        for (_, _, _), grp in sub.groupby(["strategy", "scenario", "run_id"]):
-            if "visible_at" in grp.columns and "produced_at" in grp.columns:
-                mean_lat_s = grp["latency_ms"].mean() / 1000.0
-                dur_s = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-                tput = len(grp) / dur_s if dur_s > 0 else 1.0
-                by_run.append(max(0.0, mean_lat_s * tput))
-        if by_run:
-            return float(np.mean(by_run)), float(np.std(by_run))
-        lag_map = {"batch": 50000.0, "microbatch": 8000.0, "streaming": 1200.0}
-        return lag_map.get(strategy, 5000.0), 0.0
-
-    # Prefer deterministic lag estimate from latency samples for consistency.
-    for strategy in sorted(df["strategy"].unique()):
-        for scenario in sorted(df[df["strategy"] == strategy]["scenario"].unique()):
-            lag_mean, lag_std = _fallback_lag_estimate(strategy, scenario)
-            records.append(
-                {
-                    "strategy": strategy,
-                    "scenario": scenario,
-                    "lag_mean": lag_mean,
-                    "lag_std": lag_std,
-                }
-            )
-
-    lag_agg = (
-        pd.DataFrame(records)
-        .groupby(["strategy", "scenario"])
-        .agg(lag_mean=("lag_mean", "mean"), lag_std=("lag_std", "mean"))
-        .reset_index()
-    )
-
-    scenarios = _sort_scenarios(lag_agg["scenario"].unique())
-    n = len(scenarios)
-    fig, axes = plt.subplots(1, n, figsize=(FIG_W * n, 5), sharey=True, squeeze=False)
-    axes = axes[0]
-
-    for i, scenario in enumerate(scenarios):
-        sub = lag_agg[lag_agg["scenario"] == scenario]
-        order = [s for s in STRATEGY_ORDER if s in sub["strategy"].values]
-        sub = sub.set_index("strategy").reindex(order)
-        x = np.arange(len(order))
-
-        bars = axes[i].bar(
-            x,
-            sub["lag_mean"].fillna(0),
-            yerr=sub["lag_std"].fillna(0),
-            color=[GRAYSCALE_FACE.get(s, "#9E9E9E") for s in order],
-            alpha=0.82,
-            width=0.5,
-            hatch="//",
-            edgecolor="#222",
-            error_kw=dict(elinewidth=1.2, capsize=4, ecolor="#555"),
-            zorder=3,
-        )
-        for bar, val in zip(bars, sub["lag_mean"].fillna(0)):
-            axes[i].text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() * 1.03,
-                f"{val:,.0f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        # Umbral crítico
-        axes[i].axhline(
-            KAFKA_LAG_THRESHOLD,
-            color="#E53935",
-            linestyle="--",
-            linewidth=1.5,
-            label=f"Umbral crítico ({KAFKA_LAG_THRESHOLD:,})",
-            alpha=0.9,
-            zorder=5,
-        )
-
-        axes[i].set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=11)
-        axes[i].set_xticks(x)
-        axes[i].set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in order], fontsize=9)
-        axes[i].set_xlabel("")
-        if i == 0:
-            axes[i].set_ylabel("Consumer lag mensajes")
-        axes[i].yaxis.set_major_formatter(
-            ticker.FuncFormatter(lambda v, _: f"{v:,.0f}")
-        )
-        if i == n - 1:
-            axes[i].legend(fontsize=8, loc="upper right")
-
-    fig.suptitle("Kafka consumer lag por estrategia y escenario", fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    _save_figure(fig, out, "kafka_consumer_lag")
-
-
-def figure_advanced_load_profile_timeline(timeline_df: pd.DataFrame, out: Path):
-    if timeline_df.empty:
-        print("  [SKIP] advanced_load_profile_timeline.png (sin timeline del generator)")
-        return
-
-    scenarios = _sort_scenarios(timeline_df["scenario"].unique())
-    fig, axes = plt.subplots(
-        1,
-        len(scenarios),
-        figsize=(max(5, len(scenarios) * 4.5), 4.2),
-        sharey=True,
-        squeeze=False,
-    )
-    axes = axes[0]
-
-    for i, scenario in enumerate(scenarios):
-        ax = axes[i]
-        scen_df = timeline_df[timeline_df["scenario"] == scenario].copy()
-        if scen_df.empty:
-            continue
-
-        for strategy in STRATEGY_ORDER:
-            strat_df = scen_df[scen_df["strategy"] == strategy].copy()
-            if strat_df.empty:
-                continue
-
-            strat_df = (
-                strat_df.groupby("elapsed_s", as_index=False)["current_rate"]
-                .mean()
-                .sort_values("elapsed_s")
-            )
-            ax.plot(
-                strat_df["elapsed_s"],
-                strat_df["current_rate"],
-                label=STRATEGY_LABELS_SHORT.get(strategy, strategy),
-                color=PALETTE.get(strategy, "#555555"),
-            )
-
-        ax.set_title(SCENARIO_LABELS.get(scenario, scenario), fontsize=10, fontweight="bold")
-        ax.set_xlabel("Tiempo transcurrido s", fontsize=9)
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.5)
-        if i == 0:
-            ax.set_ylabel("Tasa objetivo ev/s", fontsize=9)
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="upper right", framealpha=0.95)
-    fig.suptitle("Perfil de carga avanzado del generador", fontsize=11, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 0.92, 0.94])
-    _save_figure(fig, out, "advanced_load_profile_timeline")
-
-
-def figure_cloudwatch_overview(cloudwatch: pd.DataFrame, out: Path):
-    """
-    Heatmap compacto con promedios host-level de CloudWatch por nodo.
-    Útil para anexar evidencia de consumo real en infraestructura AWS.
-    """
-    if cloudwatch is None or cloudwatch.empty:
-        print("  [SKIP] cloudwatch_host_overview.png (sin cloudwatch_snapshot.csv)")
-        return
-
-    cw = cloudwatch.copy()
-    cw["value"] = pd.to_numeric(cw["value"], errors="coerce")
-    cw = cw.dropna(subset=["value", "metric", "node"])
-
-    metrics_keep = ["CPUUtilization", "mem_used_percent", "disk_used_percent", "NetworkIn", "NetworkOut"]
-    cw = cw[cw["metric"].isin(metrics_keep)]
-    if cw.empty:
-        print("  [SKIP] cloudwatch_host_overview.png (métricas CloudWatch insuficientes)")
-        return
-
-    # Escalar red a MB para que sea interpretable en tabla compacta
-    net_mask = cw["metric"].isin(["NetworkIn", "NetworkOut"])
-    cw.loc[net_mask, "value"] = cw.loc[net_mask, "value"] / (1024 * 1024)
-
-    metric_labels = {
-        "CPUUtilization": "CPU %",
-        "mem_used_percent": "Mem %",
-        "disk_used_percent": "Disco %",
-        "NetworkIn": "Red In (MB)",
-        "NetworkOut": "Red Out (MB)",
-    }
-
-    agg = (
-        cw.groupby(["node", "metric"], observed=True)["value"]
-        .mean()
-        .reset_index()
-    )
-    agg["metric"] = agg["metric"].map(metric_labels)
-
-    node_order = ["producer", "broker", "compute", "sink"]
-    node_labels = {
-        "producer": "Producer",
-        "broker": "Broker",
-        "compute": "Compute",
-        "sink": "Sink",
-    }
-    agg["node"] = pd.Categorical(agg["node"], categories=node_order, ordered=True)
-    agg = agg.sort_values(["node", "metric"])
-    agg["node"] = agg["node"].astype(str).map(node_labels)
-
-    pivot = agg.pivot(index="node", columns="metric", values="value")
-    desired_cols = ["CPU %", "Mem %", "Disco %", "Red In (MB)", "Red Out (MB)"]
-    pivot = pivot[[c for c in desired_cols if c in pivot.columns]]
-
-    fig, ax = plt.subplots(figsize=(8.2, 3.7))
-    sns.heatmap(
-        pivot,
-        cmap="Greys",
-        annot=True,
-        fmt=".2f",
-        linewidths=0.5,
-        linecolor="#D0D0D0",
-        cbar=True,
-        cbar_kws={"shrink": 0.85, "label": "Promedio"},
-        ax=ax,
-    )
-    ax.set_title("Resumen de consumo CloudWatch por nodo", fontsize=11, fontweight="bold", pad=10)
-    ax.set_xlabel("")
-    ax.set_ylabel("")
-    plt.xticks(rotation=15, ha="right")
-    plt.yticks(rotation=0)
-
-    fig.tight_layout()
-    _save_figure(fig, out, "cloudwatch_host_overview")
-
-
-def _prepare_cloudwatch_hw(cloudwatch: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza snapshots CloudWatch a nivel run para nodos broker/compute."""
-    if cloudwatch is None or cloudwatch.empty:
-        return pd.DataFrame()
-
-    required_cols = {"strategy", "scenario", "run_id", "node", "metric", "value"}
-    if not required_cols.issubset(set(cloudwatch.columns)):
-        return pd.DataFrame()
-
-    cw = cloudwatch.copy()
-    cw["value"] = pd.to_numeric(cw["value"], errors="coerce")
-    cw = cw.dropna(subset=["value"])
-    cw = cw[cw["node"].isin(["broker", "compute"])]
-    if cw.empty:
-        return pd.DataFrame()
-
-    # Un valor promedio por run, nodo y métrica
-    cw = (
-        cw.groupby(["strategy", "scenario", "run_id", "node", "metric"], observed=True)["value"]
-        .mean()
-        .reset_index()
-    )
-    return cw
-
-
-def _figure_hw_bars_by_strategy(
-    hw: pd.DataFrame,
-    metric: str,
-    out: Path,
-    basename: str,
-    title: str,
-    ylabel: str,
-):
-    if hw.empty:
-        print(f"  [SKIP] {basename}.png (sin datos CloudWatch)")
-        return
-
-    sub = hw[hw["metric"] == metric].copy()
-    if sub.empty:
-        print(f"  [SKIP] {basename}.png (métrica '{metric}' no disponible)")
-        return
-
-    agg = (
-        sub.groupby(["strategy", "node"], observed=True)["value"]
-        .agg(["mean", "std", "count"])
-        .reset_index()
-    )
-    agg["std"] = agg["std"].fillna(0.0)
-
-    strat_order = [s for s in STRATEGY_ORDER if s in agg["strategy"].unique()]
-    node_order = ["broker", "compute"]
-    node_labels = {"broker": "Broker", "compute": "Compute"}
-    node_colors = {"broker": "#9E9E9E", "compute": "#616161"}
-    node_hatches = {"broker": "//", "compute": ""}
-
-    x = np.arange(len(strat_order))
-    w = 0.35
-    fig, ax = plt.subplots(figsize=(8.2, 4.8))
-
-    for i, node in enumerate(node_order):
-        vals, errs = [], []
-        for s in strat_order:
-            row = agg[(agg["strategy"] == s) & (agg["node"] == node)]
-            vals.append(float(row["mean"].iloc[0]) if not row.empty else 0.0)
-            errs.append(float(row["std"].iloc[0]) if not row.empty else 0.0)
-
-        bars = ax.bar(
-            x + (i - 0.5) * w,
-            vals,
-            width=w,
-            yerr=errs,
-            capsize=4,
-            color=node_colors[node],
-            edgecolor="#222",
-            linewidth=0.9,
-            hatch=node_hatches[node],
-            alpha=0.9,
-            label=node_labels[node],
-            zorder=3,
-        )
-        for b, v in zip(bars, vals):
-            ax.text(
-                b.get_x() + b.get_width() / 2,
-                b.get_height() * 1.02 if b.get_height() > 0 else 0.05,
-                f"{v:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                color="#222",
-            )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in strat_order], fontsize=10)
-    ax.set_ylabel(ylabel, fontsize=10)
-    ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
-    ax.legend(framealpha=0.95, fontsize=9)
-    ax.grid(True, axis="y", alpha=0.25, linestyle="--", linewidth=0.5)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    _save_figure(fig, out, basename)
-
-
-def figure_hw_cpu_heatmap_by_strategy_scenario(hw: pd.DataFrame, out: Path):
-    if hw.empty:
-        print("  [SKIP] hardware_cpu_heatmap_strategy_scenario.png (sin datos CloudWatch)")
-        return
-
-    sub = hw[hw["metric"] == "CPUUtilization"].copy()
-    if sub.empty:
-        print("  [SKIP] hardware_cpu_heatmap_strategy_scenario.png (CPUUtilization no disponible)")
-        return
-
-    scenarios = _sort_scenarios(sub["scenario"].unique())
-    nodes = ["broker", "compute"]
-    node_titles = {"broker": "Broker", "compute": "Compute"}
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.3), sharey=True)
-
-    for i, node in enumerate(nodes):
-        node_df = sub[sub["node"] == node]
-        pivot = (
-            node_df.groupby(["strategy", "scenario"], observed=True)["value"]
-            .mean()
-            .reset_index()
-            .pivot(index="strategy", columns="scenario", values="value")
-        )
-        strat_order = [s for s in STRATEGY_ORDER if s in pivot.index]
-        pivot = pivot.reindex(index=strat_order, columns=scenarios)
-        pivot.index = [STRATEGY_LABELS_SHORT.get(s, s) for s in pivot.index]
-        pivot.columns = [SCENARIO_LABELS.get(s, s) for s in pivot.columns]
-
-        sns.heatmap(
-            pivot,
-            cmap="Greys",
-            annot=True,
-            fmt=".2f",
-            linewidths=0.5,
-            linecolor="#D0D0D0",
-            cbar=(i == 1),
-            cbar_kws={"shrink": 0.85, "label": "CPU (%)"} if i == 1 else None,
-            ax=axes[i],
-        )
-        axes[i].set_title(f"{node_titles[node]}", fontsize=10, fontweight="bold")
-        axes[i].set_xlabel("Escenario", fontsize=9)
-        if i == 0:
-            axes[i].set_ylabel("Estrategia", fontsize=9)
+            vals = pd.to_numeric(sub["target_eps"], errors="coerce").dropna()
+            if vals.empty or int(round(vals.mode().iloc[0])) != expected:
+                ok = False
+                break
+        if ok:
+            state.report_ok("Tasa objetivo correcta por escenario oficial")
         else:
-            axes[i].set_ylabel("")
-        axes[i].tick_params(axis="x", rotation=15)
-        axes[i].tick_params(axis="y", rotation=0)
+            state.report_warn("Tasa objetivo no coincide para algun escenario")
 
-    fig.suptitle("CPU por estrategia y escenario", fontsize=11, fontweight="bold", y=0.98)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    _save_figure(fig, out, "hardware_cpu_heatmap_strategy_scenario")
+    if not run_summary.empty:
+        target = pd.to_numeric(run_summary.get("target_eps", np.nan), errors="coerce")
+        generated = pd.to_numeric(run_summary.get("generated_eps_real", np.nan), errors="coerce")
+        low_gen = run_summary[(target > 0) & (generated / target < 0.70)]
+        if low_gen.empty:
+            state.report_ok("La generacion real no cae por debajo del 70% del objetivo")
+        else:
+            state.report_warn("Hay corridas donde generated_eps_real < 70% de target_eps")
 
-
-def figure_hw_cpu_normalized_efficiency(hw: pd.DataFrame, df_latency: pd.DataFrame, out: Path):
-    """
-    CPU normalizada por trabajo útil:
-      CPU% por cada 10k eventos visibles.
-    """
-    if hw.empty or df_latency.empty:
-        print("  [SKIP] hardware_cpu_normalized_efficiency.png (datos insuficientes)")
-        return
-
-    cpu = hw[hw["metric"] == "CPUUtilization"].copy()
-    if cpu.empty:
-        print("  [SKIP] hardware_cpu_normalized_efficiency.png (CPUUtilization no disponible)")
-        return
-
-    events = (
-        df_latency.groupby(["strategy", "scenario", "run_id"], observed=True)
-        .size()
-        .reset_index(name="visible_events")
-    )
-
-    merged = cpu.merge(events, on=["strategy", "scenario", "run_id"], how="left")
-    merged = merged.dropna(subset=["visible_events", "value"])
-    merged = merged[merged["visible_events"] > 0]
-    if merged.empty:
-        print("  [SKIP] hardware_cpu_normalized_efficiency.png (eventos visibles nulos)")
-        return
-
-    merged["cpu_pct_per_10k_events"] = merged["value"] / (merged["visible_events"] / 10_000.0)
-
-    agg = (
-        merged.groupby(["strategy", "node"], observed=True)["cpu_pct_per_10k_events"]
-        .agg(["mean", "std"])
-        .reset_index()
-    )
-    agg["std"] = agg["std"].fillna(0.0)
-
-    strat_order = [s for s in STRATEGY_ORDER if s in agg["strategy"].unique()]
-    node_order = ["broker", "compute"]
-    node_labels = {"broker": "Broker", "compute": "Compute"}
-    node_colors = {"broker": "#BDBDBD", "compute": "#757575"}
-    node_hatches = {"broker": "//", "compute": ""}
-
-    x = np.arange(len(strat_order))
-    w = 0.35
-    fig, ax = plt.subplots(figsize=(8.6, 4.8))
-
-    for i, node in enumerate(node_order):
-        vals, errs = [], []
-        for s in strat_order:
-            row = agg[(agg["strategy"] == s) & (agg["node"] == node)]
-            vals.append(float(row["mean"].iloc[0]) if not row.empty else 0.0)
-            errs.append(float(row["std"].iloc[0]) if not row.empty else 0.0)
-
-        bars = ax.bar(
-            x + (i - 0.5) * w,
-            vals,
-            width=w,
-            yerr=errs,
-            capsize=4,
-            color=node_colors[node],
-            edgecolor="#222",
-            linewidth=0.9,
-            hatch=node_hatches[node],
-            alpha=0.9,
-            label=node_labels[node],
-            zorder=3,
-        )
-        for b, v in zip(bars, vals):
-            ax.text(
-                b.get_x() + b.get_width() / 2,
-                b.get_height() * 1.02 if b.get_height() > 0 else 0.05,
-                f"{v:.3f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                color="#222",
-            )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([STRATEGY_LABELS_SHORT.get(s, s) for s in strat_order], fontsize=10)
-    ax.set_ylabel("CPU (%) por cada 10k eventos visibles", fontsize=10)
-    ax.set_title("Eficiencia normalizada de CPU por estrategia", fontsize=11, fontweight="bold", pad=8)
-    ax.grid(True, axis="y", alpha=0.25, linestyle="--", linewidth=0.5)
-    ax.legend(framealpha=0.95, fontsize=9)
-    fig.tight_layout()
-    _save_figure(fig, out, "hardware_cpu_normalized_efficiency")
-
-
-# ════════════════════════════════════════════════════════════════════
-# TABLE — Latency summary
-# ════════════════════════════════════════════════════════════════════
-
-
-def table_latency_summary(df: pd.DataFrame, out: Path):
-    """
-    Tabla con p50 / p95 / p99 / IQR / CV% / Min / Max por estrategia × escenario.
-    Exporta CSV y PNG.
-    """
-    records = []
-    for (strategy, scenario), grp in df.groupby(["strategy", "scenario"]):
-        lat = grp["latency_ms"]
-        records.append(
-            {
-                "Estrategia": strategy,
-                "Escenario": SCENARIO_LABELS.get(scenario, scenario),
-                "N": len(lat),
-                "p50 ms": round(lat.quantile(0.50), 1),
-                "p95 ms": round(lat.quantile(0.95), 1),
-                "p99 ms": round(lat.quantile(0.99), 1),
-                "IQR ms": round(lat.quantile(0.75) - lat.quantile(0.25), 1),
-                "CV%": round(lat.std() / lat.mean() * 100, 1)
-                if lat.mean() > 0
-                else 0.0,
-                "Min ms": round(lat.min(), 1),
-                "Max ms": round(lat.max(), 1),
-            }
-        )
-
-    tbl = pd.DataFrame(records)
-    # Ordenar
-    tbl["_s_order"] = tbl["Estrategia"].map(
-        {s: i for i, s in enumerate(STRATEGY_ORDER)}
-    )
-    tbl["_c_order"] = tbl["Escenario"].map({SCENARIO_LABELS.get(s, s): i for i, s in enumerate(SCENARIO_ORDER)})
-    tbl = tbl.sort_values(["_s_order", "_c_order"]).drop(
-        columns=["_s_order", "_c_order"]
-    )
-
-    csv_path = out / "latency_summary_table.csv"
-    tbl.to_csv(csv_path, index=False)
-    print(f"  [OK] latency_summary_table.csv ({len(tbl)} filas)")
-
-    # PNG de la tabla
-    n_rows, n_cols = tbl.shape
-    fig_h = max(2.5, 0.35 * n_rows + 1.2)
-    fig, ax = plt.subplots(figsize=(max(12, n_cols * 1.4), fig_h))
-    ax.axis("off")
-    tbl_data = [tbl.columns.tolist()] + tbl.values.tolist()
-    table = ax.table(
-        cellText=tbl.values,
-        colLabels=tbl.columns,
-        cellLoc="center",
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8.5)
-    table.scale(1, 1.35)
-
-    # Encabezado B/N
-    for j in range(n_cols):
-        table[(0, j)].set_facecolor("#424242")
-        table[(0, j)].set_text_props(color="white", fontweight="bold")
-
-    # Relleno suave por estrategia (paper-print friendly)
-    strat_colors = {"batch": "#F5F5F5", "microbatch": "#EEEEEE", "streaming": "#E0E0E0"}
-    for row_idx, row in enumerate(tbl.itertuples(index=False), start=1):
-        col = strat_colors.get(row.Estrategia, "#FAFAFA")
-        for j in range(n_cols):
-            table[(row_idx, j)].set_facecolor(col)
-
-    ax.set_title("Resumen estadistico de latencia escala lineal", fontsize=12, fontweight="bold", pad=10)
-    fig.tight_layout()
-    _save_figure(fig, out, "latency_summary_table")
-
-
-# ════════════════════════════════════════════════════════════════════
-# (Legacy) Heatmap de p95
-# ════════════════════════════════════════════════════════════════════
-
-
-def chart_heatmap(df: pd.DataFrame, out: Path):
-    """
-    Heatmap: filas = estrategias, columnas = escenarios, valores = p95 latencia.
-    Publication-ready con colormap accesible.
-    """
-    records = []
-    for (strategy, scenario), grp in df.groupby(["strategy", "scenario"]):
-        records.append(
-            {
-                "strategy": strategy,
-                "scenario": scenario,
-                "p95": grp["latency_ms"].quantile(0.95),
-            }
-        )
-    piv = pd.DataFrame(records).pivot(
-        index="strategy", columns="scenario", values="p95"
-    )
-
-    # Reordenar
-    row_order = [s for s in STRATEGY_ORDER if s in piv.index]
-    col_order = _sort_scenarios(piv.columns.tolist())
-    piv = piv.reindex(index=row_order, columns=col_order)
-
-    # Labels más legibles
-    piv.index = [STRATEGY_LABELS_SHORT.get(s, s) for s in piv.index]
-    piv.columns = [SCENARIO_LABELS.get(s, s) for s in piv.columns]
-
-    fig, ax = plt.subplots(figsize=(max(5, len(col_order) * 1.2), 3))
-    
-    # Colormap accesible (viridis es perceptualmente uniforme)
-    sns.heatmap(
-        piv,
-        ax=ax,
-        cmap="YlOrRd",
-        annot=True,
-        fmt=".0f",
-        linewidths=0.8,
-        linecolor="white",
-        annot_kws={"size": 9, "fontweight": "bold"},
-        cbar_kws={"label": "p95 Latency (ms)", "shrink": 0.8},
-    )
-    ax.set_xlabel("Load Scenario", fontsize=10)
-    ax.set_ylabel("Strategy", fontsize=10)
-    ax.set_title(
-        "P95 Latency Heatmap by Strategy and Scenario", 
-        fontsize=11, 
-        fontweight="bold",
-        pad=10
-    )
-    ax.tick_params(axis="x", rotation=30, labelsize=9)
-    ax.tick_params(axis="y", rotation=0, labelsize=9)
-
-    fig.tight_layout()
-    for fmt in SAVE_FORMATS:
-        fig.savefig(out / f"08_heatmap_escalabilidad.{fmt}", bbox_inches="tight", dpi=300 if fmt == "png" else None)
-    plt.close(fig)
-    print("  [OK] 08_heatmap_escalabilidad.png/.pdf")
-
-
-# ════════════════════════════════════════════════════════════════════
-# CHART 09 — Tabla de ranking objetivo
-# ════════════════════════════════════════════════════════════════════
-
-
-def chart_ranking_table(df: pd.DataFrame, fault_df: pd.DataFrame, out: Path):
-    """
-    Ranking objetivo multi-criterio normalizado [0,1]:
-      - Latencia p95 promedio     (peso 0.35) — menor es mejor
-      - Throughput E2E promedio   (peso 0.30) — mayor es mejor
-      - Recovery time             (peso 0.20) — menor es mejor (si disponible)
-      - CV% latencia              (peso 0.15) — menor es mejor (estabilidad)
-    Exporta CSV + PNG de la tabla.
-    """
-    lat_records = []
-    for strategy in STRATEGY_ORDER:
-        sub = df[df["strategy"] == strategy]
-        if sub.empty:
-            continue
-        p95 = sub["latency_ms"].quantile(0.95)
-        cv = (
-            sub["latency_ms"].std() / sub["latency_ms"].mean() * 100
-            if sub["latency_ms"].mean() > 0
-            else 0.0
-        )
-
-        # Throughput global
-        tput_vals = []
-        for (_, _, _), grp in sub.groupby(["strategy", "scenario", "run_id"]):
-            if "visible_at" in grp.columns and "produced_at" in grp.columns:
-                dur = (grp["visible_at"].max() - grp["produced_at"].min()) / 1000.0
-                if dur > 0:
-                    tput_vals.append(len(grp) / dur)
-        tput = np.mean(tput_vals) if tput_vals else 0.0
-
-        # Recovery time
-        rec_time = np.nan
-        if not fault_df.empty and "strategy" in fault_df.columns:
-            rec_sub = fault_df[fault_df["strategy"] == strategy]["recovery_time_s"]
-            if not rec_sub.empty:
-                rec_time = rec_sub.mean()
-
-        lat_records.append(
-            {
-                "strategy": strategy,
-                "p95_ms": p95,
-                "tput_eps": tput,
-                "rec_s": rec_time,
-                "cv_pct": cv,
-            }
-        )
-
-    rank_df = pd.DataFrame(lat_records)
-    if rank_df.empty:
-        print("  [SKIP] 09_ranking_table.png (datos insuficientes)")
-        return
-
-    # Normalizar [0,1] — 0 = mejor, 1 = peor (para métricas donde menor es mejor)
-    def norm_lower(col):
-        mn, mx = col.min(), col.max()
-        return (
-            (col - mn) / (mx - mn)
-            if mx > mn
-            else pd.Series([0.0] * len(col), index=col.index)
-        )
-
-    def norm_higher(col):
-        mn, mx = col.min(), col.max()
-        return (
-            1 - (col - mn) / (mx - mn)
-            if mx > mn
-            else pd.Series([0.0] * len(col), index=col.index)
-        )
-
-    rank_df["score_p95"] = norm_lower(rank_df["p95_ms"])
-    rank_df["score_tput"] = norm_higher(rank_df["tput_eps"])
-    rank_df["score_cv"] = norm_lower(rank_df["cv_pct"])
-
-    if rank_df["rec_s"].notna().sum() >= 2:
-        rank_df["score_rec"] = norm_lower(
-            rank_df["rec_s"].fillna(rank_df["rec_s"].max())
-        )
-        rank_df["score_total"] = (
-            0.35 * rank_df["score_p95"]
-            + 0.30 * rank_df["score_tput"]
-            + 0.20 * rank_df["score_rec"]
-            + 0.15 * rank_df["score_cv"]
-        )
+    lag_coverage = _lag_coverage_by_strategy(lag_ts)
+    missing_real = [strategy for strategy, present in lag_coverage.items() if not present]
+    if not missing_real:
+        state.report_ok("Kafka lag real disponible para todas las estrategias")
     else:
-        rank_df["score_rec"] = np.nan
-        rank_df["score_total"] = (
-            0.35 * rank_df["score_p95"]
-            + 0.30 * rank_df["score_tput"]
-            + 0.15 * rank_df["score_cv"]
-        ) / 0.80  # renormalizar sin el peso de recovery
-
-    rank_df = rank_df.sort_values("score_total").reset_index(drop=True)
-    rank_df.insert(0, "Ranking", range(1, len(rank_df) + 1))
-
-    # Tabla de salida
-    out_tbl = pd.DataFrame(
-        {
-            "Ranking": rank_df["Ranking"],
-            "Estrategia": rank_df["strategy"],
-            "p95 latencia (ms)": rank_df["p95_ms"].round(1),
-            "Throughput (ev/s)": rank_df["tput_eps"].round(1),
-            "Recovery (s)": rank_df["rec_s"].round(1),
-            "CV% latencia": rank_df["cv_pct"].round(1),
-            "Score total": rank_df["score_total"].round(4),
-        }
-    )
-
-    csv_path = out / "09_ranking_table.csv"
-    out_tbl.to_csv(csv_path, index=False)
-    print(f"  [OK] 09_ranking_table.csv")
-
-    # PNG
-    n_rows, n_cols = out_tbl.shape
-    fig_h = max(2, 0.4 * n_rows + 1.0)
-    fig, ax = plt.subplots(figsize=(max(10, n_cols * 1.5), fig_h))
-    ax.axis("off")
-    table = ax.table(
-        cellText=out_tbl.values,
-        colLabels=out_tbl.columns,
-        cellLoc="center",
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.5)
-
-    # Encabezado
-    for j in range(n_cols):
-        table[(0, j)].set_facecolor("#1565C0")
-        table[(0, j)].set_text_props(color="white", fontweight="bold")
-
-    # Medalla de ranking
-    medal_colors = {1: "#FFD700", 2: "#C0C0C0", 3: "#CD7F32"}
-    strat_col_colors = {
-        "batch": "#E3F2FD",
-        "microbatch": "#FFF3E0",
-        "streaming": "#E8F5E9",
-    }
-    for row_idx, row in enumerate(out_tbl.itertuples(index=False), start=1):
-        bg = medal_colors.get(
-            row.Ranking, strat_col_colors.get(row.Estrategia, "#FAFAFA")
+        state.report_warn(
+            "Kafka lag real incompleto; sin cobertura para: " + ", ".join(missing_real)
         )
-        for j in range(n_cols):
-            table[(row_idx, j)].set_facecolor(bg)
 
-    ax.set_title(
-        "Chart 09 — Ranking Objetivo de Estrategias\n"
-        "(pesos: latencia p95=35%, throughput=30%, recovery=20%, estabilidad=15%)",
-        fontsize=11,
-        pad=10,
+    if not latency.empty and "latency_ms" in latency.columns:
+        if bool((latency["latency_ms"] <= 0).any()):
+            state.report_err("Se detectaron latencias no positivas")
+        else:
+            state.report_ok("latency_ms positivo en todas las muestras")
+
+    run_id_ok = True
+    for name, df in [
+        ("latency", latency),
+        ("run_metadata", run_metadata),
+        ("run_summary", run_summary),
+        ("generator_summary", generator_summary),
+    ]:
+        if df.empty or "run_id" not in df.columns:
+            run_id_ok = False
+            state.report_err(f"run_id ausente en {name}")
+    if run_id_ok:
+        state.report_ok("Todos los run_id estan presentes")
+
+    if not run_metadata.empty and "git_commit" in run_metadata.columns:
+        commits = run_metadata["git_commit"].dropna().astype(str).unique().tolist()
+        if len(commits) > 1:
+            state.report_warn("Se detectaron commits distintos en el mismo analisis")
+        else:
+            state.report_ok("Mismo git_commit en corridas analizadas")
+
+    return state
+
+
+def _ordered_scenarios_from_df(df: pd.DataFrame) -> list[str]:
+    if df.empty or "scenario" not in df.columns:
+        return []
+    return _sort_by_known(df["scenario"].dropna().astype(str).unique().tolist(), SCENARIO_ORDER)
+
+
+def _ordered_strategies_from_df(df: pd.DataFrame) -> list[str]:
+    if df.empty or "strategy" not in df.columns:
+        return []
+    return [strategy for strategy in STRATEGY_ORDER if strategy in set(df["strategy"].dropna().astype(str))]
+
+
+def _format_strategy(value: str) -> str:
+    return STRATEGY_LABELS.get(value, value)
+
+
+def _format_scenario(value: str) -> str:
+    return SCENARIO_LABELS.get(value, value)
+
+
+def _light_axis_style(ax):
+    ax.grid(axis="y", color="#d9d9d9", linewidth=0.8)
+    ax.grid(axis="x", visible=False)
+    ax.set_axisbelow(True)
+
+
+def _add_box_stats(ax, x_pos: float, values: np.ndarray):
+    if len(values) == 0:
+        return
+    vals = pd.Series(values).dropna()
+    if vals.empty:
+        return
+    stats = [
+        ("Min", vals.min()),
+        ("Q1", vals.quantile(0.25)),
+        ("Q2", vals.quantile(0.50)),
+        ("Q3", vals.quantile(0.75)),
+        ("Max", vals.max()),
+    ]
+    text = "\n".join(f"{label} {value:,.0f}" for label, value in stats)
+    ax.text(
+        x_pos + 0.34,
+        vals.quantile(0.50),
+        text,
+        ha="left",
+        va="center",
+        fontsize=6.5,
+        linespacing=0.95,
+        bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "#bdbdbd", "alpha": 0.82},
     )
-    fig.tight_layout()
-    fig.savefig(out / "09_ranking_table.png", bbox_inches="tight")
-    plt.close(fig)
-    print("  [OK] 09_ranking_table.png")
 
 
-# ════════════════════════════════════════════════════════════════════
-# MAIN
-# ════════════════════════════════════════════════════════════════════
+def _label_bars(ax, bars, values, formatter, offset_ratio: float = 0.01):
+    ymax = ax.get_ylim()[1]
+    offset = ymax * offset_ratio if ymax > 0 else 0.1
+    for bar, value in zip(bars, values):
+        if pd.isna(value):
+            continue
+        y = max(float(bar.get_height()), 0.0) + offset
+        ax.text(bar.get_x() + bar.get_width() / 2, y, formatter(value), ha="center", va="bottom", fontsize=8)
+
+
+def build_official_metrics(
+    latency: pd.DataFrame,
+    run_metadata: pd.DataFrame,
+    run_summary: pd.DataFrame,
+    generator_summary: pd.DataFrame,
+    lag_ts: pd.DataFrame,
+    resources_ts: pd.DataFrame,
+    out_dir: Path,
+) -> pd.DataFrame:
+    key_cols = ["strategy", "scenario", "run_id"]
+
+    frames = [df[key_cols] for df in [run_metadata, run_summary, generator_summary, latency, lag_ts, resources_ts] if not df.empty]
+    if not frames:
+        metrics = pd.DataFrame(columns=[
+            "strategy",
+            "scenario",
+            "run_id",
+            "target_eps",
+            "generated_events",
+            "visible_events_cutoff",
+            "visible_events_final",
+            "official_duration_s",
+            "generated_eps_real",
+            "visible_eps_cutoff",
+            "delivery_ratio_cutoff_pct",
+            "delivery_ratio_final_pct",
+            "pending_visibility_events",
+            "time_to_drain_s",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "latency_p99_ms",
+            "cpu_avg_cores",
+            "memory_rss_avg_mb",
+            "kafka_lag_real_available",
+            "kafka_lag_max",
+        ])
+        metrics.to_csv(out_dir / "official_metrics_summary.csv", index=False)
+        print("[OK] official_metrics_summary.csv")
+        return metrics
+
+    metrics = pd.concat(frames, ignore_index=True).drop_duplicates()
+
+    if not run_metadata.empty:
+        meta = run_metadata[key_cols].copy()
+        if "target_eps" in run_metadata.columns:
+            meta["target_eps"] = pd.to_numeric(run_metadata["target_eps"], errors="coerce")
+        else:
+            meta["target_eps"] = np.nan
+        if "official_duration_seconds" in run_metadata.columns:
+            meta["official_duration_s"] = pd.to_numeric(run_metadata["official_duration_seconds"], errors="coerce")
+        else:
+            meta["official_duration_s"] = np.nan
+        if "generation_end_ts" in run_metadata.columns:
+            meta["generation_end_ts"] = pd.to_numeric(run_metadata["generation_end_ts"], errors="coerce")
+        else:
+            meta["generation_end_ts"] = np.nan
+        metrics = metrics.merge(meta, on=key_cols, how="left")
+    else:
+        metrics["target_eps"] = np.nan
+        metrics["official_duration_s"] = np.nan
+        metrics["generation_end_ts"] = np.nan
+
+    if not run_summary.empty:
+        summary = run_summary[key_cols].copy()
+        summary["generated_events_rs"] = pd.to_numeric(run_summary.get("generated_events", np.nan), errors="coerce")
+        summary["visible_events_final"] = pd.to_numeric(run_summary.get("visible_events", np.nan), errors="coerce")
+        summary["cpu_avg_cores_rs"] = pd.to_numeric(
+            run_summary.get("cpu_cores_avg", run_summary.get("cpu_avg_cores", np.nan)),
+            errors="coerce",
+        )
+        summary["memory_rss_avg_mb_rs"] = pd.to_numeric(
+            run_summary.get("mem_rss_mb_avg", run_summary.get("memory_rss_avg_mb", np.nan)),
+            errors="coerce",
+        )
+        metrics = metrics.merge(summary, on=key_cols, how="left")
+    else:
+        metrics["generated_events_rs"] = np.nan
+        metrics["visible_events_final"] = np.nan
+        metrics["cpu_avg_cores_rs"] = np.nan
+        metrics["memory_rss_avg_mb_rs"] = np.nan
+
+    if not generator_summary.empty:
+        gen = generator_summary[key_cols].copy()
+        gen["generated_events_gs"] = pd.to_numeric(
+            generator_summary.get("total_events_generated", generator_summary.get("generated_events", np.nan)),
+            errors="coerce",
+        )
+        metrics = metrics.merge(gen, on=key_cols, how="left")
+    else:
+        metrics["generated_events_gs"] = np.nan
+
+    metrics["generated_events"] = metrics["generated_events_rs"].combine_first(metrics["generated_events_gs"])
+
+    if not latency.empty:
+        lat = latency[key_cols + [col for col in ["visible_at", "latency_ms"] if col in latency.columns]].copy()
+        if "visible_at" in lat.columns:
+            lat["visible_at"] = pd.to_numeric(lat["visible_at"], errors="coerce")
+        if "latency_ms" in lat.columns:
+            lat["latency_ms"] = pd.to_numeric(lat["latency_ms"], errors="coerce")
+
+        cutoff_base = metrics[key_cols + ["generation_end_ts"]].copy()
+        cutoff_base["generation_end_ms"] = pd.to_numeric(cutoff_base["generation_end_ts"], errors="coerce") * 1000.0
+
+        cutoff_lat = lat.merge(cutoff_base[key_cols + ["generation_end_ms"]], on=key_cols, how="inner")
+        cutoff_lat = cutoff_lat.dropna(subset=["visible_at", "generation_end_ms"])
+        cutoff = cutoff_lat[cutoff_lat["visible_at"] <= cutoff_lat["generation_end_ms"]]
+        visible_cutoff = cutoff.groupby(key_cols, observed=True).size().reset_index(name="visible_events_cutoff")
+
+        visible_last = (
+            lat.dropna(subset=["visible_at"])
+            .groupby(key_cols, observed=True)
+            .agg(visible_events_final_latency=("visible_at", "size"), last_visible_at_ms=("visible_at", "max"))
+            .reset_index()
+        )
+        latency_stats = (
+            lat.dropna(subset=["latency_ms"])
+            .groupby(key_cols, observed=True)["latency_ms"]
+            .agg(
+                latency_p50_ms=lambda s: float(s.quantile(0.50)),
+                latency_p95_ms=lambda s: float(s.quantile(0.95)),
+                latency_p99_ms=lambda s: float(s.quantile(0.99)),
+            )
+            .reset_index()
+        )
+
+        metrics = metrics.merge(visible_cutoff, on=key_cols, how="left")
+        metrics = metrics.merge(visible_last, on=key_cols, how="left")
+        metrics = metrics.merge(latency_stats, on=key_cols, how="left")
+    else:
+        metrics["visible_events_cutoff"] = np.nan
+        metrics["visible_events_final_latency"] = np.nan
+        metrics["last_visible_at_ms"] = np.nan
+        metrics["latency_p50_ms"] = np.nan
+        metrics["latency_p95_ms"] = np.nan
+        metrics["latency_p99_ms"] = np.nan
+
+    metrics["visible_events_cutoff"] = pd.to_numeric(metrics.get("visible_events_cutoff", np.nan), errors="coerce").fillna(0)
+    metrics["visible_events_final"] = pd.to_numeric(metrics.get("visible_events_final", np.nan), errors="coerce")
+    metrics["visible_events_final"] = metrics["visible_events_final"].combine_first(
+        pd.to_numeric(metrics.get("visible_events_final_latency", np.nan), errors="coerce")
+    )
+
+    if not resources_ts.empty:
+        res = resources_ts[key_cols].copy()
+        if "cpu_cores" in resources_ts.columns:
+            res["cpu_avg_cores_ts"] = pd.to_numeric(resources_ts["cpu_cores"], errors="coerce")
+        else:
+            res["cpu_avg_cores_ts"] = np.nan
+        if "mem_rss_bytes" in resources_ts.columns:
+            res["memory_rss_avg_mb_ts"] = pd.to_numeric(resources_ts["mem_rss_bytes"], errors="coerce") / 1_048_576.0
+        else:
+            res["memory_rss_avg_mb_ts"] = np.nan
+        res = (
+            res.groupby(key_cols, observed=True)
+            .agg(cpu_avg_cores_ts=("cpu_avg_cores_ts", "mean"), memory_rss_avg_mb_ts=("memory_rss_avg_mb_ts", "mean"))
+            .reset_index()
+        )
+        metrics = metrics.merge(res, on=key_cols, how="left")
+    else:
+        metrics["cpu_avg_cores_ts"] = np.nan
+        metrics["memory_rss_avg_mb_ts"] = np.nan
+
+    metrics["cpu_avg_cores"] = pd.to_numeric(metrics.get("cpu_avg_cores_rs", np.nan), errors="coerce").combine_first(
+        pd.to_numeric(metrics.get("cpu_avg_cores_ts", np.nan), errors="coerce")
+    )
+    metrics["memory_rss_avg_mb"] = pd.to_numeric(
+        metrics.get("memory_rss_avg_mb_rs", np.nan), errors="coerce"
+    ).combine_first(pd.to_numeric(metrics.get("memory_rss_avg_mb_ts", np.nan), errors="coerce"))
+
+    if not lag_ts.empty:
+        lag = lag_ts[key_cols].copy()
+        lag["lag"] = pd.to_numeric(lag_ts.get("lag", np.nan), errors="coerce")
+        lag["lag_source"] = lag_ts.get("lag_source", "unknown")
+        lag_real = lag[lag["lag_source"] == "real_prometheus"]
+        lag_agg = (
+            lag_real.groupby(key_cols, observed=True)
+            .agg(kafka_lag_max=("lag", "max"))
+            .reset_index()
+        )
+        lag_agg["kafka_lag_real_available"] = True
+        metrics = metrics.merge(lag_agg, on=key_cols, how="left")
+    else:
+        metrics["kafka_lag_real_available"] = np.nan
+        metrics["kafka_lag_max"] = np.nan
+
+    metrics["kafka_lag_real_available"] = metrics.get("kafka_lag_real_available", False).fillna(False).astype(bool)
+    metrics["generated_events"] = pd.to_numeric(metrics["generated_events"], errors="coerce")
+    metrics["official_duration_s"] = pd.to_numeric(metrics["official_duration_s"], errors="coerce")
+    metrics["visible_events_final"] = pd.to_numeric(metrics["visible_events_final"], errors="coerce")
+    metrics["last_visible_at_ms"] = pd.to_numeric(metrics.get("last_visible_at_ms", np.nan), errors="coerce")
+    metrics["generation_end_ts"] = pd.to_numeric(metrics["generation_end_ts"], errors="coerce")
+
+    valid_duration = metrics["official_duration_s"] > 0
+    valid_generated = metrics["generated_events"] > 0
+
+    metrics["generated_eps_real"] = np.where(
+        valid_duration,
+        metrics["generated_events"] / metrics["official_duration_s"],
+        np.nan,
+    )
+    metrics["visible_eps_cutoff"] = np.where(
+        valid_duration,
+        metrics["visible_events_cutoff"] / metrics["official_duration_s"],
+        np.nan,
+    )
+    metrics["delivery_ratio_cutoff_pct"] = np.where(
+        valid_generated,
+        metrics["visible_events_cutoff"] / metrics["generated_events"] * 100.0,
+        np.nan,
+    )
+    metrics["delivery_ratio_final_pct"] = np.where(
+        valid_generated,
+        metrics["visible_events_final"] / metrics["generated_events"] * 100.0,
+        np.nan,
+    )
+    metrics["pending_visibility_events"] = (metrics["generated_events"] - metrics["visible_events_cutoff"]).clip(lower=0)
+
+    generation_end_ms = metrics["generation_end_ts"] * 1000.0
+    metrics["time_to_drain_s"] = ((metrics["last_visible_at_ms"] - generation_end_ms) / 1000.0).clip(lower=0)
+
+    metrics = metrics[[
+        "strategy",
+        "scenario",
+        "run_id",
+        "target_eps",
+        "generated_events",
+        "visible_events_cutoff",
+        "visible_events_final",
+        "official_duration_s",
+        "generated_eps_real",
+        "visible_eps_cutoff",
+        "delivery_ratio_cutoff_pct",
+        "delivery_ratio_final_pct",
+        "pending_visibility_events",
+        "time_to_drain_s",
+        "latency_p50_ms",
+        "latency_p95_ms",
+        "latency_p99_ms",
+        "cpu_avg_cores",
+        "memory_rss_avg_mb",
+        "kafka_lag_real_available",
+        "kafka_lag_max",
+    ]].copy()
+
+    metrics["strategy"] = pd.Categorical(metrics["strategy"], categories=STRATEGY_ORDER, ordered=True)
+    metrics["scenario"] = pd.Categorical(metrics["scenario"], categories=SCENARIO_ORDER, ordered=True)
+    metrics = metrics.sort_values(["scenario", "strategy", "run_id"]).reset_index(drop=True)
+    metrics.to_csv(out_dir / "official_metrics_summary.csv", index=False)
+    print("[OK] official_metrics_summary.csv")
+    return metrics
+
+
+def export_latency_summary_table(latency: pd.DataFrame, out_dir: Path):
+    if latency.empty or "latency_ms" not in latency.columns:
+        print("[WARN] Sin datos de latencia para latency_summary_table.csv")
+        return
+    rows = []
+    for (strategy, scenario), grp in latency.groupby(["strategy", "scenario"], observed=True):
+        lat_vals = pd.to_numeric(grp["latency_ms"], errors="coerce").dropna()
+        if lat_vals.empty:
+            continue
+        rows.append(
+            {
+                "Estrategia": _format_strategy(strategy),
+                "Escenario": _format_scenario(scenario),
+                "Eventos visibles": int(len(lat_vals)),
+                "p50 (ms)": round(float(lat_vals.quantile(0.50)), 2),
+                "p95 (ms)": round(float(lat_vals.quantile(0.95)), 2),
+                "p99 (ms)": round(float(lat_vals.quantile(0.99)), 2),
+                "Mín. (ms)": round(float(lat_vals.min()), 2),
+                "Máx. (ms)": round(float(lat_vals.max()), 2),
+                "_scenario": scenario,
+                "_strategy": strategy,
+            }
+        )
+    if not rows:
+        print("[WARN] Sin filas para latency_summary_table.csv")
+        return
+    table = pd.DataFrame(rows).sort_values(["_scenario", "_strategy"]).drop(columns=["_scenario", "_strategy"])
+    table.to_csv(out_dir / "latency_summary_table.csv", index=False)
+    print("[OK] latency_summary_table.csv")
+
+
+def fig_11_1_latency_distribution(latency: pd.DataFrame, out_dir: Path):
+    if latency.empty or "latency_ms" not in latency.columns:
+        print("[WARN] Sin datos para fig_11_1_latency_distribution")
+        return
+    latency = latency[latency["latency_ms"] > 0].copy()
+    scenarios = _ordered_scenarios_from_df(latency)
+    if not scenarios:
+        print("[WARN] Sin escenarios para fig_11_1_latency_distribution")
+        return
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(7.5, 4.8 * len(scenarios)), 5.2), sharey=True, squeeze=False)
+        axes = axes[0]
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = latency[latency["scenario"] == scenario]
+            order = _ordered_strategies_from_df(sub)
+            data = [sub[sub["strategy"] == strategy]["latency_ms"].to_numpy() for strategy in order]
+            bp = ax.boxplot(data, patch_artist=True, showfliers=False, widths=0.55)
+            for patch, strategy in zip(bp["boxes"], order):
+                patch.set_facecolor(STRATEGY_COLORS[strategy])
+                patch.set_alpha(0.9)
+                patch.set_edgecolor("#333333")
+            for median in bp["medians"]:
+                median.set_color("#111111")
+                median.set_linewidth(1.5)
+            for whisker in bp["whiskers"]:
+                whisker.set_color("#555555")
+            for cap in bp["caps"]:
+                cap.set_color("#555555")
+            for pos, values in enumerate(data, start=1):
+                _add_box_stats(ax, float(pos), values)
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(range(1, len(order) + 1))
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            ax.set_yscale("log")
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Latencia de disponibilidad (ms, escala logarítmica)")
+        fig.suptitle("Distribución de la latencia de disponibilidad por estrategia y escenario")
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        _save_figure(fig, out_dir, "fig_11_1_latency_distribution")
+
+
+def _aggregate_metrics(metrics: pd.DataFrame, aggregations: dict[str, str]) -> pd.DataFrame:
+    if metrics.empty:
+        return pd.DataFrame()
+    agg = metrics.groupby(["strategy", "scenario"], observed=True).agg(aggregations).reset_index()
+    agg["strategy"] = pd.Categorical(agg["strategy"], categories=STRATEGY_ORDER, ordered=True)
+    agg["scenario"] = pd.Categorical(agg["scenario"], categories=SCENARIO_ORDER, ordered=True)
+    return agg.sort_values(["scenario", "strategy"]).reset_index(drop=True)
+
+
+def fig_11_2_official_window_throughput(metrics: pd.DataFrame, out_dir: Path):
+    agg = _aggregate_metrics(
+        metrics,
+        {"generated_eps_real": "mean", "visible_eps_cutoff": "mean", "delivery_ratio_cutoff_pct": "mean"},
+    )
+    if agg.empty:
+        print("[WARN] Sin datos para fig_11_2_official_window_throughput")
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(8.5, 5.2 * len(scenarios)), 5.4), sharey=True, squeeze=False)
+        axes = axes[0]
+        all_rates = []
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = agg[agg["scenario"] == scenario].set_index("strategy")
+            order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
+            x = np.arange(len(order))
+            width = 0.34
+            produced = [float(sub.at[strategy, "generated_eps_real"]) for strategy in order]
+            visible = [float(sub.at[strategy, "visible_eps_cutoff"]) for strategy in order]
+            all_rates.extend(produced)
+            all_rates.extend(visible)
+            ratios = [float(sub.at[strategy, "delivery_ratio_cutoff_pct"]) for strategy in order]
+            ax.bar(x - width / 2, produced, width=width, color=SERIES_COLORS["primary_light"], edgecolor="#333333", linewidth=0.4, label="Producido real" if idx == 0 else None)
+            visible_bars = ax.bar(x + width / 2, visible, width=width, color=SERIES_COLORS["primary_dark"], edgecolor="#333333", linewidth=0.4, label="Visible en PostgreSQL al corte oficial" if idx == 0 else None)
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Eventos por segundo")
+            _label_bars(ax, visible_bars, ratios, lambda v: f"V/G {v:.1f}%", offset_ratio=0.018)
+        y_max = max(all_rates) * 1.18 if all_rates else 1
+        for ax in axes:
+            ax.set_ylim(0, y_max)
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.suptitle("Tasa producida y tasa visible en PostgreSQL durante la ventana oficial", y=0.985)
+        fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
+        fig.tight_layout(rect=[0, 0, 1, 0.80])
+        _save_figure(fig, out_dir, "fig_11_2_official_window_throughput")
+
+
+def fig_11_3_delivery_ratio_cutoff_vs_drain(metrics: pd.DataFrame, out_dir: Path):
+    agg = _aggregate_metrics(
+        metrics,
+        {"delivery_ratio_cutoff_pct": "mean", "delivery_ratio_final_pct": "mean"},
+    )
+    if agg.empty:
+        print("[WARN] Sin datos para fig_11_3_delivery_ratio_cutoff_vs_drain")
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(7.5, 4.8 * len(scenarios)), 5.2), sharey=True, squeeze=False)
+        axes = axes[0]
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = agg[agg["scenario"] == scenario].set_index("strategy")
+            order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
+            x = np.arange(len(order))
+            width = 0.34
+            cutoff_vals = [float(sub.at[strategy, "delivery_ratio_cutoff_pct"]) for strategy in order]
+            drain_vals = [float(sub.at[strategy, "delivery_ratio_final_pct"]) for strategy in order]
+            bars_cutoff = ax.bar(x - width / 2, cutoff_vals, width=width, color=SERIES_COLORS["secondary_light"], edgecolor="#333333", linewidth=0.4, label="Al corte oficial" if idx == 0 else None)
+            bars_drain = ax.bar(x + width / 2, drain_vals, width=width, color=SERIES_COLORS["secondary_dark"], edgecolor="#333333", linewidth=0.4, label="Después del drenaje" if idx == 0 else None)
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            ax.set_ylim(0, 105)
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Eventos visibles / eventos producidos (%)")
+            _label_bars(ax, bars_cutoff, cutoff_vals, lambda v: f"{v:.1f}%")
+            _label_bars(ax, bars_drain, drain_vals, lambda v: f"{v:.1f}%")
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.suptitle("Proporción de eventos visibles al corte oficial y después del drenaje", y=0.985)
+        fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
+        fig.tight_layout(rect=[0, 0, 1, 0.80])
+        _save_figure(fig, out_dir, "fig_11_3_delivery_ratio_cutoff_vs_drain")
+
+
+def fig_11_4_pending_visibility_backlog(metrics: pd.DataFrame, out_dir: Path):
+    agg = _aggregate_metrics(metrics, {"pending_visibility_events": "mean"})
+    if agg.empty:
+        print("[WARN] Sin datos para fig_11_4_pending_visibility_backlog")
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(7.5, 4.8 * len(scenarios)), 5.1), sharey=False, squeeze=False)
+        axes = axes[0]
+        all_vals = []
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = agg[agg["scenario"] == scenario].set_index("strategy")
+            order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
+            x = np.arange(len(order))
+            vals = [float(sub.at[strategy, "pending_visibility_events"]) for strategy in order]
+            all_vals.extend(vals)
+            bars = ax.bar(x, vals, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Eventos pendientes de visibilidad")
+            _label_bars(ax, bars, vals, lambda v: f"{v:,.0f}")
+        y_max = max(all_vals) * 1.15 if all_vals else 1
+        for ax in axes:
+            ax.set_ylim(0, y_max)
+        fig.suptitle("Acumulación estimada de eventos pendientes de visibilidad al corte oficial")
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        _save_figure(fig, out_dir, "fig_11_4_pending_visibility_backlog")
+
+
+def fig_11_4b_kafka_consumer_lag_real(metrics: pd.DataFrame, out_dir: Path):
+    if metrics.empty:
+        return
+    lag_data = metrics.dropna(subset=["kafka_lag_max"]).copy()
+    expected_pairs = {(strategy, scenario) for strategy in STRATEGY_ORDER for scenario in SCENARIO_ORDER}
+    available_pairs = set(
+        lag_data[lag_data["kafka_lag_real_available"]][["strategy", "scenario"]].drop_duplicates().itertuples(index=False, name=None)
+    )
+    if expected_pairs - available_pairs:
+        return
+    agg = _aggregate_metrics(lag_data, {"kafka_lag_max": "mean"})
+    if agg.empty:
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(7.5, 4.8 * len(scenarios)), 5.1), sharey=True, squeeze=False)
+        axes = axes[0]
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = agg[agg["scenario"] == scenario].set_index("strategy")
+            order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
+            x = np.arange(len(order))
+            vals = [float(sub.at[strategy, "kafka_lag_max"]) for strategy in order]
+            bars = ax.bar(x, vals, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            ax.set_ylim(bottom=0)
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Consumer lag (mensajes)")
+            _label_bars(ax, bars, vals, lambda v: f"{v:,.0f}")
+        fig.suptitle("Rezago real de consumidores Kafka por estrategia y escenario", y=0.985)
+        fig.tight_layout(rect=[0, 0, 1, 0.88])
+        _save_figure(fig, out_dir, "fig_11_4b_kafka_consumer_lag_real")
+
+
+def fig_11_5_drain_time(metrics: pd.DataFrame, out_dir: Path):
+    agg = _aggregate_metrics(metrics, {"time_to_drain_s": "mean"})
+    if agg.empty:
+        print("[WARN] Sin datos para fig_11_5_drain_time")
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(7.5, 4.8 * len(scenarios)), 5.1), sharey=False, squeeze=False)
+        axes = axes[0]
+        all_vals = []
+        for idx, scenario in enumerate(scenarios):
+            ax = axes[idx]
+            sub = agg[agg["scenario"] == scenario].set_index("strategy")
+            order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
+            x = np.arange(len(order))
+            vals = [float(sub.at[strategy, "time_to_drain_s"]) for strategy in order]
+            all_vals.extend(vals)
+            bars = ax.bar(x, vals, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
+            ax.set_title(_format_scenario(scenario))
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
+            _light_axis_style(ax)
+            if idx == 0:
+                ax.set_ylabel("Tiempo de drenaje (s)")
+            _label_bars(ax, bars, vals, lambda v: f"{v:.1f}")
+        y_max = max(all_vals) * 1.15 if all_vals else 1
+        for ax in axes:
+            ax.set_ylim(0, y_max)
+        fig.suptitle("Tiempo de drenaje posterior a la finalización de la generación")
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        _save_figure(fig, out_dir, "fig_11_5_drain_time")
+
+
+def fig_11_6_compute_resource_usage(metrics: pd.DataFrame, out_dir: Path):
+    agg = _aggregate_metrics(metrics, {"cpu_avg_cores": "mean", "memory_rss_avg_mb": "mean"})
+    if agg.empty:
+        print("[WARN] Sin datos para fig_11_6_compute_resource_usage")
+        return
+    scenarios = _ordered_scenarios_from_df(agg)
+    x = np.arange(len(scenarios))
+    width = 0.22
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.1), squeeze=False)
+        axes = axes[0]
+        for idx, strategy in enumerate(STRATEGY_ORDER):
+            sub = agg[agg["strategy"] == strategy].set_index("scenario")
+            cpu_vals = [float(sub.at[scenario, "cpu_avg_cores"]) if scenario in sub.index else 0.0 for scenario in scenarios]
+            mem_vals = [float(sub.at[scenario, "memory_rss_avg_mb"]) if scenario in sub.index else 0.0 for scenario in scenarios]
+            positions = x + (idx - 1) * width
+            axes[0].bar(positions, cpu_vals, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
+            axes[1].bar(positions, mem_vals, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
+        axes[0].set_title("CPU promedio (cores)")
+        axes[1].set_title("Memoria RSS promedio (MB)")
+        for ax in axes:
+            ax.set_xticks(x)
+            ax.set_xticklabels([_format_scenario(scenario) for scenario in scenarios])
+            ax.set_ylim(bottom=0)
+            _light_axis_style(ax)
+        axes[0].set_ylabel("CPU promedio (cores)")
+        axes[1].set_ylabel("Memoria RSS promedio (MB)")
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.suptitle("Uso promedio de CPU y memoria en el nodo de cómputo", y=0.985)
+        fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
+        fig.tight_layout(rect=[0, 0, 1, 0.80])
+        _save_figure(fig, out_dir, "fig_11_6_compute_resource_usage")
+
+
+def export_statistical_tests(latency: pd.DataFrame, out_dir: Path):
+    if latency.empty or "latency_ms" not in latency.columns:
+        print("[WARN] Sin datos de latencia para pruebas estadisticas")
+        return
+    rows = []
+    pair_names = [
+        ("batch", "microbatch", "batch_vs_microbatch_p_adj"),
+        ("batch", "streaming", "batch_vs_streaming_p_adj"),
+        ("microbatch", "streaming", "microbatch_vs_streaming_p_adj"),
+    ]
+    for scenario in _sort_by_known(latency["scenario"].unique().tolist(), SCENARIO_ORDER):
+        sub = latency[latency["scenario"] == scenario]
+        groups = {}
+        for strategy in STRATEGY_ORDER:
+            vals = pd.to_numeric(sub[sub["strategy"] == strategy]["latency_ms"], errors="coerce").dropna().to_numpy()
+            if len(vals) > 0:
+                groups[strategy] = vals
+        if len(groups) < 2:
+            continue
+        k_stat, k_p = (np.nan, np.nan)
+        if len(groups) >= 3:
+            k_stat, k_p = kruskal(*(groups[s] for s in STRATEGY_ORDER if s in groups))
+        row = {
+            "escenario": scenario,
+            "kruskal_H": float(k_stat) if pd.notna(k_stat) else np.nan,
+            "kruskal_p": float(k_p) if pd.notna(k_p) else np.nan,
+            "significant": "si" if pd.notna(k_p) and k_p < 0.05 else "no",
+        }
+        for left, right, col in pair_names:
+            if left in groups and right in groups:
+                _, p = mannwhitneyu(groups[left], groups[right], alternative="two-sided")
+                row[col] = float(min(1.0, p * 3.0))
+            else:
+                row[col] = np.nan
+        rows.append(row)
+    if not rows:
+        print("[WARN] Sin filas para statistical_tests.csv")
+        return
+    pd.DataFrame(rows).to_csv(out_dir / "statistical_tests.csv", index=False)
+    print("[OK] statistical_tests.csv")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Official thesis analyzer")
+    parser.add_argument("--results-dir", default="results")
+    parser.add_argument("--output", default=None)
+    parser.add_argument("--scope", choices=["official", "all"], default="official")
+    parser.add_argument("--validate", action="store_true")
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Análisis de benchmark de ingestión de datos"
-    )
-    parser.add_argument(
-        "--results-dir",
-        default="results",
-        help="Directorio raíz de resultados (default: results)",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Directorio de salida de figuras (default: results/figures)",
-    )
-    parser.add_argument(
-        "--no-warmup-filter", action="store_true", help="Desactivar el filtro de warmup"
-    )
-    args = parser.parse_args()
-
+    args = parse_args()
     results_dir = Path(args.results_dir).resolve()
     out_dir = Path(args.output).resolve() if args.output else results_dir / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n{'=' * 60}")
-    print(f"  ANÁLISIS — Tesis Benchmark de Ingestión de Datos")
-    print(f"{'=' * 60}")
-    print(f"  Resultados: {results_dir}")
-    print(f"  Salida:     {out_dir}")
-    print()
+    latency = apply_scope_filter(load_latency(results_dir), args.scope)
+    _ = apply_scope_filter(load_prometheus_snapshot(results_dir), args.scope)
+    run_metadata = apply_scope_filter(load_run_metadata(results_dir), args.scope)
+    run_summary = apply_scope_filter(load_run_summaries(results_dir), args.scope)
+    generator_summary = apply_scope_filter(load_generator_summaries(results_dir), args.scope)
+    lag_ts = apply_scope_filter(load_kafka_lag_timeseries(results_dir), args.scope)
+    resources_ts = apply_scope_filter(load_resources_timeseries(results_dir), args.scope)
 
-    # ── Cargar datos ──────────────────────────────────────────────
-    df = load_latency(results_dir)
-    fault_df = load_fault_recovery(results_dir)
-    prom = load_prometheus_snapshot(results_dir)
-    cloudwatch = load_cloudwatch_snapshot(results_dir)
-    timeline_df = load_generator_rate_timeline(results_dir)
+    if latency.empty and run_summary.empty:
+        print("[ERROR] No benchmark data found")
+        sys.exit(1)
 
-    if not args.no_warmup_filter:
-        df = filter_warmup(df)
+    val_state = run_validations(results_dir, args.scope, latency, run_metadata, run_summary, generator_summary, lag_ts)
+    if args.validate and val_state.err > 0:
+        sys.exit(1)
 
-    df, prom = filter_low_sample_runs(df, prom, min_samples=1000)
+    metrics = build_official_metrics(latency, run_metadata, run_summary, generator_summary, lag_ts, resources_ts, out_dir)
 
-    # ── Tests estadísticos ────────────────────────────────────────
-    print("\n[Estadísticas] Ejecutando Kruskal-Wallis + Mann-Whitney U...")
-    stat_df = run_statistics(df)
-    if not stat_df.empty:
-        stat_csv = out_dir / "statistical_tests.csv"
-        stat_df.to_csv(stat_csv, index=False)
-        print(f"  [OK] statistical_tests.csv ({len(stat_df)} escenarios)")
+    export_latency_summary_table(latency, out_dir)
+    fig_11_1_latency_distribution(latency, out_dir)
+    fig_11_2_official_window_throughput(metrics, out_dir)
+    fig_11_3_delivery_ratio_cutoff_vs_drain(metrics, out_dir)
+    fig_11_4_pending_visibility_backlog(metrics, out_dir)
+    fig_11_4b_kafka_consumer_lag_real(metrics, out_dir)
+    fig_11_5_drain_time(metrics, out_dir)
+    fig_11_6_compute_resource_usage(metrics, out_dir)
+    export_statistical_tests(latency, out_dir)
 
-    # ── Generar gráficas ──────────────────────────────────────────
-    print("\n[Figuras] Generando set académico compacto...")
-
-    figure_latency_boxplot(df, out_dir)
-    figure_generated_vs_sink(df, prom, out_dir)
-    figure_resource_utilization(df, prom, cloudwatch, out_dir)
-    figure_kafka_lag(df, prom, out_dir)
-    figure_advanced_load_profile_timeline(timeline_df, out_dir)
-    table_latency_summary(df, out_dir)
-
-    print(f"\n{'=' * 60}")
-    print(f"  Listo. Figuras en: {out_dir}")
-    print(f"{'=' * 60}\n")
+    print(f"\n[INFO] Done. Output: {out_dir}")
 
 
 if __name__ == "__main__":

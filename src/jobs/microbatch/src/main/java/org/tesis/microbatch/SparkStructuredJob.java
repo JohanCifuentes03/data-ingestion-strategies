@@ -40,7 +40,10 @@ public final class SparkStructuredJob {
                 return new StructType(new StructField[] {
                                 DataTypes.createStructField("event_id", DataTypes.StringType, false),
                                 DataTypes.createStructField("produced_at", DataTypes.LongType, false),
-                                DataTypes.createStructField("payload", DataTypes.StringType, false)
+                                DataTypes.createStructField("payload", DataTypes.StringType, false),
+                                DataTypes.createStructField("strategy", DataTypes.StringType, false),
+                                DataTypes.createStructField("scenario", DataTypes.StringType, false),
+                                DataTypes.createStructField("run_id", DataTypes.StringType, false)
                 });
         }
 
@@ -155,10 +158,7 @@ public final class SparkStructuredJob {
                 Dataset<Row> events = streamingDataset
                                 .selectExpr("CAST(value AS STRING) AS json")
                                 .select(functions.from_json(functions.col("json"), schema).alias("event"))
-                                .select("event.*")
-                                .withColumn("strategy", functions.lit("microbatch"))
-                                .withColumn("scenario", functions.lit(scenario))
-                                .withColumn("run_id", functions.lit(runId));
+                                .select("event.*");
 
                 Properties properties = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
 

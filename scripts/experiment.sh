@@ -177,7 +177,7 @@ for STRATEGY in $STRATEGIES; do
             echo "[experiment] Truncating probe CSV for fresh run..."
             if [ "${MODE:-local}" = "local" ]; then
                 docker compose exec -T probe sh -c \
-                    "echo 'event_id,produced_at,visible_at,latency_ms,strategy,scenario,run_id' > /results/latency_samples.csv" 2>/dev/null || true
+                    "echo 'event_id,strategy,scenario,run_id,produced_at,visible_at,latency_ms' > /results/latency_samples.csv" 2>/dev/null || true
             fi
 
             # ── Run the strategy ───────────────────────────────────

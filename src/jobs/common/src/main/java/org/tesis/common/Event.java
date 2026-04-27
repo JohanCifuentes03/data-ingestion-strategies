@@ -33,11 +33,17 @@ public class Event implements Serializable {
     private final UUID eventId;
     private final long producedAt;
     private final String payload;
+    private final String strategy;
+    private final String scenario;
+    private final String runId;
 
-    public Event(UUID eventId, long producedAt, String payload) {
+    public Event(UUID eventId, long producedAt, String payload, String strategy, String scenario, String runId) {
         this.eventId = eventId;
         this.producedAt = producedAt;
         this.payload = payload;
+        this.strategy = strategy;
+        this.scenario = scenario;
+        this.runId = runId;
     }
 
     /**
@@ -61,10 +67,20 @@ public class Event implements Serializable {
 
             UUID id = UUID.fromString(idNode.asText());
             long producedAt = tsNode.asLong();
-            // payload field is optional (some domain schemas may omit it)
-            String payload = node.has("payload") ? node.get("payload").asText("") : "";
+            JsonNode strategyNode = node.get("strategy");
+            JsonNode scenarioNode = node.get("scenario");
+            JsonNode runIdNode = node.get("run_id");
+            if (strategyNode == null || scenarioNode == null || runIdNode == null) {
+                throw new IllegalArgumentException(
+                        "Missing required label field(s) in event JSON: " + json);
+            }
 
-            return new Event(id, producedAt, payload);
+            String payload = node.has("payload") ? node.get("payload").asText("") : "";
+            String strategy = strategyNode.asText();
+            String scenario = scenarioNode.asText();
+            String runId = runIdNode.asText();
+
+            return new Event(id, producedAt, payload, strategy, scenario, runId);
         } catch (IOException e) {
             throw new IllegalArgumentException("Failed to parse event JSON: " + json, e);
         }
@@ -80,5 +96,17 @@ public class Event implements Serializable {
 
     public String getPayload() {
         return payload;
+    }
+
+    public String getStrategy() {
+        return strategy;
+    }
+
+    public String getScenario() {
+        return scenario;
+    }
+
+    public String getRunId() {
+        return runId;
     }
 }
