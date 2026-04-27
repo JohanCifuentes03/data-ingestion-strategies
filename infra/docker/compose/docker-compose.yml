@@ -258,16 +258,24 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      TOPIC_NAME: events
+      TOPIC_NAME: ${TOPIC_NAME:-events}
       EVENT_RATE: ${GENERATOR_EVENT_RATE}
       PAYLOAD_SIZE: ${GENERATOR_PAYLOAD_BYTES}
       SCENARIO: ${GENERATOR_SCENARIO}
+      RUN_ID: ${RUN_ID:-run_1}
+      STRATEGY: ${STRATEGY:-unknown}
       EVENT_SCHEMA: ${GENERATOR_EVENT_SCHEMA:-}
+      GENERATOR_SUMMARY_PATH: /results/generator_summary.json
+      GENERATOR_LOAD_PROFILE: constant
       RUN_DURATION_SECONDS: ${GENERATOR_RUN_DURATION_SECONDS:-0}
       WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
       PROMETHEUS_PORT: 8000
+    volumes:
+      - ../../../results:/results
     ports:
       - "8000:8000"
+    stop_signal: SIGINT
+    stop_grace_period: 45s
 
   probe:
     build:
@@ -282,6 +290,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      RUN_ID: ${RUN_ID:-run_1}
+      STRATEGY: ${STRATEGY:-unknown}
+      SCENARIO: ${GENERATOR_SCENARIO:-low-load}
       PROBE_POLL_INTERVAL_MS: ${PROBE_POLL_INTERVAL_MS}
       RESULTS_PATH: /results
       PROMETHEUS_PORT: 8001

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import signal
 import string
 import threading
 import time
@@ -191,6 +192,9 @@ class SharedState:
         self.payload_sizes: list[int] = [MIN_PAYLOAD_BYTES]
         self._payload_idx = 0
         self._lock = threading.Lock()
+        self.generated_events = 0
+        self.generated_bytes = 0
+        self.produce_errors = 0
 
     def next_payload_size(self) -> int:
         with self._lock:
@@ -237,6 +241,9 @@ def producer_thread(
                 # then serialize — avoids brittle byte-offset slicing.
                 builder = SCHEMA_BUILDERS.get(schema, _iot_sensor_event)
                 event_dict = builder(payload_size)
+                event_dict["strategy"] = strategy
+                event_dict["scenario"] = scenario_name
+                event_dict["run_id"] = run_id
                 raw = json.dumps(event_dict).encode("utf-8")
                 if len(raw) < payload_size:
                     deficit = payload_size - len(raw)
@@ -252,11 +259,16 @@ def producer_thread(
                     PRODUCE_LAT_MS.labels(scenario_name, run_id, strategy).observe(elapsed_ms)
                     MESSAGES_TOTAL.labels(scenario_name, run_id, strategy).inc()
                     BYTES_TOTAL.labels(scenario_name, run_id, strategy).inc(len(raw))
+                    with state._lock:
+                        state.generated_events += 1
+                        state.generated_bytes += len(raw)
                 except BufferError:
                     producer.poll(0.01)
                 except Exception as exc:
                     log.error("Thread %d: produce error: %s", thread_id, exc)
                     ERROR_TOTAL.labels(scenario_name, run_id, strategy).inc()
+                    with state._lock:
+                        state.produce_errors += 1
 
             producer.flush(0)  # non-blocking flush
 
@@ -300,8 +312,15 @@ def resolve_scenario(configs: dict):
 
 
 def decide_n_threads(target_rate: int) -> int:
-    """Heuristic: 1 thread per 20k ev/s, min 2, max 16."""
-    return max(2, min(16, (target_rate + 19_999) // 20_000))
+    override = os.getenv("GENERATOR_THREADS")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            log.warning("GENERATOR_THREADS=%s invalido; usando heuristica", override)
+    # More aggressive default so medium/high official scenarios are not
+    # artificially capped by too few producer threads.
+    return max(2, min(32, (target_rate + 4_999) // 5_000))
 
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -316,6 +335,8 @@ def main():
 
     topic = os.getenv("TOPIC_NAME", "events")
     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    summary_path = os.getenv("GENERATOR_SUMMARY_PATH", "/results/generator_summary.json")
+    load_profile = os.getenv("GENERATOR_LOAD_PROFILE", "constant")
 
     base_rate = scenario["event_rate"]
     payload_sizes = scenario.get("payload_sizes", [scenario["payload"]])
@@ -352,6 +373,13 @@ def main():
     def current_rate_fn() -> int:
         return state.current_rate
 
+    def handle_shutdown(signum, _frame):
+        log.info("Signal %s received, stopping generator", signum)
+        state.running = False
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
     # Launch producer threads
     threads = []
     for i in range(n_threads):
@@ -365,10 +393,11 @@ def main():
 
     # ── Control loop (rate gauge + shutdown) ────────────────────────
     start_time = time.time()
+    generation_start_epoch_ms = int(start_time * 1000)
     warmup_complete = False
 
     try:
-        while True:
+        while state.running:
             now = time.time()
             elapsed = now - start_time
 
@@ -393,11 +422,43 @@ def main():
 
     except KeyboardInterrupt:
         log.info("Interrupted by user")
+        state.running = False
 
     log.info("Signalling threads to stop…")
     state.running = False
     for t in threads:
         t.join(timeout=5.0)
+
+    generation_end_epoch_ms = int(time.time() * 1000)
+    generation_duration_seconds = max(
+        0.001, (generation_end_epoch_ms - generation_start_epoch_ms) / 1000.0
+    )
+    generated_eps_real = state.generated_events / generation_duration_seconds
+
+    summary = {
+        "strategy": strategy,
+        "scenario": scenario_name,
+        "run_id": run_id,
+        "target_eps": int(base_rate),
+        "generated_events": int(state.generated_events),
+        "generated_bytes": int(state.generated_bytes),
+        "produce_errors": int(state.produce_errors),
+        "generation_start_epoch_ms": int(generation_start_epoch_ms),
+        "generation_end_epoch_ms": int(generation_end_epoch_ms),
+        "generation_duration_seconds": round(generation_duration_seconds, 3),
+        "generated_eps_real": round(generated_eps_real, 3),
+        "payload_bytes": int(payload_sizes[0] if payload_sizes else MIN_PAYLOAD_BYTES),
+        "load_profile": load_profile,
+    }
+
+    try:
+        summary_file = Path(summary_path)
+        summary_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_file, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2)
+        log.info("Generator summary saved: %s", summary_file)
+    except Exception as exc:
+        log.error("Failed to write generator summary (%s): %s", summary_path, exc)
 
     log.info("Generator finished.")
 
