@@ -76,12 +76,12 @@ def ensure_results_file(path: Path) -> Path:
             writer.writerow(
                 [
                     "event_id",
-                    "produced_at",
-                    "visible_at",
-                    "latency_ms",
                     "strategy",
                     "scenario",
                     "run_id",
+                    "produced_at",
+                    "visible_at",
+                    "latency_ms",
                 ]
             )
     return path
@@ -99,14 +99,16 @@ def handle_signal(signum, frame):  # pylint: disable=unused-argument
 def main():
     poll_interval = int(os.getenv("PROBE_POLL_INTERVAL_MS", "500")) / 1000.0
     results_path = Path(os.getenv("RESULTS_PATH", "/results")) / "latency_samples.csv"
+    probe_run_id = os.getenv("RUN_ID", "run_1")
+    probe_strategy = os.getenv("STRATEGY", "unknown")
+    probe_scenario = os.getenv("SCENARIO", "low-load")
     ensure_results_file(results_path)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
     last_visible_at = 0
-    last_strategy = "unknown"
-    last_scenario = "unknown"
+    last_event_id = "00000000-0000-0000-0000-000000000000"
 
     prom_port = int(os.getenv("PROMETHEUS_PORT", "8001"))
     start_http_server(prom_port)
@@ -116,24 +118,48 @@ def main():
     conn.autocommit = True
 
     log.info("Probe started — polling every %dms", int(poll_interval * 1000))
+    log.info(
+        "Probe filter labels: strategy=%s scenario=%s run_id=%s",
+        probe_strategy,
+        probe_scenario,
+        probe_run_id,
+    )
 
     while RUNNING:
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT event_id, produced_at, visible_at,
-                           strategy, scenario, run_id
-                    FROM events
-                    WHERE visible_at > %s
-                    ORDER BY visible_at ASC
-                    LIMIT 1000
-                    """,
-                    (last_visible_at,),
-                )
-                rows = cur.fetchall()
+            drained_any = False
+            while RUNNING:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT event_id, produced_at, visible_at,
+                               strategy, scenario, run_id
+                        FROM events
+                        WHERE run_id = %s
+                          AND strategy = %s
+                          AND scenario = %s
+                          AND (
+                              visible_at > %s
+                              OR (visible_at = %s AND event_id::text > %s)
+                          )
+                        ORDER BY visible_at ASC, event_id ASC
+                        LIMIT 5000
+                        """,
+                        (
+                            probe_run_id,
+                            probe_strategy,
+                            probe_scenario,
+                            last_visible_at,
+                            last_visible_at,
+                            last_event_id,
+                        ),
+                    )
+                    rows = cur.fetchall()
 
-            if rows:
+                if not rows:
+                    break
+
+                drained_any = True
                 with open(results_path, "a", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle)
                     for (
@@ -151,21 +177,23 @@ def main():
                         writer.writerow(
                             [
                                 event_id,
-                                produced_at,
-                                visible_at,
-                                latency,
                                 strategy,
                                 scenario,
                                 run_id,
+                                produced_at,
+                                visible_at,
+                                latency,
                             ]
                         )
 
-                        last_visible_at = max(last_visible_at, visible_at)
-                        last_strategy = strategy
-                        last_scenario = scenario
+                        last_visible_at = visible_at
+                        last_event_id = str(event_id)
                         SINK_ROWS_TOTAL.labels(strategy, scenario).inc()
                         PROBE_LATENCY.labels(strategy, scenario).observe(latency)
                         LAST_VISIBLE.labels(strategy, scenario).set(visible_at)
+
+                if len(rows) < 5000:
+                    break
 
             time.sleep(poll_interval)
 
