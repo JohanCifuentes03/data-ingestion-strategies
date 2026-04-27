@@ -28,6 +28,9 @@ export COMPOSE_FILE="$ROOT_DIR/infra/docker/compose/docker-compose.yml"
 MODE=$REQUESTED_MODE
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/benchmark_aws}
 SSH_USER=${SSH_USER:-ubuntu}
+COMPUTE_REGION=${COMPUTE_REGION:-primary}
+BRAZIL_NETWORK_MODE=${BRAZIL_NETWORK_MODE:-private}
+LOAD_PROFILE=${LOAD_PROFILE:-constant}
 
 remote_compose() {
     local host="$1"
@@ -131,6 +134,52 @@ GENERATOR_DEFAULT_PAYLOAD=0
 GENERATOR_DEFAULT_SCHEMA=""
 RUN_TOPIC="events"
 
+# ── Brazil / interregional resolvers ─────────────────────────────────
+
+resolve_compute_public_ip() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        echo "${CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP:-}"
+    else
+        echo "${CLOUD_VM_COMPUTE_PUBLIC_IP:-}"
+    fi
+}
+
+resolve_broker_host() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
+            echo "${CLOUD_VM_BROKER_IP:-}"
+        else
+            echo "${CLOUD_VM_BROKER_PUBLIC_IP:-}"
+        fi
+    else
+        echo "${CLOUD_VM_BROKER_IP:-}"
+    fi
+}
+
+resolve_broker_port() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
+            echo "9092"
+        else
+            echo "19092"
+        fi
+    else
+        echo "9092"
+    fi
+}
+
+resolve_sink_host() {
+    if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
+        if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
+            echo "${CLOUD_VM_SINK_IP:-}"
+        else
+            echo "${CLOUD_VM_SINK_PUBLIC_IP:-}"
+        fi
+    else
+        echo "${CLOUD_VM_SINK_IP:-}"
+    fi
+}
+
 sanitize_topic_part() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_'
 }
@@ -170,6 +219,16 @@ set_generator_defaults() {
             GENERATOR_DEFAULT_RATE=30000
             GENERATOR_DEFAULT_PAYLOAD=1500
             GENERATOR_DEFAULT_SCHEMA="health_monitor"
+            ;;
+        bursty-load|bursty-load-br-compute)
+            GENERATOR_DEFAULT_RATE=10000
+            GENERATOR_DEFAULT_PAYLOAD=1500
+            GENERATOR_DEFAULT_SCHEMA="financial_tick"
+            ;;
+        cyclic-load-br-compute)
+            GENERATOR_DEFAULT_RATE=3000
+            GENERATOR_DEFAULT_PAYLOAD=1500
+            GENERATOR_DEFAULT_SCHEMA="financial_tick"
             ;;
         *)
             warn "Escenario '$scenario' no reconocido para generator; usando configuracion low-load"
@@ -211,6 +270,7 @@ start_generator_for_scenario() {
         export STRATEGY="$STRATEGY"
         export GENERATOR_RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS}"
         export GENERATOR_WARMUP_SECONDS=0
+        export LOAD_PROFILE="${LOAD_PROFILE:-constant}"
         if [ "$MODE" = "distributed" ]; then
             local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
             remote_shell "$producer_ip" "docker rm -f tesis-generator >/dev/null 2>&1 || true"
@@ -225,9 +285,10 @@ start_generator_for_scenario() {
                  STRATEGY='${STRATEGY}' \
                  GENERATOR_RUN_DURATION_SECONDS='${GENERATOR_RUN_DURATION_SECONDS}' \
                  GENERATOR_WARMUP_SECONDS='${GENERATOR_WARMUP_SECONDS}' \
-                  GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
-                  GENERATOR_THREADS='${GENERATOR_THREADS}' \
-                  docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
+                 GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
+                 GENERATOR_THREADS='${GENERATOR_THREADS}' \
+                 LOAD_PROFILE='${LOAD_PROFILE}' \
+                 docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
         fi
@@ -392,6 +453,11 @@ data = {
     "git_commit": "${git_commit}",
     "branch": "${git_branch}",
     "started_at_utc": datetime.fromtimestamp(int(${RUN_START_TS}), tz=timezone.utc).isoformat(),
+    "load_profile": "${LOAD_PROFILE:-constant}",
+    "compute_region": "${COMPUTE_REGION:-primary}",
+    "brazil_network_mode": "${BRAZIL_NETWORK_MODE:-private}",
+    "broker_endpoint_used": "$(resolve_broker_host):$(resolve_broker_port)",
+    "sink_endpoint_used": "$(resolve_sink_host):5432",
 }
 with open("${metadata_file}", "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2)
@@ -1190,7 +1256,7 @@ run_batch() {
     log "Ejecutando Spark Batch..."
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=1500m --conf spark.driver.memory=2g --conf spark.executor.cores=2 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=${RUN_TOPIC} --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.batch.SparkBatchJob --master spark://spark-master:${MASTER_PORT} --conf spark.executor.memory=1500m --conf spark.driver.memory=2g --conf spark.executor.cores=2 --conf spark.sql.shuffle.partitions=12 /opt/spark/jobs/batch/batch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --kafka.bootstrap.servers=$(resolve_broker_host):$(resolve_broker_port) --kafka.topic=${RUN_TOPIC} --postgres.url=jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=${RUN_DURATION_SECONDS}"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.batch.SparkBatchJob \
@@ -1273,7 +1339,7 @@ run_microbatch() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=${CLOUD_VM_BROKER_IP}:9092 --kafka.topic=${RUN_TOPIC} --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=$(resolve_broker_host):$(resolve_broker_port) --kafka.topic=${RUN_TOPIC} --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.microbatch.SparkStructuredJob \
@@ -1392,7 +1458,7 @@ run_streaming() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers ${CLOUD_VM_BROKER_IP}:9092 --kafka.topic ${RUN_TOPIC} --postgres.url jdbc:postgresql://${CLOUD_VM_SINK_IP}:5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
+            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers $(resolve_broker_host):$(resolve_broker_port) --kafka.topic ${RUN_TOPIC} --postgres.url jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
         ${FLINK_DETACH_FLAG} \

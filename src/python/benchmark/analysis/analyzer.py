@@ -1030,6 +1030,113 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _load_rate_timeline(results_dir: Path) -> pd.DataFrame:
+    rows = []
+    for f in sorted(results_dir.rglob("generator_rate_timeline.csv")):
+        parts = f.relative_to(results_dir).parts
+        if len(parts) >= 3:
+            strat, scen = parts[0], parts[1]
+            df = pd.read_csv(f)
+            df["strategy"] = strat
+            df["scenario"] = scen
+            rows.append(df)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def fig_a1_cyclic_load_profile(results_dir: Path, metrics: pd.DataFrame, out_dir: Path):
+    timeline = _load_rate_timeline(results_dir)
+    if timeline.empty:
+        print("[INFO] No rate timeline data; skipping fig A1")
+        return
+    scenarios = timeline["scenario"].unique()
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(5 * len(scenarios), 4), squeeze=False)
+    for idx, scen in enumerate(scenarios):
+        ax = axes[0][idx]
+        for strat in sorted(timeline[timeline["scenario"] == scen]["strategy"].unique()):
+            sub = timeline[(timeline["scenario"] == scen) & (timeline["strategy"] == strat)]
+            ax.plot(sub["elapsed_s"], sub["target_rate"], color=STRATEGY_COLORS.get(strat, "#999"), label=strat.capitalize(), linewidth=1.2)
+        ax.set_title(f"Carga cíclica — {scen}", fontsize=11)
+        ax.set_xlabel("Tiempo transcurrido (s)")
+        ax.set_ylabel("Tasa objetivo (ev/s)")
+        ax.legend(fontsize=8, bbox_to_anchor=(1.02, 0.90))
+    fig.suptitle("Perfil cíclico de carga aplicado al generador", fontsize=13, y=0.985)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    out = out_dir / "fig_a1_cyclic_load_profile"
+    fig.savefig(f"{out}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] fig_a1_cyclic_load_profile")
+
+
+def fig_a2_throughput_cyclic(metrics: pd.DataFrame, out_dir: Path):
+    if metrics.empty:
+        return
+    fig, ax = plt.subplots(figsize=(6, 4))
+    x = range(len(metrics))
+    w = 0.35
+    ax.bar([i - w / 2 for i in x], metrics["generated_eps_real"], w, label="Producido real", color="#4a4a4a")
+    ax.bar([i + w / 2 for i in x], metrics["visible_eps_cutoff"], w, label="Visible al corte", color="#bdbdbd")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([f"{r['strategy'].capitalize()}\n{r['scenario']}" for _, r in metrics.iterrows()], fontsize=8)
+    ax.set_ylabel("Eventos por segundo")
+    ax.set_title("Tasa producida vs visible bajo carga cíclica interregional", fontsize=11)
+    ax.legend(fontsize=8, bbox_to_anchor=(1.02, 0.90))
+    fig.tight_layout()
+    out = out_dir / "fig_a2_throughput_cyclic"
+    fig.savefig(f"{out}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] fig_a2_throughput_cyclic")
+
+
+def fig_a3_backlog_cyclic(metrics: pd.DataFrame, out_dir: Path):
+    if metrics.empty or "pending_visibility_events" not in metrics.columns:
+        return
+    fig, ax = plt.subplots(figsize=(6, 4))
+    labels = [f"{r['strategy'].capitalize()}\n{r['scenario']}" for _, r in metrics.iterrows()]
+    vals = metrics["pending_visibility_events"].values
+    ax.bar(range(len(vals)), vals, color="#7a7a7a")
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Eventos pendientes de visibilidad")
+    ax.set_title("Backlog observable al corte oficial bajo carga cíclica interregional", fontsize=10)
+    y_max = max(vals) * 1.15 if len(vals) > 0 and max(vals) > 0 else 1
+    ax.set_ylim(0, y_max)
+    fig.tight_layout()
+    out = out_dir / "fig_a3_backlog_cyclic"
+    fig.savefig(f"{out}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] fig_a3_backlog_cyclic")
+
+
+def fig_a4_latency_cyclic(latency: pd.DataFrame, metrics: pd.DataFrame, out_dir: Path):
+    adv_scenarios = metrics["scenario"].unique()
+    adv_latency = latency[latency["scenario"].isin(adv_scenarios)]
+    if adv_latency.empty:
+        return
+    fig, ax = plt.subplots(figsize=(6, 4))
+    groups = []
+    labels = []
+    for (strat, scen), grp in adv_latency.groupby(["strategy", "scenario"]):
+        groups.append(grp["latency_ms"].values)
+        labels.append(f"{strat.capitalize()}\n{scen}")
+    if groups:
+        bp = ax.boxplot(groups, labels=labels, patch_artist=True, showfliers=False)
+        for i, box in enumerate(bp["boxes"]):
+            box.set_facecolor(SERIES_COLORS["primary_light"])
+            box.set_edgecolor(SERIES_COLORS["primary_dark"])
+        ax.set_yscale("log")
+        ax.set_ylabel("Latencia de disponibilidad (ms, escala log)")
+        ax.set_title("Distribución de latencia bajo carga cíclica interregional", fontsize=10)
+    fig.tight_layout()
+    out = out_dir / "fig_a4_latency_cyclic"
+    fig.savefig(f"{out}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(f"{out}.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[OK] fig_a4_latency_cyclic")
+
+
 def main():
     args = parse_args()
     results_dir = Path(args.results_dir).resolve()
@@ -1063,6 +1170,14 @@ def main():
     fig_11_5_drain_time(metrics, out_dir)
     fig_11_6_compute_resource_usage(metrics, out_dir)
     export_statistical_tests(latency, out_dir)
+
+    advanced_scenarios = [s for s in metrics["scenario"].unique() if "cyclic" in s or "bursty" in s]
+    if advanced_scenarios:
+        adv_metrics = metrics[metrics["scenario"].isin(advanced_scenarios)]
+        fig_a1_cyclic_load_profile(results_dir, adv_metrics, out_dir)
+        fig_a2_throughput_cyclic(adv_metrics, out_dir)
+        fig_a3_backlog_cyclic(adv_metrics, out_dir)
+        fig_a4_latency_cyclic(latency, adv_metrics, out_dir)
 
     print(f"\n[INFO] Done. Output: {out_dir}")
 

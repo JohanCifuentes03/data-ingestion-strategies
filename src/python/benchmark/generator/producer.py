@@ -88,6 +88,11 @@ DEFAULT_SCENARIOS: dict[str, Any] = {
         "payload": 1500,
         "schema": "financial_tick",
     },
+    "cyclic-load-br-compute": {
+        "event_rate": 3_000,
+        "payload": 1500,
+        "schema": "financial_tick",
+    },
 }
 
 MIN_PAYLOAD_BYTES = 1500
