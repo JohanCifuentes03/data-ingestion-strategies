@@ -457,6 +457,8 @@ def main():
         summary_file.parent.mkdir(parents=True, exist_ok=True)
         with open(summary_file, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
         log.info("Generator summary saved: %s", summary_file)
     except Exception as exc:
         log.error("Failed to write generator summary (%s): %s", summary_path, exc)
