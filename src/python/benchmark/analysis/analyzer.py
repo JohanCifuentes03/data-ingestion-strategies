@@ -1055,14 +1055,23 @@ def parse_args() -> argparse.Namespace:
 
 
 
-CYCLIC_RATES = [1000, 5000, 10000, 500, 3000]
-CYCLIC_SEGMENT_SECONDS = 30
-CYCLIC_CYCLE_SECONDS = CYCLIC_SEGMENT_SECONDS * len(CYCLIC_RATES)
+CYCLIC_SEGMENTS = [
+    (0, 30, 5_000),
+    (30, 60, 15_000),
+    (60, 90, 30_000),
+    (90, 120, 5_000),
+    (120, 135, 60_000),
+    (135, 150, 5_000),
+]
+CYCLIC_CYCLE_SECONDS = 150
 
 
 def _cyclic_target_rate(elapsed_s: float) -> int:
-    idx = int((elapsed_s % CYCLIC_CYCLE_SECONDS) // CYCLIC_SEGMENT_SECONDS)
-    return CYCLIC_RATES[idx]
+    cycle_elapsed = elapsed_s % CYCLIC_CYCLE_SECONDS
+    for start_s, end_s, rate in CYCLIC_SEGMENTS:
+        if start_s <= cycle_elapsed < end_s:
+            return rate
+    return CYCLIC_SEGMENTS[-1][2]
 
 
 def _advanced_keys(metrics: pd.DataFrame) -> pd.DataFrame:

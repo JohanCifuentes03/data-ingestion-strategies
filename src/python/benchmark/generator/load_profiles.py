@@ -22,11 +22,12 @@ BURSTY_PROFILE = [
 ]
 
 CYCLIC_PROFILE = [
-    LoadSegment(0, 30, 1_000, 1_000),
-    LoadSegment(30, 60, 5_000, 5_000),
-    LoadSegment(60, 90, 10_000, 10_000),
-    LoadSegment(90, 120, 500, 500),
-    LoadSegment(120, 150, 3_000, 3_000),
+    LoadSegment(0, 30, 5_000, 5_000),
+    LoadSegment(30, 60, 15_000, 15_000),
+    LoadSegment(60, 90, 30_000, 30_000),
+    LoadSegment(90, 120, 5_000, 5_000),
+    LoadSegment(120, 135, 60_000, 60_000),
+    LoadSegment(135, 150, 5_000, 5_000),
 ]
 
 CYCLIC_DURATION_SECONDS = 150
