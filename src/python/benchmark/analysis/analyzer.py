@@ -1263,46 +1263,69 @@ def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFr
     adv_latency = latency[latency["scenario"].astype(str).isin(adv_scenarios)]
     if adv_latency.empty:
         return
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+
     groups = []
     labels = []
     colors = []
+    stats_rows = []
     for strategy in STRATEGY_ORDER:
         grp = adv_latency[adv_latency["strategy"].astype(str) == strategy]
         if grp.empty:
             continue
-        groups.append(grp["latency_ms"].values)
+        values = pd.to_numeric(grp["latency_ms"], errors="coerce").dropna()
+        if values.empty:
+            continue
+        groups.append(values.values)
         labels.append(STRATEGY_LABELS.get(strategy, strategy.capitalize()))
         colors.append(STRATEGY_COLORS.get(strategy, "#999"))
-    if groups:
-        bp = ax.boxplot(groups, tick_labels=labels, patch_artist=True, showfliers=False)
-        for idx, (box, color, values) in enumerate(zip(bp["boxes"], colors, groups), start=1):
-            box.set_facecolor(color)
-            box.set_edgecolor("#222222")
-            box.set_alpha(0.85)
-            clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
-            if clean.empty:
-                continue
-            min_v = float(clean.min())
-            q2_v = float(clean.median())
-            max_v = float(clean.max())
-            x = idx + 0.28
-            for label, val in [("Min", min_v), ("Q2", q2_v), ("Max", max_v)]:
-                ax.text(
-                    x,
-                    val,
-                    f"{label}: {val:,.0f}",
-                    fontsize=7,
-                    va="center",
-                    ha="left",
-                    color="#222222",
-                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.68, "pad": 1.2},
-                )
-        ax.set_yscale("log")
-        ax.set_ylabel("Latencia de disponibilidad (ms, escala log)")
-        ax.set_title("Distribución global de latencia bajo carga cíclica interregional", fontsize=11)
-        ax.grid(axis="y", alpha=0.2)
-    fig.tight_layout()
+        stats_rows.append([
+            f"{values.min():,.0f}",
+            f"{values.median():,.0f}",
+            f"{values.max():,.0f}",
+        ])
+
+    if not groups:
+        return
+
+    fig, (ax, table_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(8.0, 5.6),
+        gridspec_kw={"height_ratios": [4.0, 1.05]},
+    )
+    bp = ax.boxplot(groups, tick_labels=labels, patch_artist=True, showfliers=False, widths=0.55)
+    for box, color in zip(bp["boxes"], colors):
+        box.set_facecolor(color)
+        box.set_edgecolor("#222222")
+        box.set_alpha(0.88)
+    for median in bp["medians"]:
+        median.set_color("#f28e2b")
+        median.set_linewidth(1.6)
+
+    ax.set_yscale("log")
+    ax.set_ylabel("Latencia de disponibilidad (ms, escala log)", fontsize=9)
+    ax.set_title("Distribución global de latencia bajo carga cíclica interregional", fontsize=11, pad=10)
+    ax.grid(axis="y", alpha=0.22)
+    ax.tick_params(axis="x", labelsize=9)
+    ax.tick_params(axis="y", labelsize=8)
+
+    table_ax.axis("off")
+    table = table_ax.table(
+        cellText=stats_rows,
+        rowLabels=labels,
+        colLabels=["Min", "Q2 (mediana)", "Max"],
+        loc="center",
+        cellLoc="center",
+        rowLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.2)
+    for cell in table.get_celld().values():
+        cell.set_edgecolor("#d0d0d0")
+        cell.set_linewidth(0.6)
+
+    fig.tight_layout(h_pad=0.65)
     _save_figure(fig, out_dir, "fig_a4_latency_distribution_cyclic")
 
 def main():
