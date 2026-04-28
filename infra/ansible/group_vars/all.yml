@@ -31,7 +31,7 @@ kafka_broker_id:           1
 spark_master_port:      7077
 spark_master_webui_port: 8080
 spark_worker_cores:     4
-spark_worker_memory:    "2G"
+spark_worker_memory:    "3G"
 
 flink_parallelism:         4
 flink_taskmanager_memory:  "2048m"

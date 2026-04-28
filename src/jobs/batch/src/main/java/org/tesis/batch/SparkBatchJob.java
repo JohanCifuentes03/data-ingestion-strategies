@@ -70,27 +70,35 @@ public final class SparkBatchJob {
                                 .select(functions.from_json(functions.col("json"), schema).alias("event"))
                                 .select("event.*");
 
-                // Use foreachPartition + JdbcEventWriter so we get ON CONFLICT DO NOTHING,
-                // which makes the job safely re-runnable without duplicate key failures.
-                Properties jdbcProps = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
-                final String jdbcUrlFinal = jdbcUrl;
-                parsed.foreachPartition(rows -> {
-                        List<org.tesis.common.Event> batch = new ArrayList<>();
-                        rows.forEachRemaining(row -> {
-                                try {
-                                        java.util.UUID eventId = java.util.UUID.fromString(row.getString(0));
-                                        long producedAt = row.getLong(1);
-                                        String payload = row.isNullAt(2) ? "" : row.getString(2);
-                                        String eventStrategy = row.getString(3);
-                                        String eventScenario = row.getString(4);
-                                        String eventRunId = row.getString(5);
-                                        batch.add(new org.tesis.common.Event(eventId, producedAt, payload, eventStrategy, eventScenario, eventRunId));
-                                } catch (Exception ignored) {
-                                        // skip malformed rows
-                                }
-                        });
-                        JdbcEventWriter.writeBatch(jdbcUrlFinal, jdbcProps, batch);
-                });
+        // Stream rows to JDBC in mini-batches to avoid OOM on large partitions.
+        // Each partition is flushed every 500 rows instead of materializing all rows
+        // into an ArrayList first.
+        final int miniBatchSize = 500;
+        parsed.foreachPartition(rows -> {
+            Properties jdbcProps = ConfigLoader.jdbcProperties(jdbcUser, jdbcPassword);
+            List<org.tesis.common.Event> batch = new ArrayList<>(miniBatchSize);
+            while (rows.hasNext()) {
+                try {
+                    var row = rows.next();
+                    java.util.UUID eventId = java.util.UUID.fromString(row.getString(0));
+                    long producedAt = row.getLong(1);
+                    String payload = row.isNullAt(2) ? "" : row.getString(2);
+                    String eventStrategy = row.getString(3);
+                    String eventScenario = row.getString(4);
+                    String eventRunId = row.getString(5);
+                    batch.add(new org.tesis.common.Event(eventId, producedAt, payload, eventStrategy, eventScenario, eventRunId));
+                    if (batch.size() >= miniBatchSize) {
+                        JdbcEventWriter.writeBatch(jdbcUrl, jdbcProps, batch);
+                        batch.clear();
+                    }
+                } catch (Exception ignored) {
+                    // skip malformed rows
+                }
+            }
+            if (!batch.isEmpty()) {
+                JdbcEventWriter.writeBatch(jdbcUrl, jdbcProps, batch);
+            }
+        });
 
                 spark.close();
         }
