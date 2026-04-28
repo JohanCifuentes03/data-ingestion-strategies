@@ -285,12 +285,17 @@ results_dir() {
 
 run_analyze() {
     local rdir
+    local analyzer_scope
     rdir=$(results_dir)
+    analyzer_scope="official"
+    if [[ "$SCOPE" == "advanced" ]]; then
+        analyzer_scope="all"
+    fi
     if [[ "$MODE" == "local" ]]; then
         ensure_local_results_permissions
     fi
     log "Analizando resultados en ${rdir}"
-    .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$rdir" --output "$rdir/figures" --scope official --validate
+    .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$rdir" --output "$rdir/figures" --scope "$analyzer_scope" --validate
 }
 
 run_validate() {

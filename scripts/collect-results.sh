@@ -90,6 +90,14 @@ if [ -d "$LOCAL_DEST/results" ]; then
     rmdir "$LOCAL_DEST/results" 2>/dev/null || true
 fi
 
+LOCAL_BASE_NAME="$(basename "$LOCAL_DEST")"
+if [ -d "$LOCAL_DEST/$LOCAL_BASE_NAME" ]; then
+    shopt -s dotglob nullglob
+    mv "$LOCAL_DEST/$LOCAL_BASE_NAME"/* "$LOCAL_DEST/" 2>/dev/null || true
+    shopt -u dotglob nullglob
+    rmdir "$LOCAL_DEST/$LOCAL_BASE_NAME" 2>/dev/null || true
+fi
+
 # Calcular estadísticas de lo copiado
 CSV_COUNT=$(find "$LOCAL_DEST" -name "latency_samples.csv" 2>/dev/null | wc -l | tr -d ' ')
 TOTAL_LINES=$(
