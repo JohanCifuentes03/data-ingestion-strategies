@@ -55,7 +55,7 @@ sync_probe_csv_from_producer() {
     local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
     [ -z "$producer_ip" ] && return
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/results/latency_samples.csv" \
+        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv" \
         "$PROBE_GLOBAL" >/dev/null 2>&1 || true
 }
 
@@ -69,10 +69,10 @@ sync_generator_summary_from_producer() {
     log "Sincronizando generator_summary.json desde producer ($producer_ip)..."
     
     # First check if file exists on remote
-    remote_shell "$producer_ip" "ls -la ~/data-ingestion-strategies/results/generator_summary.json 2>/dev/null || echo 'FILE_NOT_FOUND'" | head -1
+    remote_shell "$producer_ip" "ls -la ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/generator_summary.json 2>/dev/null || echo 'FILE_NOT_FOUND'" | head -1
     
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/results/generator_summary.json" \
+        "${SSH_USER}@${producer_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/generator_summary.json" \
         "$GENERATOR_SUMMARY_GLOBAL" 2>&1
     
     if [ $? -eq 0 ] && [ -f "$GENERATOR_SUMMARY_GLOBAL" ]; then
@@ -93,7 +93,7 @@ archive_run_to_sink() {
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
     [ -z "$sink_ip" ] && return
 
-    remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
+    remote_shell "$sink_ip" "mkdir -p ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/${strategy}/${scenario}/${run_id}" >/dev/null 2>&1 || true
     local candidates=(
         "$run_dir/latency_samples.csv"
         "$run_dir/prometheus_snapshot.csv"
@@ -116,10 +116,15 @@ archive_run_to_sink() {
     fi
     scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
         "${files[@]}" \
-        "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/results/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
+        "${SSH_USER}@${sink_ip}:~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/${strategy}/${scenario}/${run_id}/" >/dev/null 2>&1 || true
 }
 
-RESULTS_BASE="$ROOT_DIR/results"
+RESULTS_BASE="${RESULTS_BASE:-$ROOT_DIR/results}"
+case "$RESULTS_BASE" in
+    /*) ;;
+    *) RESULTS_BASE="$ROOT_DIR/$RESULTS_BASE" ;;
+esac
+REMOTE_RESULTS_BASE_NAME="$(basename "$RESULTS_BASE")"
 PROBE_GLOBAL="$RESULTS_BASE/latency_samples.csv"
 GENERATOR_SUMMARY_GLOBAL="$RESULTS_BASE/generator_summary.json"
 PROBE_HEADER="event_id,strategy,scenario,run_id,produced_at,visible_at,latency_ms"
@@ -288,6 +293,7 @@ start_generator_for_scenario() {
                  GENERATOR_SUMMARY_PATH='/results/generator_summary.json' \
                  GENERATOR_THREADS='${GENERATOR_THREADS}' \
                  LOAD_PROFILE='${LOAD_PROFILE}' \
+                 RESULTS_VOLUME_HOST='/home/ubuntu/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}' \
                  docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --no-deps generator"
         else
             docker compose up -d --no-deps --force-recreate generator
@@ -742,12 +748,12 @@ reset_probe_csv() {
     # desde el host), por lo que el archivo puede estar bloqueado/en uso.
     if [ "$MODE" = "distributed" ]; then
         local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
-        remote_shell "$producer_ip" "mkdir -p ~/data-ingestion-strategies/results && sudo -n chown -R ubuntu:ubuntu ~/data-ingestion-strategies/results >/dev/null 2>&1 || true"
-        remote_shell "$producer_ip" "chmod 777 ~/data-ingestion-strategies/results >/dev/null 2>&1 || true; touch ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true; chmod 666 ~/data-ingestion-strategies/results/latency_samples.csv >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "mkdir -p ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} && sudo -n chown -R ubuntu:ubuntu ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} >/dev/null 2>&1 || true"
+        remote_shell "$producer_ip" "chmod 777 ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME} >/dev/null 2>&1 || true; touch ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv >/dev/null 2>&1 || true; chmod 666 ~/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}/latency_samples.csv >/dev/null 2>&1 || true"
         remote_shell "$producer_ip" "docker rm -f tesis-probe >/dev/null 2>&1 || true"
         remote_shell "$producer_ip" \
             "cd ~/data-ingestion-strategies && \
-             RUN_ID='${RUN_ID}' STRATEGY='${STRATEGY}' SCENARIO='${SCENARIO}' GENERATOR_SCENARIO='${SCENARIO}' \
+             RUN_ID='${RUN_ID}' STRATEGY='${STRATEGY}' SCENARIO='${SCENARIO}' GENERATOR_SCENARIO='${SCENARIO}' RESULTS_VOLUME_HOST='/home/ubuntu/data-ingestion-strategies/${REMOTE_RESULTS_BASE_NAME}' \
              docker compose --env-file .env -f infra/docker/compose/producer.yml up -d --force-recreate --no-deps probe" >/dev/null 2>&1 || true
         local ok=false
         for _ in $(seq 1 6); do
@@ -1278,7 +1284,7 @@ run_batch() {
     mark_processing_end
 
     end_run_timer
-    RUN_DIR="${ROOT_DIR}/results/batch/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/batch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     sync_generator_summary_from_producer
     copy_generator_summary_to_run "$RUN_DIR"
@@ -1359,7 +1365,7 @@ run_microbatch() {
 
     mark_processing_end
 
-    RUN_DIR="${ROOT_DIR}/results/microbatch/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/microbatch/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
     if ! wait_for_generator_exit "$((RUN_DURATION_SECONDS + 30))"; then
@@ -1477,7 +1483,7 @@ run_streaming() {
 
     mark_processing_end
 
-    RUN_DIR="${ROOT_DIR}/results/streaming/${SCENARIO}/${RUN_ID}"
+    RUN_DIR="${RESULTS_BASE}/streaming/${SCENARIO}/${RUN_ID}"
     mkdir -p "$RUN_DIR"
     end_run_timer
     if ! wait_for_generator_exit "$((RUN_DURATION_SECONDS + 30))"; then

@@ -49,7 +49,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ../../../results:/results
+      - ${RESULTS_VOLUME_HOST:-../../../results}:/results
     stop_signal: SIGINT
     stop_grace_period: 45s
 
@@ -81,4 +81,4 @@ services:
     volumes:
       # Los resultados se persisten en el host para que collect-results.sh
       # pueda copiarlos via scp al finale del experimento
-      - ../../../results:/results
+      - ${RESULTS_VOLUME_HOST:-../../../results}:/results

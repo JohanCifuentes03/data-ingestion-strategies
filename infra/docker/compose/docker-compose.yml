@@ -271,7 +271,7 @@ services:
       WARMUP_SECONDS: ${GENERATOR_WARMUP_SECONDS:-30}
       PROMETHEUS_PORT: 8000
     volumes:
-      - ../../../results:/results
+      - ${RESULTS_VOLUME_HOST:-../../../results}:/results
     ports:
       - "8000:8000"
     stop_signal: SIGINT
@@ -297,7 +297,7 @@ services:
       RESULTS_PATH: /results
       PROMETHEUS_PORT: 8001
     volumes:
-      - ../../../results:/results
+      - ${RESULTS_VOLUME_HOST:-../../../results}:/results
     ports:
       - "8001:8001"
 

@@ -71,7 +71,7 @@ Conveniencia:
 Opciones:
   --mode <local|distributed>     Modo de ejecución (default: distributed)
   --scope <official|advanced>    Alcance del benchmark (default: official)
-  --load-profile <constant|bursty>
+  --load-profile <constant|bursty|cyclic>
                                   Perfil de carga del generator (default: constant)
   --compute-region <primary|brazil>
                                   Ubicación del nodo compute (default: primary)
@@ -431,8 +431,8 @@ if [[ "$SCOPE" != "official" && "$SCOPE" != "advanced" ]]; then
     exit 1
 fi
 
-if [[ "$LOAD_PROFILE" != "constant" && "$LOAD_PROFILE" != "bursty" ]]; then
-    err "--load-profile debe ser constant o bursty"
+if [[ "$LOAD_PROFILE" != "constant" && "$LOAD_PROFILE" != "bursty" && "$LOAD_PROFILE" != "cyclic" ]]; then
+    err "--load-profile debe ser constant, bursty o cyclic"
     exit 1
 fi
 
