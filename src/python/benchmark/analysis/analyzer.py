@@ -416,6 +416,28 @@ def _add_box_stats(ax, x_pos: float, values: np.ndarray):
     )
 
 
+def _add_box_min_q2_max(ax, x_pos: float, values: np.ndarray):
+    vals = pd.Series(values).dropna()
+    if vals.empty:
+        return
+    stats = [
+        ("Min", vals.min()),
+        ("Q2", vals.quantile(0.50)),
+        ("Max", vals.max()),
+    ]
+    text = "\n".join(f"{label} {value:,.0f}" for label, value in stats)
+    ax.text(
+        x_pos + 0.34,
+        vals.quantile(0.50),
+        text,
+        ha="left",
+        va="center",
+        fontsize=6.5,
+        linespacing=0.95,
+        bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "#bdbdbd", "alpha": 0.82},
+    )
+
+
 def _label_bars(ax, bars, values, formatter, offset_ratio: float = 0.01):
     ymax = ax.get_ylim()[1]
     offset = ymax * offset_ratio if ymax > 0 else 0.1
@@ -1266,8 +1288,7 @@ def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFr
 
     groups = []
     labels = []
-    colors = []
-    stats_rows = []
+    order = []
     for strategy in STRATEGY_ORDER:
         grp = adv_latency[adv_latency["strategy"].astype(str) == strategy]
         if grp.empty:
@@ -1277,56 +1298,35 @@ def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFr
             continue
         groups.append(values.values)
         labels.append(STRATEGY_LABELS.get(strategy, strategy.capitalize()))
-        colors.append(STRATEGY_COLORS.get(strategy, "#999"))
-        stats_rows.append([
-            f"{values.min():,.0f}",
-            f"{values.median():,.0f}",
-            f"{values.max():,.0f}",
-        ])
+        order.append(strategy)
 
     if not groups:
         return
 
-    fig, (ax, table_ax) = plt.subplots(
-        2,
-        1,
-        figsize=(8.0, 5.6),
-        gridspec_kw={"height_ratios": [4.0, 1.05]},
-    )
-    bp = ax.boxplot(groups, tick_labels=labels, patch_artist=True, showfliers=False, widths=0.55)
-    for box, color in zip(bp["boxes"], colors):
-        box.set_facecolor(color)
-        box.set_edgecolor("#222222")
-        box.set_alpha(0.88)
-    for median in bp["medians"]:
-        median.set_color("#f28e2b")
-        median.set_linewidth(1.6)
-
-    ax.set_yscale("log")
-    ax.set_ylabel("Latencia de disponibilidad (ms, escala log)", fontsize=9)
-    ax.set_title("Distribución global de latencia bajo carga cíclica interregional", fontsize=11, pad=10)
-    ax.grid(axis="y", alpha=0.22)
-    ax.tick_params(axis="x", labelsize=9)
-    ax.tick_params(axis="y", labelsize=8)
-
-    table_ax.axis("off")
-    table = table_ax.table(
-        cellText=stats_rows,
-        rowLabels=labels,
-        colLabels=["Min", "Q2 (mediana)", "Max"],
-        loc="center",
-        cellLoc="center",
-        rowLoc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1.0, 1.2)
-    for cell in table.get_celld().values():
-        cell.set_edgecolor("#d0d0d0")
-        cell.set_linewidth(0.6)
-
-    fig.tight_layout(h_pad=0.65)
-    _save_figure(fig, out_dir, "fig_a4_latency_distribution_cyclic")
+    with plt.style.context("seaborn-v0_8-whitegrid"):
+        fig, ax = plt.subplots(figsize=(7.5, 5.2))
+        bp = ax.boxplot(groups, patch_artist=True, showfliers=False, widths=0.55)
+        for patch, strategy in zip(bp["boxes"], order):
+            patch.set_facecolor(STRATEGY_COLORS[strategy])
+            patch.set_alpha(0.9)
+            patch.set_edgecolor("#333333")
+        for median in bp["medians"]:
+            median.set_color("#111111")
+            median.set_linewidth(1.5)
+        for whisker in bp["whiskers"]:
+            whisker.set_color("#555555")
+        for cap in bp["caps"]:
+            cap.set_color("#555555")
+        for pos, values in enumerate(groups, start=1):
+            _add_box_min_q2_max(ax, float(pos), values)
+        ax.set_xticks(range(1, len(labels) + 1))
+        ax.set_xticklabels(labels)
+        ax.set_yscale("log")
+        ax.set_ylabel("Latencia de disponibilidad (ms, escala logarítmica)")
+        ax.set_title("Distribución global de latencia bajo carga cíclica interregional")
+        _light_axis_style(ax)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        _save_figure(fig, out_dir, "fig_a4_latency_distribution_cyclic")
 
 def main():
     args = parse_args()
