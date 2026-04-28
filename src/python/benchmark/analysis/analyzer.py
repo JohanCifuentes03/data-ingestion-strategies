@@ -1276,10 +1276,28 @@ def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFr
         colors.append(STRATEGY_COLORS.get(strategy, "#999"))
     if groups:
         bp = ax.boxplot(groups, tick_labels=labels, patch_artist=True, showfliers=False)
-        for box, color in zip(bp["boxes"], colors):
+        for idx, (box, color, values) in enumerate(zip(bp["boxes"], colors, groups), start=1):
             box.set_facecolor(color)
             box.set_edgecolor("#222222")
             box.set_alpha(0.85)
+            clean = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+            if clean.empty:
+                continue
+            min_v = float(clean.min())
+            q2_v = float(clean.median())
+            max_v = float(clean.max())
+            x = idx + 0.28
+            for label, val in [("Min", min_v), ("Q2", q2_v), ("Max", max_v)]:
+                ax.text(
+                    x,
+                    val,
+                    f"{label}: {val:,.0f}",
+                    fontsize=7,
+                    va="center",
+                    ha="left",
+                    color="#222222",
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.68, "pad": 1.2},
+                )
         ax.set_yscale("log")
         ax.set_ylabel("Latencia de disponibilidad (ms, escala log)")
         ax.set_title("Distribución global de latencia bajo carga cíclica interregional", fontsize=11)
@@ -1335,7 +1353,6 @@ def main():
         )
         fig_a1_cyclic_response_timeseries(produced_ts, visible_ts, out_dir)
         fig_a2_observable_backlog_timeseries(backlog_ts, out_dir)
-        fig_a3_latency_percentiles_timeseries(latency_ts, out_dir)
         fig_a4_latency_distribution_cyclic(latency, adv_metrics, out_dir)
 
     print(f"\n[INFO] Done. Output: {out_dir}")
