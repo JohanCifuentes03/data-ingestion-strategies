@@ -511,6 +511,46 @@ db_count_visible_events() {
     fi
 }
 
+postgres_accepts_queries() {
+    local query="SELECT 1;"
+    if [ "$MODE" = "distributed" ]; then
+        local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" \
+            "exec -T postgres psql -U ${POSTGRES_USER_NAME} -d ${POSTGRES_DB_NAME} -t -A -c \"${query}\"" >/dev/null 2>&1
+    else
+        docker compose exec -T postgres psql -U "${POSTGRES_USER_NAME}" -d "${POSTGRES_DB_NAME}" -t -A -c "$query" >/dev/null 2>&1
+    fi
+}
+
+wait_for_postgres_ready() {
+    local max_wait="${1:-300}"
+    local poll_seconds="${2:-5}"
+    local waited=0
+    log "Esperando PostgreSQL listo para consultas SQL..."
+    while [ "$waited" -lt "$max_wait" ]; do
+        if postgres_accepts_queries; then
+            log "PostgreSQL listo"
+            return 0
+        fi
+        sleep "$poll_seconds"
+        waited=$((waited + poll_seconds))
+    done
+    warn "PostgreSQL no acepto consultas SQL despues de ${max_wait}s; abortando antes de generar eventos"
+    return 1
+}
+
+truncate_events_table() {
+    wait_for_postgres_ready 300 5 || exit 1
+    if [ "$MODE" = "distributed" ]; then
+        local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
+        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" \
+            "exec -T postgres psql -U ${POSTGRES_USER_NAME} -d ${POSTGRES_DB_NAME} -v ON_ERROR_STOP=1 -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null
+    else
+        docker compose exec -T postgres psql -U "${POSTGRES_USER_NAME}" -d "${POSTGRES_DB_NAME}" -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" >/dev/null
+    fi
+    wait_for_postgres_ready 60 2 || exit 1
+}
+
 export_latency_samples_from_db() {
     local run_dir="$1"
     local strategy="$2"
@@ -1225,11 +1265,11 @@ run_batch() {
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "restart flink-jobmanager flink-taskmanager" >/dev/null 2>&1 || true
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "exec -T spark-master sh -c 'pkill -f spark || true'" >/dev/null 2>&1 || true
-        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+        truncate_events_table
     else
         docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
         docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
-        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+        truncate_events_table
     fi
     prepare_run_topic
     reset_probe_csv
@@ -1323,11 +1363,11 @@ run_microbatch() {
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "restart flink-jobmanager flink-taskmanager" >/dev/null 2>&1 || true
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" "exec -T spark-master sh -c 'pkill -f spark || true'" >/dev/null 2>&1 || true
-        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+        truncate_events_table
     else
         docker compose restart flink-jobmanager flink-taskmanager >/dev/null 2>&1 || true
         docker compose exec -T spark-master sh -c 'pkill -f spark || true' >/dev/null 2>&1 || true
-        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+        truncate_events_table
     fi
     prepare_run_topic
     reset_probe_csv
@@ -1407,9 +1447,9 @@ run_streaming() {
     # Limpiar antes
     log "Limpiando entorno..."
     if [ "$MODE" = "distributed" ]; then
-        remote_compose "$sink_ip" "infra/docker/compose/sink.yml" "exec -T postgres psql -U benchmark -d benchmark -c \"TRUNCATE TABLE events RESTART IDENTITY CASCADE;\"" >/dev/null 2>&1 || true
+        truncate_events_table
     else
-        docker compose exec -T postgres psql -U benchmark -d benchmark -c "TRUNCATE TABLE events RESTART IDENTITY CASCADE;" 2>/dev/null || true
+        truncate_events_table
     fi
     prepare_run_topic
     reset_probe_csv
