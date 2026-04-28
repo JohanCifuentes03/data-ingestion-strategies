@@ -671,8 +671,10 @@ def build_official_metrics(
     ]].copy()
 
     metrics["strategy"] = pd.Categorical(metrics["strategy"], categories=STRATEGY_ORDER, ordered=True)
-    metrics["scenario"] = pd.Categorical(metrics["scenario"], categories=SCENARIO_ORDER, ordered=True)
-    metrics = metrics.sort_values(["scenario", "strategy", "run_id"]).reset_index(drop=True)
+    metrics["scenario"] = metrics["scenario"].astype(str)
+    scenario_order = _sort_by_known(metrics["scenario"].dropna().unique().tolist(), SCENARIO_ORDER)
+    metrics["scenario_sort"] = pd.Categorical(metrics["scenario"], categories=scenario_order, ordered=True)
+    metrics = metrics.sort_values(["scenario_sort", "strategy", "run_id"]).drop(columns=["scenario_sort"]).reset_index(drop=True)
     metrics.to_csv(out_dir / "official_metrics_summary.csv", index=False)
     print("[OK] official_metrics_summary.csv")
     return metrics
@@ -1162,16 +1164,22 @@ def main():
     metrics = build_official_metrics(latency, run_metadata, run_summary, generator_summary, lag_ts, resources_ts, out_dir)
 
     export_latency_summary_table(latency, out_dir)
-    fig_11_1_latency_distribution(latency, out_dir)
-    fig_11_2_official_window_throughput(metrics, out_dir)
-    fig_11_3_delivery_ratio_cutoff_vs_drain(metrics, out_dir)
-    fig_11_4_pending_visibility_backlog(metrics, out_dir)
-    fig_11_4b_kafka_consumer_lag_real(metrics, out_dir)
-    fig_11_5_drain_time(metrics, out_dir)
-    fig_11_6_compute_resource_usage(metrics, out_dir)
-    export_statistical_tests(latency, out_dir)
 
-    advanced_scenarios = [s for s in metrics["scenario"].unique() if "cyclic" in s or "bursty" in s]
+    official_metrics = metrics[metrics["scenario"].isin(SCENARIO_ORDER)].copy()
+    official_latency = latency[latency["scenario"].isin(SCENARIO_ORDER)].copy()
+    if not official_metrics.empty:
+        fig_11_1_latency_distribution(official_latency, out_dir)
+        fig_11_2_official_window_throughput(official_metrics, out_dir)
+        fig_11_3_delivery_ratio_cutoff_vs_drain(official_metrics, out_dir)
+        fig_11_4_pending_visibility_backlog(official_metrics, out_dir)
+        fig_11_4b_kafka_consumer_lag_real(official_metrics, out_dir)
+        fig_11_5_drain_time(official_metrics, out_dir)
+        fig_11_6_compute_resource_usage(official_metrics, out_dir)
+        export_statistical_tests(official_latency, out_dir)
+    else:
+        print("[INFO] Sin escenarios oficiales; omitiendo figuras oficiales fig_11_*")
+
+    advanced_scenarios = [s for s in metrics["scenario"].dropna().astype(str).unique() if "cyclic" in s or "bursty" in s]
     if advanced_scenarios:
         adv_metrics = metrics[metrics["scenario"].isin(advanced_scenarios)]
         fig_a1_cyclic_load_profile(results_dir, adv_metrics, out_dir)

@@ -389,7 +389,7 @@ def main():
     topic = os.getenv("TOPIC_NAME", "events")
     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     summary_path = os.getenv("GENERATOR_SUMMARY_PATH", "/results/generator_summary.json")
-    load_profile = os.getenv("GENERATOR_LOAD_PROFILE", "constant")
+    load_profile = os.getenv("GENERATOR_LOAD_PROFILE", load_profile).strip().lower()
 
     base_rate = scenario["event_rate"]
     payload_sizes = scenario.get("payload_sizes", [scenario["payload"]])
