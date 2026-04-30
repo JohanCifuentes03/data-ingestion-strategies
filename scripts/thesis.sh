@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Public benchmark entrypoint.
+#
+# Use this script for normal local/distributed workflows. Lower-level scripts
+# under scripts/ are internal helpers and may mutate runtime state directly.
+# In particular, run/collect/destroy paths can truncate database tables,
+# replace local results, or destroy infrastructure depending on subcommand.
 
 set -euo pipefail
 

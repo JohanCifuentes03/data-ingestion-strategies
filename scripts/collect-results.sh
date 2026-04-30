@@ -4,6 +4,11 @@
 #
 # Copia los resultados del experimento distribuido desde el nodo sink
 # (VM-4 / node-sink) hacia ./results-distributed/ en la máquina local.
+#
+# Riesgo operativo:
+#   Reemplaza el directorio local de destino antes de sincronizar. No ejecutar
+#   durante una prueba activa ni si existen resultados locales sin respaldar.
+#
 # Los resultados incluyen:
 #   - latency_samples.csv (por corrada: strategy/scenario/run_id/)
 #   - prometheus_snapshot.csv

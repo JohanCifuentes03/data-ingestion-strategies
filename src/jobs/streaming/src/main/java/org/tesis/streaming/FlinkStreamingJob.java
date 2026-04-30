@@ -47,7 +47,7 @@ public final class FlinkStreamingJob {
                 String jdbcUrl = config.getOrDefault("postgres.url", "jdbc:postgresql://postgres:5432/benchmark");
                 String jdbcUser = config.getOrDefault("postgres.user", "benchmark");
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
-                String parallelismStr = config.getOrDefault("parallelism", "1");
+                String parallelismStr = config.getOrDefault("parallelism", "4");
                 int parallelism = Integer.parseInt(parallelismStr);
                 long runDurationMs = Long.parseLong(
                                 config.getOrDefault("run.duration.seconds", "1200")) * 1000L;

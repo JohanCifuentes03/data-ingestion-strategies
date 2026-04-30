@@ -4,6 +4,17 @@
 #
 # Combina: run_batch, run_microbatch, run_streaming
 #
+# Rol operativo:
+#   Script interno llamado por experiment.sh/thesis.sh para ejecutar UNA corrida.
+#   Puede usarse manualmente para recuperación puntual, pero no es el entrypoint
+#   recomendado para usuarios finales.
+#
+# Riesgos:
+#   - Trunca la tabla PostgreSQL events antes de cada corrida.
+#   - Borra checkpoints Spark/Flink para aislar runs.
+#   - Resetea artefactos temporales del probe/generator.
+#   No ejecutar mientras se quiere preservar el estado activo de una corrida.
+#
 # Uso:
 #   ./scripts/run.sh batch low-load run_1
 #   ./scripts/run.sh microbatch medium-load run_1 "5 seconds"
@@ -943,7 +954,7 @@ POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
 RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
-FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-1}
+FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-4}
 FLINK_DETACHED=${FLINK_DETACHED:-false}
 
 # ── Prometheus URL y modo de acceso ──
@@ -1504,13 +1515,14 @@ run_streaming() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers $(resolve_broker_host):$(resolve_broker_port) --kafka.topic ${RUN_TOPIC} --postgres.url jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
+            "exec -T flink-jobmanager /opt/flink/bin/flink run ${FLINK_DETACH_FLAG} -c org.tesis.streaming.FlinkStreamingJob -p ${FLINK_PARALLELISM_VALUE} /opt/flink/usrlib/streaming-job.jar --parallelism ${FLINK_PARALLELISM_VALUE} --scenario ${SCENARIO} --run.id ${RUN_ID} --kafka.bootstrap.servers $(resolve_broker_host):$(resolve_broker_port) --kafka.topic ${RUN_TOPIC} --postgres.url jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user ${POSTGRES_USER_NAME} --postgres.password ${POSTGRES_PASSWORD_VALUE} --run.duration.seconds $((RUN_DURATION_SECONDS + 20))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec flink-jobmanager /opt/flink/bin/flink run \
         ${FLINK_DETACH_FLAG} \
         -c org.tesis.streaming.FlinkStreamingJob \
         -p ${FLINK_PARALLELISM_VALUE} \
         /opt/flink/usrlib/streaming-job.jar \
+        --parallelism ${FLINK_PARALLELISM_VALUE} \
         --scenario "$SCENARIO" \
         --run.id "$RUN_ID" \
         --kafka.bootstrap.servers kafka:9092 \
@@ -1577,7 +1589,7 @@ case "$STRATEGY" in
         echo ""
         echo "Variables de entorno:"
         echo "  RUN_DURATION_SECONDS   Duracion en segundos (default: 300)"
-        echo "  FLINK_PARALLELISM      Paralelismo Flink (default: 1)"
+        echo "  FLINK_PARALLELISM      Paralelismo Flink (default: 4)"
         echo ""
         echo "Ejemplos:"
         echo "  ./scripts/run.sh batch low-load run_1"

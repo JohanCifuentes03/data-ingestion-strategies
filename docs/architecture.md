@@ -21,13 +21,27 @@ This benchmark quantifies the trade-offs between these approaches using a contro
 - Throughput analysis under varying load
 - Resource efficiency (CPU, memory, network)
 - Distributed execution across the official low, medium, and high load profiles
+- Optional advanced appendix/stress runs using bursty or cyclic profiles
+
+**Official baseline**:
+- Scenarios: `low-load`, `medium-load`, `high-load`
+- Load profile: `constant`
+- Compute region: `primary`
+- Result root: `results-distributed/`
+
+**Advanced / appendix scope**:
+- Scenarios such as `cyclic-load-br-compute`
+- Load profiles such as `cyclic` or `bursty`
+- Optional Brazil compute node for interregional compute stress
+- Result root: `results-advanced/`
 
 **Out of Scope**:
 - Fault injection and recovery benchmarking
 - Complex stateful operations (joins, sessionization)
-- Multi-datacenter deployments
 - Security and authentication mechanisms
 - Cost optimization strategies
+
+The advanced Brazil workflow is an appendix/stress configuration, not the official thesis baseline. It is used to test behavior under cyclic load and interregional compute placement while keeping official results isolated.
 
 ## 2. Reference Architecture
 
@@ -108,6 +122,7 @@ The benchmark supports two operational topologies:
 
 - **Local topology**: all services run on one workstation via `infra/docker/compose/docker-compose.yml`
 - **Distributed topology**: services are split across 4 VMs in a private cloud network and orchestrated with Terraform + Ansible
+- **Advanced Brazil topology**: broker/sink/producer remain in the primary AWS region while the compute node can be provisioned in Brazil for appendix stress experiments
 
 #### 2.3.1 Local Topology (Single Host)
 
@@ -224,13 +239,15 @@ CREATE TABLE events (
 
 #### 2.4.2 Official Thesis Workload Profile (Current Repository Baseline)
 
-These values match the generator defaults and are the baseline for thesis reporting:
+These values match the official generator defaults and are the baseline for thesis reporting. Advanced profiles are intentionally separated and should not be mixed into the official comparison:
 
 | Scenario | Event rate | Payload base | Schema | Run duration (typical) |
 |---------|------------:|-------------:|--------|-----------------------:|
 | `low-load` | 2,000 ev/s | 1,500 B | `iot_sensor` | 300 s |
 | `medium-load` | 10,000 ev/s | 1,500 B | `financial_tick` | 300 s |
 | `high-load` | 30,000 ev/s | 1,500 B | `health_monitor` | 300 s |
+
+Advanced profiles currently include `bursty-load`, `bursty-load-br-compute`, and `cyclic-load-br-compute`. They are useful for appendix analysis and operational stress testing, but the official thesis matrix remains the three constant-load scenarios above.
 
 #### 2.4.3 Approximate Data Volume Budget (Generated Stream)
 
@@ -277,7 +294,7 @@ Where:
 
 **File**: `src/jobs/batch/SparkBatchJob.java`
 
-**Key Code**:
+**Key Code Pattern**:
 ```java
 Dataset<Row> kafkaDataset = spark.read()
     .format("kafka")
@@ -288,11 +305,14 @@ Dataset<Row> kafkaDataset = spark.read()
     .load();
 
 parsed.foreachPartition(rows -> {
-    List<Event> batch = new ArrayList<>();
-    rows.forEachRemaining(row -> batch.add(parseEvent(row)));
-    JdbcEventWriter.writeBatch(jdbcUrl, jdbcProps, batch, "batch", scenario, runId);
+    try (Connection connection = DriverManager.getConnection(jdbcUrl, jdbcProps);
+         PreparedStatement statement = connection.prepareStatement(INSERT_SQL)) {
+        // One JDBC connection per Spark partition, flushed in bounded batches.
+    }
 });
 ```
+
+Batch still accumulates events before processing. The bounded JDBC flush avoids executor heap growth and PostgreSQL connection storms without changing the benchmark model.
 
 **Configuration Trade-offs**:
 - `executor.memory`: Higher = more parallelism, but more resource cost
@@ -508,6 +528,9 @@ Latency = visible_at - produced_at
 - JVM warmup: Mitigated with configured warmup and analysis-side warmup filtering
 - Garbage collection: Not controlled, measured as part of "real-world" performance
 - Network latency: Minimized in local mode, measured in distributed mode
+- Sink readiness: The runner waits for PostgreSQL to accept SQL before truncating or launching jobs
+- Clock skew: Distributed runs enforce NTP checks before experiments because latency depends on producer and sink timestamps
+- Result isolation: Official and advanced outputs use separate result roots to avoid mixing scenarios
 
 ### 6.2 External Validity
 

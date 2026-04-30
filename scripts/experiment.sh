@@ -5,6 +5,16 @@
 # Itera sobre estrategias × escenarios × repeticiones:
 # clean → warmup → run → cooldown → export
 #
+# Rol operativo:
+#   Orquestador interno de matrices. thesis.sh configura variables de entorno y
+#   delega aquí; este script luego llama scripts/run.sh por cada corrida.
+#
+# Riesgos:
+#   No sabe reanudar automáticamente desde el último run exitoso: siempre itera
+#   desde run_1 hasta run_N para las estrategias/escenarios indicados.
+#   Para continuar una prueba parcial, limitar --strategies/--scenarios o llamar
+#   scripts/run.sh manualmente con cuidado.
+#
 # Uso:
 #   ./scripts/experiment.sh --smoke        # ~5 min (1 estrategia, 1 escenario)
 #   ./scripts/experiment.sh --quick        # ~30 min (3 estrategias, 2 escenarios)

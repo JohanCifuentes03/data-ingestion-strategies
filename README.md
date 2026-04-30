@@ -27,26 +27,31 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 
 ### Prerequisites
 - **Docker** 20.10+ and **Docker Compose** 2.x
-- 16GB RAM, 4 CPU cores (for local mode)
-- *(Optional)* AWS account for distributed deployment
+- **Python** 3.11+ with the project package installed in `.venv`
+- **Java** 17 for Spark/Flink job builds
+- 16GB RAM, 4 CPU cores for local debugging
+- AWS credentials and Terraform/Ansible for distributed execution
 
-The official entrypoint is:
+The public entrypoint is:
 
 ```bash
 bash scripts/thesis.sh <subcommand> [options]
 ```
+
+The lower-level scripts in `scripts/run.sh`, `scripts/experiment.sh`, `scripts/collect-results.sh`, and `scripts/check-clock-sync.sh` are internal helpers used by `thesis.sh`. Use them directly only for manual recovery/resume workflows.
+
+### Scopes and result roots
+
+| Scope | Purpose | Load profile | Compute region | Result root |
+|------|---------|--------------|----------------|-------------|
+| `official` | Thesis baseline comparison across the three official scenarios | `constant` | `primary` | `results-distributed/` |
+| `advanced` | Appendix/stress experiments such as cyclic or bursty workloads | `cyclic` or `bursty` | `primary` or `brazil` | `results-advanced/` |
 
 The workflow is intentionally split into three phases:
 
-1. Infraestructura
-2. Ejecución
-3. Resultados y análisis
-
-The same entrypoint is used for both local debug runs and the official distributed execution:
-
-```bash
-bash scripts/thesis.sh <subcommand> [options]
-```
+1. Infrastructure provisioning/deployment
+2. Experiment execution
+3. Collection, analysis, and validation
 
 ## Local Workflow
 
@@ -106,16 +111,55 @@ bash scripts/thesis.sh deploy --mode distributed
 
 ### 2. Execution
 
-Official full run:
+Official full run (45 runs: 3 strategies × 3 scenarios × 5 reps):
 
 ```bash
-bash scripts/thesis.sh run --mode distributed
+bash scripts/thesis.sh run \
+  --mode distributed \
+  --scope official \
+  --compute-region primary \
+  --load-profile constant \
+  --results-dir results-distributed
+```
+
+Reduced official run for long but manageable sessions:
+
+```bash
+bash scripts/thesis.sh run \
+  --mode distributed \
+  --scope official \
+  --compute-region primary \
+  --load-profile constant \
+  --results-dir results-distributed \
+  --strategies "batch microbatch streaming" \
+  --scenarios "low-load medium-load high-load" \
+  --reps 3 \
+  --duration 180 \
+  --warmup 30 \
+  --cooldown 30
+```
+
+Resume-style runs can limit the strategy list, for example continuing from micro-batch onward without deleting existing Batch results:
+
+```bash
+bash scripts/thesis.sh run \
+  --mode distributed \
+  --scope official \
+  --compute-region primary \
+  --load-profile constant \
+  --results-dir results-distributed \
+  --strategies "microbatch streaming" \
+  --scenarios "low-load medium-load high-load" \
+  --reps 4 \
+  --duration 200 \
+  --warmup 30 \
+  --cooldown 30
 ```
 
 Short distributed verification run:
 
 ```bash
-bash scripts/thesis.sh run --mode distributed --reps 1 --duration 60 --warmup 5 --cooldown 5
+bash scripts/thesis.sh run --mode distributed --scope official --reps 1 --duration 60 --warmup 5 --cooldown 5
 ```
 
 ### 3. Results and Analysis
@@ -134,7 +178,32 @@ bash scripts/thesis.sh validate --mode distributed
 bash scripts/thesis.sh destroy --mode distributed
 ```
 
-Distributed outputs are written to `results-distributed/`.
+Distributed official outputs are written to `results-distributed/`.
+
+### Advanced cyclic workflow
+
+Advanced runs are separated from the thesis baseline and should use `results-advanced/`:
+
+```bash
+bash scripts/thesis.sh deploy --mode distributed --compute-region brazil
+
+bash scripts/thesis.sh run \
+  --mode distributed \
+  --scope advanced \
+  --compute-region brazil \
+  --load-profile cyclic \
+  --results-dir results-advanced \
+  --strategies "batch microbatch streaming" \
+  --scenarios "cyclic-load-br-compute" \
+  --reps 1 \
+  --duration 300 \
+  --warmup 30 \
+  --cooldown 30
+
+bash scripts/thesis.sh collect --mode distributed --results-dir results-advanced
+bash scripts/thesis.sh analyze --mode distributed --scope advanced --results-dir results-advanced
+bash scripts/thesis.sh validate --mode distributed --results-dir results-advanced
+```
 
 ## Convenience Mode
 
@@ -169,7 +238,9 @@ data-ingestion-strategies/
 │   └── config/                    # Service configurations
 ├── scripts/                       # Official workflow + execution scripts
 ├── docs/                          # Technical architecture documentation
-├── results/                       # Experiment outputs
+├── results/                       # Local debug outputs
+├── results-distributed/           # Official distributed outputs (ignored by git)
+├── results-advanced/              # Advanced appendix/stress outputs (ignored by git)
 ```
 
 ## Architecture Overview
@@ -328,21 +399,34 @@ Figures are exported in publication-ready formats:
 - **PNG**: Quick preview for notebooks/slides
 - **PDF**: Thesis and paper inclusion (vector quality)
 
-Current compact figure set (thesis-focused):
-- `latency_distribution_boxplot.*`: latency distribution with p50/p95/p99 annotations
-- `generated_vs_sink_throughput.*`: generated-real throughput vs sink-visible throughput (official window)
-- `delivery_capacity_by_scenario.*`: target vs generated-real vs visible-equivalent (window-normalized) throughput
-- `delivery_ratio_by_scenario.*`: visible/generated delivery ratio (%) after drain
-- `latency_slo_compliance.*`: latency SLO compliance (<=500ms, <=2s, <=10s)
-- `time_to_drain_by_scenario.*`: time from generation end to processing drain completion
-- `resource_usage_compute_node.*`: average CPU cores and memory RSS by scenario
-- `latency_summary_table.*`: summary table (CSV + figure)
-- `statistical_tests.csv`: Kruskal + pairwise Mann-Whitney (Bonferroni-adjusted)
+Current official figure set (thesis-focused):
+- `fig_11_1_latency_distribution.*`: latency distribution by strategy/scenario.
+- `fig_11_2_official_window_throughput.*`: generated-real throughput vs sink-visible throughput in the official window.
+- `fig_11_3_delivery_ratio_cutoff_vs_drain.*`: delivery ratio at cutoff vs after drain.
+- `fig_11_4_pending_visibility_backlog.*`: pending visibility backlog estimate.
+- `fig_11_4b_kafka_consumer_lag_real.*`: diagnostic lag figure only when real lag coverage exists.
+- `fig_11_5_drain_time.*`: time from generation end to processing drain completion.
+- `fig_11_6_compute_resource_usage.*`: average CPU and memory usage by strategy/scenario.
 
-Diagnostic figures (not part of the primary comparison conclusions):
-- `kafka_consumer_lag.*`: only where real lag metrics are available
-- `backlog_estimado.*`: diagnostic estimate, not a primary thesis metric
-- `cpu_cost_per_million_visible_events.*`: diagnostic compute-cost view
+Current CSV outputs:
+- `official_metrics_summary.csv`: main official metrics table.
+- `latency_summary_table.csv`: latency summary by strategy/scenario/run.
+- `statistical_tests.csv`: generated when enough comparable latency samples exist.
+
+Advanced cyclic outputs:
+- `fig_a1_cyclic_response_timeseries.*`
+- `fig_a2_observable_backlog_timeseries.*`
+- `fig_a4_latency_distribution_cyclic.*`
+- `generator_rate_timeline.csv`, `sink_visibility_timeline.csv`, `latency_timeseries.csv`, `backlog_timeseries.csv`
+
+## Operational Safety and Troubleshooting
+
+- Do not delete `results-distributed/` or `results-advanced/` while an experiment is running or when resuming partial results.
+- `scripts/run.sh` truncates the PostgreSQL `events` table before each run; this is expected for isolated runs but means it should not be used casually during active experiments.
+- `scripts/collect-results.sh` replaces the local destination directory before copying from the sink node. Run it only when you are ready to sync remote results locally.
+- If PostgreSQL reports `database system is in recovery mode`, check disk space on the sink VM and redeploy after freeing space.
+- Distributed runs enforce NTP checks through `scripts/check-clock-sync.sh`; clock skew above the threshold invalidates latency measurements.
+- `destroy` tears down local or distributed infrastructure. Do not run it while preserving active experiments.
 
 ## Notes
 
