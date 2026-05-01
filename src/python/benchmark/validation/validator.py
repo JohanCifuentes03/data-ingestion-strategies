@@ -6,9 +6,9 @@ Este script verifica que los resultados del benchmark sean válidos y coherentes
 para garantizar la calidad de los datos antes del análisis.
 
 Uso:
-    python tests/validation/validate_results.py
-    python tests/validation/validate_results.py --results-dir results
-    python tests/validation/validate_results.py --strict  # Falla en warnings
+    python -m benchmark.validation.validator
+    python -m benchmark.validation.validator --results-dir results
+    python -m benchmark.validation.validator --strict  # Falla en warnings
 """
 
 import argparse
@@ -20,6 +20,10 @@ import json
 
 import pandas as pd
 import numpy as np
+
+
+LATENCY_CHUNK_ROWS = 250_000
+LATENCY_SAMPLE_PER_FILE = 20_000
 
 
 @dataclass
@@ -37,22 +41,31 @@ class ValidationReport:
     results: List[ValidationResult] = field(default_factory=list)
     
     def add(self, result: ValidationResult):
+        """Adds one validation result to the report.
+        
+        Args:
+            result: ValidationResult instance to append.
+        """
         self.results.append(result)
     
     @property
     def errors(self) -> List[ValidationResult]:
+        """Returns failed validation checks with error severity."""
         return [r for r in self.results if r.severity == "error" and not r.passed]
     
     @property
     def warnings(self) -> List[ValidationResult]:
+        """Returns failed validation checks with warning severity."""
         return [r for r in self.results if r.severity == "warning" and not r.passed]
     
     @property
     def passed_count(self) -> int:
+        """Returns the number of checks that passed."""
         return sum(1 for r in self.results if r.passed)
     
     @property
     def all_passed(self) -> bool:
+        """Returns True when no error-severity checks failed."""
         return len(self.errors) == 0
     
     def print_report(self):
@@ -86,39 +99,117 @@ class ValidationReport:
 
 
 def load_latency_data(results_dir: Path) -> pd.DataFrame:
-    """Carga todos los archivos latency_samples.csv."""
+    """Carga una muestra acotada y conserva contadores exactos por chunks."""
     frames = []
+    stats = {
+        "total_rows": 0,
+        "negative": 0,
+        "extreme": 0,
+        "zero": 0,
+        "nan_latency": 0,
+        "invalid_timestamps": 0,
+        "timestamp_out_of_range": 0,
+        "strategy_counts": {},
+        "has_produced_at": False,
+        "has_visible_at": False,
+    }
+    extreme_threshold = 300_000
+    min_ts = 1577836800000
+    max_ts = 1893456000000
+
+    def consume_csv(csv_path: Path, strategy: str | None, scenario: str | None, run_id: str | None, seed: int):
+        """Streams one latency CSV into exact counters and bounded samples.
+        
+        Args:
+            csv_path: CSV file to read.
+            strategy: Optional strategy label inferred from the path.
+            scenario: Optional scenario label inferred from the path.
+            run_id: Optional run identifier inferred from the path.
+            seed: Random seed for deterministic sampling.
+        """
+        sample_parts = []
+        try:
+            chunks = pd.read_csv(csv_path, on_bad_lines="skip", chunksize=LATENCY_CHUNK_ROWS)
+            for chunk_idx, chunk in enumerate(chunks):
+                if chunk.empty or "latency_ms" not in chunk.columns:
+                    continue
+                chunk = chunk.copy()
+                chunk["latency_ms"] = pd.to_numeric(chunk["latency_ms"], errors="coerce")
+                stats["nan_latency"] += int(chunk["latency_ms"].isna().sum())
+                chunk = chunk.dropna(subset=["latency_ms"])
+                if chunk.empty:
+                    continue
+                if strategy is not None:
+                    chunk["strategy"] = strategy
+                if scenario is not None:
+                    chunk["scenario"] = scenario
+                if run_id is not None:
+                    chunk["run_id"] = run_id
+                chunk["source_file"] = str(csv_path)
+
+                lat = chunk["latency_ms"]
+                stats["total_rows"] += int(len(chunk))
+                stats["negative"] += int((lat < 0).sum())
+                stats["extreme"] += int((lat > extreme_threshold).sum())
+                stats["zero"] += int((lat == 0).sum())
+
+                if "strategy" in chunk.columns:
+                    for name, count in chunk["strategy"].value_counts().items():
+                        stats["strategy_counts"][str(name)] = stats["strategy_counts"].get(str(name), 0) + int(count)
+
+                if "produced_at" in chunk.columns and "visible_at" in chunk.columns:
+                    stats["has_produced_at"] = True
+                    stats["has_visible_at"] = True
+                    produced_at = pd.to_numeric(chunk["produced_at"], errors="coerce")
+                    visible_at = pd.to_numeric(chunk["visible_at"], errors="coerce")
+                    stats["invalid_timestamps"] += int((visible_at < produced_at).sum())
+                    out_of_range = (
+                        (produced_at < min_ts) | (produced_at > max_ts) |
+                        (visible_at < min_ts) | (visible_at > max_ts)
+                    )
+                    stats["timestamp_out_of_range"] += int(out_of_range.sum())
+
+                keep_cols = [col for col in ["latency_ms", "strategy", "scenario", "run_id", "produced_at", "visible_at", "source_file"] if col in chunk.columns]
+                per_chunk_sample = max(1, LATENCY_SAMPLE_PER_FILE // 8)
+                if len(chunk) > per_chunk_sample:
+                    sample_parts.append(chunk[keep_cols].sample(n=per_chunk_sample, random_state=seed + chunk_idx))
+                else:
+                    sample_parts.append(chunk[keep_cols])
+        except pd.errors.EmptyDataError:
+            return
+        if sample_parts:
+            sample = pd.concat(sample_parts, ignore_index=True)
+            if len(sample) > LATENCY_SAMPLE_PER_FILE:
+                sample = sample.sample(n=LATENCY_SAMPLE_PER_FILE, random_state=seed)
+            frames.append(sample)
     
     # Buscar en estructura anidada
-    for csv_path in results_dir.rglob("latency_samples.csv"):
+    for idx, csv_path in enumerate(sorted(results_dir.rglob("latency_samples.csv"))):
         parts = csv_path.relative_to(results_dir).parts
         if len(parts) >= 3:
             strategy, scenario, run_dir = parts[0], parts[1], parts[2]
-            df = pd.read_csv(csv_path, on_bad_lines="skip")
-            if not df.empty and "latency_ms" in df.columns:
-                df["strategy"] = strategy
-                df["scenario"] = scenario
-                df["run_id"] = run_dir
-                df["source_file"] = str(csv_path)
-                frames.append(df)
+            consume_csv(csv_path, strategy, scenario, run_dir, seed=idx + 10)
     
     # Buscar en raíz (formato plano)
     root_csv = results_dir / "latency_samples.csv"
     if root_csv.exists():
-        df = pd.read_csv(root_csv, on_bad_lines="skip")
-        if not df.empty and "latency_ms" in df.columns:
-            df["source_file"] = str(root_csv)
-            frames.append(df)
+        consume_csv(root_csv, None, None, None, seed=99_999)
     
     if not frames:
-        return pd.DataFrame()
-    
-    return pd.concat(frames, ignore_index=True)
+        df = pd.DataFrame()
+        df.attrs["stats"] = stats
+        return df
+
+    df = pd.concat(frames, ignore_index=True)
+    df.attrs["stats"] = stats
+    return df
 
 
 def validate_latency_range(df: pd.DataFrame, report: ValidationReport):
     """Valida que las latencias estén en rangos razonables."""
-    if df.empty:
+    stats = df.attrs.get("stats", {})
+    total_rows = int(stats.get("total_rows", len(df)))
+    if total_rows == 0:
         report.add(ValidationResult(
             "Latency data exists",
             False,
@@ -130,11 +221,14 @@ def validate_latency_range(df: pd.DataFrame, report: ValidationReport):
     report.add(ValidationResult(
         "Latency data exists",
         True,
-        f"Found {len(df):,} records"
+        f"Found {total_rows:,} records"
     ))
     
     # Latencias negativas
-    negative = (df["latency_ms"] < 0).sum()
+    if "negative" in stats:
+        negative = int(stats["negative"])
+    else:
+        negative = int((df["latency_ms"] < 0).sum())
     report.add(ValidationResult(
         "No negative latencies",
         negative == 0,
@@ -144,8 +238,11 @@ def validate_latency_range(df: pd.DataFrame, report: ValidationReport):
     
     # Latencias extremadamente altas (> 5 minutos)
     extreme_threshold = 300_000  # 5 minutos
-    extreme = (df["latency_ms"] > extreme_threshold).sum()
-    extreme_pct = extreme / len(df) * 100 if len(df) > 0 else 0
+    if "extreme" in stats:
+        extreme = int(stats["extreme"])
+    else:
+        extreme = int((df["latency_ms"] > extreme_threshold).sum())
+    extreme_pct = extreme / total_rows * 100 if total_rows > 0 else 0
     report.add(ValidationResult(
         "No extreme latencies (> 5 min)",
         extreme_pct < 1.0,  # Tolerar hasta 1%
@@ -154,8 +251,11 @@ def validate_latency_range(df: pd.DataFrame, report: ValidationReport):
     ))
     
     # Latencias cero
-    zero = (df["latency_ms"] == 0).sum()
-    zero_pct = zero / len(df) * 100 if len(df) > 0 else 0
+    if "zero" in stats:
+        zero = int(stats["zero"])
+    else:
+        zero = int((df["latency_ms"] == 0).sum())
+    zero_pct = zero / total_rows * 100 if total_rows > 0 else 0
     report.add(ValidationResult(
         "Minimal zero latencies",
         zero_pct < 5.0,
@@ -166,7 +266,8 @@ def validate_latency_range(df: pd.DataFrame, report: ValidationReport):
 
 def validate_data_completeness(df: pd.DataFrame, report: ValidationReport):
     """Valida que los datos estén completos."""
-    if df.empty:
+    stats = df.attrs.get("stats", {})
+    if int(stats.get("total_rows", len(df))) == 0:
         return
     
     # Columnas requeridas
@@ -180,7 +281,10 @@ def validate_data_completeness(df: pd.DataFrame, report: ValidationReport):
     ))
     
     # NaN en latency_ms
-    nan_count = df["latency_ms"].isna().sum()
+    if "nan_latency" in stats:
+        nan_count = int(stats["nan_latency"])
+    else:
+        nan_count = int(df["latency_ms"].isna().sum())
     report.add(ValidationResult(
         "No NaN latencies",
         nan_count == 0,
@@ -190,8 +294,10 @@ def validate_data_completeness(df: pd.DataFrame, report: ValidationReport):
     
     # Mínimo de muestras por estrategia
     min_samples = 100
-    for strategy in df["strategy"].unique():
-        count = (df["strategy"] == strategy).sum()
+    strategy_counts = stats.get("strategy_counts", {})
+    if not strategy_counts and "strategy" in df.columns:
+        strategy_counts = {str(strategy): int((df["strategy"] == strategy).sum()) for strategy in df["strategy"].unique()}
+    for strategy, count in strategy_counts.items():
         report.add(ValidationResult(
             f"Sufficient samples for {strategy}",
             count >= min_samples,
@@ -268,10 +374,11 @@ def validate_strategy_expectations(df: pd.DataFrame, report: ValidationReport):
 
 def validate_timestamps(df: pd.DataFrame, report: ValidationReport):
     """Valida coherencia de timestamps."""
-    if df.empty:
+    stats = df.attrs.get("stats", {})
+    if int(stats.get("total_rows", len(df))) == 0:
         return
     
-    if "produced_at" not in df.columns or "visible_at" not in df.columns:
+    if not stats.get("has_produced_at", "produced_at" in df.columns) or not stats.get("has_visible_at", "visible_at" in df.columns):
         report.add(ValidationResult(
             "Timestamp columns present",
             False,
@@ -287,7 +394,10 @@ def validate_timestamps(df: pd.DataFrame, report: ValidationReport):
     ))
     
     # visible_at > produced_at (siempre)
-    invalid = (df["visible_at"] < df["produced_at"]).sum()
+    if "invalid_timestamps" in stats:
+        invalid = int(stats["invalid_timestamps"])
+    else:
+        invalid = int((df["visible_at"] < df["produced_at"]).sum())
     report.add(ValidationResult(
         "visible_at >= produced_at",
         invalid == 0,
@@ -299,10 +409,13 @@ def validate_timestamps(df: pd.DataFrame, report: ValidationReport):
     min_ts = 1577836800000  # 2020-01-01
     max_ts = 1893456000000  # 2030-01-01
     
-    out_of_range = (
-        (df["produced_at"] < min_ts) | (df["produced_at"] > max_ts) |
-        (df["visible_at"] < min_ts) | (df["visible_at"] > max_ts)
-    ).sum()
+    if "timestamp_out_of_range" in stats:
+        out_of_range = int(stats["timestamp_out_of_range"])
+    else:
+        out_of_range = int((
+            (df["produced_at"] < min_ts) | (df["produced_at"] > max_ts) |
+            (df["visible_at"] < min_ts) | (df["visible_at"] > max_ts)
+        ).sum())
     
     report.add(ValidationResult(
         "Timestamps in valid range (2020-2030)",
@@ -348,6 +461,10 @@ def validate_prometheus_data(results_dir: Path, report: ValidationReport):
 
 
 def main():
+    """Runs the benchmark result validator CLI.
+    
+    The command loads latency samples, executes all validation checks, prints text or JSON output, and exits non-zero on failed error checks.
+    """
     parser = argparse.ArgumentParser(description="Validate benchmark results")
     parser.add_argument(
         "--results-dir",
