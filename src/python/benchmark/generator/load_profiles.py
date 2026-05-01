@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class LoadSegment:
+    """Represents one time segment in a dynamic load profile.
+    
+    Each segment defines the target event rate at its start and end so the generator can either hold a constant rate or interpolate linearly across the interval.
+    """
     start_s: int
     end_s: int
     start_rate: int
@@ -36,6 +40,10 @@ CYCLIC_DURATION_SECONDS = 150
 def _rate_from_segments(
     segments: list[LoadSegment], elapsed_s: float, fallback_rate: int
 ) -> int:
+    """Returns the event rate for elapsed time inside a segmented profile.
+    
+    The function walks the configured segments, interpolates ramp segments linearly, and falls back to the scenario rate when elapsed time is outside the profile definition.
+    """
     for segment in segments:
         if segment.start_s <= elapsed_s < segment.end_s:
             if segment.start_rate == segment.end_rate:
@@ -47,6 +55,10 @@ def _rate_from_segments(
 
 
 def rate_for_elapsed(profile_name: str, elapsed_s: float, fallback_rate: int) -> int:
+    """Resolves the target event rate for a named load profile.
+    
+    Constant profiles keep the scenario fallback rate, bursty profiles use the fixed burst schedule, and cyclic profiles repeat their schedule every cycle.
+    """
     if profile_name == "constant":
         return fallback_rate
     if profile_name == "bursty":
@@ -58,6 +70,10 @@ def rate_for_elapsed(profile_name: str, elapsed_s: float, fallback_rate: int) ->
 
 
 def max_rate_for_profile(profile_name: str, fallback_rate: int) -> int:
+    """Returns the highest possible target rate for a load profile.
+    
+    This is used to size producer thread count before the run starts so high-rate segments are not artificially capped.
+    """
     if profile_name == "bursty":
         return max(max(s.start_rate, s.end_rate) for s in BURSTY_PROFILE)
     if profile_name == "cyclic":

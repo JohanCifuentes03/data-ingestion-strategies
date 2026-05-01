@@ -100,10 +100,28 @@ MIN_PAYLOAD_BYTES = 1500
 
 # ── Event schema builders ───────────────────────────────────────────
 def _rand_str(n: int) -> str:
+    """Generates a random alphanumeric payload fragment.
+    
+    Args:
+        n: Number of characters to generate.
+    
+    Returns:
+        A random ASCII string of length n.
+    """
     return "".join(random.choices(string.ascii_letters + string.digits, k=n))
 
 
 def _iot_sensor_event(payload_size: int, event_id: str, payload_base: str) -> dict:
+    """Builds one synthetic IoT sensor event dictionary.
+    
+    Args:
+        payload_size: Requested payload size in bytes; retained for schema compatibility.
+        event_id: UUID string assigned to the event.
+        payload_base: Precomputed payload body shared within a production window.
+    
+    Returns:
+        Event fields for the iot_sensor schema.
+    """
     return {
         "event_id": event_id,
         "produced_at": int(time.time() * 1000),
@@ -119,6 +137,16 @@ def _iot_sensor_event(payload_size: int, event_id: str, payload_base: str) -> di
 
 
 def _financial_tick_event(payload_size: int, event_id: str, payload_base: str) -> dict:
+    """Builds one synthetic financial market tick event dictionary.
+    
+    Args:
+        payload_size: Requested payload size in bytes; retained for schema compatibility.
+        event_id: UUID string assigned to the event.
+        payload_base: Precomputed payload body shared within a production window.
+    
+    Returns:
+        Event fields for the financial_tick schema.
+    """
     symbols = ["BTC-USD", "ETH-USD", "SOL-USD", "AAPL", "MSFT", "GOOG", "AMZN"]
     exchanges = ["binance", "coinbase", "kraken", "nasdaq", "nyse"]
     price = round(random.uniform(1.0, 80000.0), 4)
@@ -138,6 +166,16 @@ def _financial_tick_event(payload_size: int, event_id: str, payload_base: str) -
 
 
 def _health_monitor_event(payload_size: int, event_id: str, payload_base: str) -> dict:
+    """Builds one synthetic health-monitoring event dictionary.
+    
+    Args:
+        payload_size: Requested payload size in bytes; retained for schema compatibility.
+        event_id: UUID string assigned to the event.
+        payload_base: Precomputed payload body shared within a production window.
+    
+    Returns:
+        Event fields for the health_monitor schema.
+    """
     hr = random.randint(40, 180)
     return {
         "event_id": event_id,
@@ -161,13 +199,16 @@ SCHEMA_BUILDERS = {
 }
 
 
-def build_event(schema: str, payload_size: int) -> bytes:
-    builder = SCHEMA_BUILDERS.get(schema, _iot_sensor_event)
-    return json.dumps(builder(payload_size, str(uuid.uuid4()), _rand_str(max(0, payload_size - 200)))).encode("utf-8")
-
-
 # ── Kafka helpers ───────────────────────────────────────────────────
 def configure_producer(bootstrap_servers: str) -> Producer:
+    """Creates a throughput-oriented Kafka producer.
+    
+    Args:
+        bootstrap_servers: Kafka bootstrap endpoint list.
+    
+    Returns:
+        Configured confluent_kafka Producer instance.
+    """
     return Producer(
         {
             "bootstrap.servers": bootstrap_servers,
@@ -186,6 +227,18 @@ def configure_producer(bootstrap_servers: str) -> Producer:
 
 
 def wait_for_kafka(bootstrap_servers: str, max_retries: int = 30) -> Producer:
+    """Waits until Kafka metadata can be fetched.
+    
+    Args:
+        bootstrap_servers: Kafka bootstrap endpoint list.
+        max_retries: Maximum readiness attempts.
+    
+    Returns:
+        A ready Producer connected to the cluster.
+    
+    Raises:
+        KafkaException: If Kafka remains unavailable after all retries.
+    """
     for attempt in range(1, max_retries + 1):
         try:
             p = configure_producer(bootstrap_servers)
@@ -202,7 +255,12 @@ def wait_for_kafka(bootstrap_servers: str, max_retries: int = 30) -> Producer:
 
 # ── Shared state for multi-threaded production ──────────────────────
 class SharedState:
+    """Mutable state shared by all producer worker threads.
+    
+    The object coordinates shutdown, current target rate, payload rotation, and aggregate counters under a lock.
+    """
     def __init__(self):
+        """Initializes generator runtime state and counters."""
         self.running = True
         self.current_rate = 0
         self.schema = "iot_sensor"
@@ -214,6 +272,11 @@ class SharedState:
         self.produce_errors = 0
 
     def next_payload_size(self) -> int:
+        """Returns the next payload size using round-robin selection.
+        
+        Returns:
+            The selected payload size in bytes.
+        """
         with self._lock:
             size = self.payload_sizes[self._payload_idx % len(self.payload_sizes)]
             self._payload_idx += 1
@@ -232,6 +295,10 @@ def producer_thread(
     target_rate_fn,
     interval: float = 0.1,
 ):
+    """Produces Kafka events in a rate-limited worker loop.
+    
+    Each thread owns its Kafka producer, divides the current target rate across all workers, batches UUID generation, updates Prometheus counters, and stops when shared state is cleared.
+    """
     try:
         producer = configure_producer(bootstrap_servers)
     except Exception as exc:
@@ -241,6 +308,10 @@ def producer_thread(
     log.info("Producer thread %d started", thread_id)
 
     def on_delivery(err, msg):
+        """Handles asynchronous Kafka delivery callbacks.
+        
+        Delivery errors are intentionally ignored here because per-window produce exceptions are counted separately by the worker loop.
+        """
         if err:
             pass
 
@@ -313,6 +384,11 @@ def producer_thread(
 
 # ── Scenario / config loading ───────────────────────────────────────
 def load_scenarios() -> dict:
+    """Loads scenario definitions from an optional YAML file.
+    
+    Returns:
+        Built-in scenarios merged with user overrides when SCENARIO_FILE is set.
+    """
     scenario_file = os.getenv("SCENARIO_FILE")
     if scenario_file and Path(scenario_file).is_file():
         with open(scenario_file, "r", encoding="utf-8") as f:
@@ -322,6 +398,14 @@ def load_scenarios() -> dict:
 
 
 def resolve_scenario(configs: dict):
+    """Resolves the active scenario and environment overrides.
+    
+    Args:
+        configs: Scenario configuration dictionary.
+    
+    Returns:
+        Tuple with scenario name and resolved scenario settings.
+    """
     key = os.getenv("SCENARIO", "low-load")
     base = configs.get(key, DEFAULT_SCENARIOS["low-load"])
     rate = int(os.getenv("EVENT_RATE", base.get("event_rate", 2000)))
@@ -339,6 +423,14 @@ def resolve_scenario(configs: dict):
 
 
 def decide_n_threads(target_rate: int) -> int:
+    """Chooses producer worker count for a target rate.
+    
+    Args:
+        target_rate: Maximum expected event rate for the run.
+    
+    Returns:
+        Thread count from GENERATOR_THREADS or the built-in heuristic.
+    """
     override = os.getenv("GENERATOR_THREADS")
     if override:
         try:
@@ -360,6 +452,10 @@ def append_rate_timeline_row(
     scenario_name: str,
     run_id: str,
 ):
+    """Appends the current target rate to the generator timeline CSV.
+    
+    The file is created with a header when missing so advanced profile analysis can reconstruct produced-rate dynamics.
+    """
     if not timeline_file.exists():
         timeline_file.parent.mkdir(parents=True, exist_ok=True)
         timeline_file.write_text(
@@ -375,6 +471,10 @@ def append_rate_timeline_row(
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
+    """Runs the benchmark event generator CLI.
+    
+    The entrypoint reads environment configuration, starts Prometheus metrics, waits for Kafka, launches producer threads, updates dynamic load profile rates, and writes generator_summary.json.
+    """
     run_duration = int(os.getenv("RUN_DURATION_SECONDS", "0"))  # 0 = infinite
     warmup_seconds = int(os.getenv("WARMUP_SECONDS", "30"))
     load_profile = os.getenv("LOAD_PROFILE", "constant").strip().lower()
@@ -426,9 +526,15 @@ def main():
 
     # Rate accessor for producer threads
     def current_rate_fn() -> int:
+        """Returns the latest target rate for worker threads.
+        
+        Returns:
+            Current shared event rate in events per second.
+        """
         return state.current_rate
 
     def handle_shutdown(signum, _frame):
+        """Handles SIGTERM/SIGINT by requesting producer shutdown."""
         log.info("Signal %s received, stopping generator", signum)
         state.running = False
 

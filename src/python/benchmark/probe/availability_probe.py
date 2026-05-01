@@ -69,6 +69,14 @@ def pg_connection(max_retries: int = 60, retry_interval: float = 2.0):
 
 
 def ensure_results_file(path: Path) -> Path:
+    """Creates the latency sample CSV when it does not exist.
+    
+    Args:
+        path: Destination latency_samples.csv path.
+    
+    Returns:
+        The same path after ensuring the parent directory and CSV header exist.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         with open(path, "w", newline="", encoding="utf-8") as handle:
@@ -91,12 +99,17 @@ RUNNING = True
 
 
 def handle_signal(signum, frame):  # pylint: disable=unused-argument
+    """Handles termination signals by stopping the probe loop."""
     global RUNNING  # noqa: PLW0603
     RUNNING = False
 
 
 # ── Main loop ──────────────────────────────────────────────────────
 def main():
+    """Runs the PostgreSQL availability probe CLI.
+    
+    The loop polls newly visible rows for the configured run labels, appends latency samples to CSV, exports Prometheus metrics, and reconnects after transient database failures.
+    """
     poll_interval = int(os.getenv("PROBE_POLL_INTERVAL_MS", "500")) / 1000.0
     results_path = Path(os.getenv("RESULTS_PATH", "/results")) / "latency_samples.csv"
     probe_run_id = os.getenv("RUN_ID", "run_1")
@@ -127,7 +140,6 @@ def main():
 
     while RUNNING:
         try:
-            drained_any = False
             while RUNNING:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -159,7 +171,6 @@ def main():
                 if not rows:
                     break
 
-                drained_any = True
                 with open(results_path, "a", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle)
                     for (
