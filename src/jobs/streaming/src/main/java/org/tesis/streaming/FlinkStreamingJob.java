@@ -35,9 +35,22 @@ import java.util.concurrent.TimeUnit;
  * - Detailed logging for debugging
  */
 public final class FlinkStreamingJob {
+        /**
+         * Prevents instantiation of this command-style utility class.
+         */
         private FlinkStreamingJob() {
         }
 
+        /**
+         * Runs the Apache Flink streaming ingestion job.
+         *
+         * <p>The job consumes the isolated Kafka topic from earliest offsets, parses each JSON
+         * record into an {@link Event}, rebalances work across the configured parallelism, and
+         * writes idempotently to PostgreSQL through the Flink JDBC sink.
+         *
+         * @param args command-line options accepted by {@link ConfigLoader#parseArgs(String[])}.
+         * @throws Exception if Flink job setup or execution fails outside the expected timeout stop path.
+         */
         public static void main(String[] args) throws Exception {
                 Map<String, String> config = ConfigLoader.parseArgs(args);
                 String scenario = config.getOrDefault("scenario", "low-load");

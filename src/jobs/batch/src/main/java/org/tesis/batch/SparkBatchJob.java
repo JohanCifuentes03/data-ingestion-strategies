@@ -35,9 +35,17 @@ public final class SparkBatchJob {
                         ON CONFLICT (event_id) DO NOTHING
                         """;
 
+        /**
+         * Prevents instantiation of this command-style utility class.
+         */
         private SparkBatchJob() {
         }
 
+        /**
+         * Defines the Spark SQL schema expected in Kafka JSON event payloads.
+         *
+         * @return schema containing the benchmark identifiers, timestamp, payload, and labels.
+         */
         private static StructType eventSchema() {
                 return new StructType(new StructField[] {
                                 DataTypes.createStructField("event_id", DataTypes.StringType, false),
@@ -49,6 +57,17 @@ public final class SparkBatchJob {
                 });
         }
 
+        /**
+         * Runs the bounded Spark batch ingestion job.
+         *
+         * <p>The job reads the configured Kafka topic from the requested starting and ending
+         * offsets, parses event JSON into columns, and writes each Spark partition to
+         * PostgreSQL using bounded JDBC batches. Malformed rows are skipped per partition so a
+         * small amount of bad input does not abort the complete batch.
+         *
+         * @param args command-line options accepted by {@link ConfigLoader#parseArgs(String[])}.
+         * @throws RuntimeException if a partition cannot be written to PostgreSQL.
+         */
         public static void main(String[] args) {
                 Map<String, String> config = ConfigLoader.parseArgs(args);
                 String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");

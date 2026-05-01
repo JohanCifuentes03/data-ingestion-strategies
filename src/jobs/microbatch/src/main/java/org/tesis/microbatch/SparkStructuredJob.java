@@ -6,6 +6,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.StreamingQueryException;
+import org.apache.spark.sql.streaming.StreamingQueryProgress;
 import org.apache.spark.sql.streaming.Trigger;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
@@ -30,12 +31,20 @@ import java.util.concurrent.TimeoutException;
  * - Detailed logging for debugging
  */
 public final class SparkStructuredJob {
-        private static final int MAX_RETRIES = 3;
-        private static final long RETRY_BACKOFF_MS = 1000;
+        private static final long DRAIN_POLL_MS = 2000;
+        private static final int REQUIRED_IDLE_POLLS = 3;
 
+        /**
+         * Prevents instantiation of this command-style utility class.
+         */
         private SparkStructuredJob() {
         }
 
+        /**
+         * Defines the Spark SQL schema expected in Kafka JSON event payloads.
+         *
+         * @return schema containing the benchmark identifiers, timestamp, payload, and labels.
+         */
         private static StructType eventSchema() {
                 return new StructType(new StructField[] {
                                 DataTypes.createStructField("event_id", DataTypes.StringType, false),
@@ -47,6 +56,19 @@ public final class SparkStructuredJob {
                 });
         }
 
+        /**
+         * Writes one Structured Streaming micro-batch to PostgreSQL.
+         *
+         * <p>The method persists the incoming Spark dataset long enough to count and write it,
+         * writes each partition through JDBC batches, and treats interruption/cancellation as a
+         * graceful shutdown path rather than a data error.
+         *
+         * @param batch Spark dataset for the current micro-batch.
+         * @param jdbcUrl PostgreSQL JDBC URL.
+         * @param props JDBC authentication and driver properties.
+         * @param batchId Spark micro-batch identifier for logging.
+         * @throws RuntimeException if the micro-batch fails for a non-interruption reason.
+         */
         private static void writeBatchWithRetry(Dataset<Row> batch, String jdbcUrl, Properties props, int batchId) {
                 batch.persist();
                 try {
@@ -105,6 +127,12 @@ public final class SparkStructuredJob {
                 }
         }
 
+        /**
+         * Detects whether an exception chain represents shutdown interruption.
+         *
+         * @param throwable exception to inspect.
+         * @return {@code true} when any cause is an interruption or cancellation signal.
+         */
         private static boolean isInterrupted(Throwable throwable) {
                 while (throwable != null) {
                         if (throwable instanceof InterruptedException
@@ -117,6 +145,17 @@ public final class SparkStructuredJob {
                 return false;
         }
 
+        /**
+         * Runs the Spark Structured Streaming micro-batch ingestion job.
+         *
+         * <p>The job starts from the isolated run topic, writes append-only micro-batches to
+         * PostgreSQL, waits through the official generation window, then observes idle batches
+         * until the configured drain condition or timeout is reached.
+         *
+         * @param args command-line options accepted by {@link ConfigLoader#parseArgs(String[])}.
+         * @throws StreamingQueryException if Spark reports a streaming query failure.
+         * @throws TimeoutException if Spark awaitTermination reports a timeout unexpectedly.
+         */
         public static void main(String[] args) throws StreamingQueryException, TimeoutException {
                 Map<String, String> config = ConfigLoader.parseArgs(args);
                 String kafkaBootstrap = config.getOrDefault("kafka.bootstrap.servers", "kafka:9092");
@@ -129,12 +168,21 @@ public final class SparkStructuredJob {
                 String jdbcPassword = config.getOrDefault("postgres.password", "benchmark");
                 String scenario = config.getOrDefault("scenario", "low-load");
                 String runId = config.getOrDefault("run.id", "run_1");
-                long runDurationMs = Long.parseLong(
-                                config.getOrDefault("run.duration.seconds", "1200")) * 1000L;
+                long officialDurationMs = Long.parseLong(
+                                config.getOrDefault("official.duration.seconds",
+                                                config.getOrDefault("run.duration.seconds", "1200"))) * 1000L;
+                long drainTimeoutMs = Long.parseLong(
+                                config.getOrDefault("drain.timeout.seconds", "600")) * 1000L;
+                long maxRunDurationMs = Long.parseLong(
+                                config.getOrDefault("run.duration.seconds",
+                                                String.valueOf((officialDurationMs + drainTimeoutMs) / 1000L))) * 1000L;
 
                 System.out.println("[microbatch] Starting with config:");
                 System.out.println("[microbatch]   scenario=" + scenario + " runId=" + runId);
-                System.out.println("[microbatch]   trigger=" + triggerInterval + " duration=" + runDurationMs + "ms");
+                System.out.println("[microbatch]   trigger=" + triggerInterval
+                                + " officialDuration=" + officialDurationMs + "ms"
+                                + " drainTimeout=" + drainTimeoutMs + "ms"
+                                + " maxDuration=" + maxRunDurationMs + "ms");
                 System.out.println("[microbatch]   kafka=" + kafkaBootstrap + " topic=" + topic);
 
                 SparkSession spark = SparkSession.builder()
@@ -174,9 +222,54 @@ public final class SparkStructuredJob {
                                 })
                                 .start();
 
-                if (runDurationMs > 0) {
-                        query.awaitTermination(runDurationMs);
-                        query.stop();
+                if (maxRunDurationMs > 0) {
+                        long startedAt = System.currentTimeMillis();
+                        long drainDeadline = startedAt + officialDurationMs + drainTimeoutMs;
+                        long hardDeadline = startedAt + maxRunDurationMs;
+                        int idlePolls = 0;
+                        long lastObservedBatchId = -1L;
+
+                        while (query.isActive()) {
+                                long now = System.currentTimeMillis();
+                                if (now < startedAt + officialDurationMs) {
+                                        if (query.awaitTermination(Math.min(DRAIN_POLL_MS, (startedAt + officialDurationMs) - now))) {
+                                                return;
+                                        }
+                                        continue;
+                                }
+
+                                StreamingQueryProgress progress = query.lastProgress();
+                                if (progress != null && progress.batchId() != lastObservedBatchId) {
+                                        lastObservedBatchId = progress.batchId();
+                                        if (progress.numInputRows() == 0) {
+                                                idlePolls++;
+                                                System.out.println("[microbatch] Drain idle poll " + idlePolls
+                                                                + "/" + REQUIRED_IDLE_POLLS
+                                                                + " after batch " + progress.batchId());
+                                        } else {
+                                                idlePolls = 0;
+                                                System.out.println("[microbatch] Drain still processing: batch="
+                                                                + progress.batchId()
+                                                                + " inputRows=" + progress.numInputRows());
+                                        }
+                                }
+
+                                if (idlePolls >= REQUIRED_IDLE_POLLS) {
+                                        System.out.println("[microbatch] Drain completed: no new Kafka input observed.");
+                                        query.stop();
+                                        return;
+                                }
+
+                                if (now >= drainDeadline || now >= hardDeadline) {
+                                        System.err.println("[microbatch] Drain timeout reached; stopping query.");
+                                        query.stop();
+                                        return;
+                                }
+
+                                if (query.awaitTermination(DRAIN_POLL_MS)) {
+                                        return;
+                                }
+                        }
                 } else {
                         query.awaitTermination();
                 }
