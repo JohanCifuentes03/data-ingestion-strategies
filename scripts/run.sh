@@ -43,6 +43,15 @@ COMPUTE_REGION=${COMPUTE_REGION:-primary}
 BRAZIL_NETWORK_MODE=${BRAZIL_NETWORK_MODE:-private}
 LOAD_PROFILE=${LOAD_PROFILE:-constant}
 
+#######################################
+# Runs a Docker Compose command on a remote benchmark VM over SSH.
+# Arguments:
+#   $1 - Remote host/IP.
+#   $2 - Compose file path relative to the remote repository root.
+#   $3 - Docker Compose arguments to execute.
+# Outputs:
+#   Forwards remote command stdout/stderr.
+#######################################
 remote_compose() {
     local host="$1"
     local compose_file="$2"
@@ -52,6 +61,14 @@ remote_compose() {
         "cd ~/data-ingestion-strategies && docker compose --env-file .env -f ${compose_file} ${compose_args}"
 }
 
+#######################################
+# Runs an arbitrary shell command on a remote benchmark VM over SSH.
+# Arguments:
+#   $1 - Remote host/IP.
+#   $2 - Shell command to execute remotely.
+# Outputs:
+#   Forwards remote command stdout/stderr.
+#######################################
 remote_shell() {
     local host="$1"
     local command="$2"
@@ -59,6 +76,13 @@ remote_shell() {
         "${SSH_USER}@${host}" "${command}"
 }
 
+#######################################
+# Copies the global probe CSV from the producer node in distributed mode.
+# Globals:
+#   MODE, CLOUD_VM_PRODUCER_PUBLIC_IP, REMOTE_RESULTS_BASE_NAME, PROBE_GLOBAL.
+# Side effects:
+#   Best-effort scp into the local/global probe CSV path.
+#######################################
 sync_probe_csv_from_producer() {
     if [ "$MODE" != "distributed" ]; then
         return
@@ -70,6 +94,13 @@ sync_probe_csv_from_producer() {
         "$PROBE_GLOBAL" >/dev/null 2>&1 || true
 }
 
+#######################################
+# Copies generator_summary.json from the producer node in distributed mode.
+# Globals:
+#   MODE, CLOUD_VM_PRODUCER_PUBLIC_IP, REMOTE_RESULTS_BASE_NAME, GENERATOR_SUMMARY_GLOBAL.
+# Side effects:
+#   Writes the synchronized summary locally when available.
+#######################################
 sync_generator_summary_from_producer() {
     if [ "$MODE" != "distributed" ]; then
         return
@@ -93,6 +124,16 @@ sync_generator_summary_from_producer() {
     fi
 }
 
+#######################################
+# Archives completed run artifacts to the sink node in distributed mode.
+# Arguments:
+#   $1 - Local run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Creates a remote result directory and copies available run artifacts.
+#######################################
 archive_run_to_sink() {
     if [ "$MODE" != "distributed" ]; then
         return
@@ -152,6 +193,13 @@ RUN_TOPIC="events"
 
 # ── Brazil / interregional resolvers ─────────────────────────────────
 
+#######################################
+# Resolves the public IP for the active compute node.
+# Globals:
+#   COMPUTE_REGION, CLOUD_VM_COMPUTE_PUBLIC_IP, CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP.
+# Outputs:
+#   Writes the selected public IP to stdout.
+#######################################
 resolve_compute_public_ip() {
     if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
         echo "${CLOUD_VM_COMPUTE_BRAZIL_PUBLIC_IP:-}"
@@ -160,6 +208,13 @@ resolve_compute_public_ip() {
     fi
 }
 
+#######################################
+# Resolves the broker host used by compute jobs.
+# Globals:
+#   COMPUTE_REGION, BRAZIL_NETWORK_MODE, CLOUD_VM_BROKER_IP, CLOUD_VM_BROKER_PUBLIC_IP.
+# Outputs:
+#   Writes a private or public broker address to stdout.
+#######################################
 resolve_broker_host() {
     if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
         if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
@@ -172,6 +227,13 @@ resolve_broker_host() {
     fi
 }
 
+#######################################
+# Resolves the Kafka broker port for the current topology.
+# Globals:
+#   COMPUTE_REGION, BRAZIL_NETWORK_MODE.
+# Outputs:
+#   Writes 9092 for private access or 19092 for public Brazil access.
+#######################################
 resolve_broker_port() {
     if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
         if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
@@ -184,6 +246,13 @@ resolve_broker_port() {
     fi
 }
 
+#######################################
+# Resolves the PostgreSQL sink host used by compute jobs.
+# Globals:
+#   COMPUTE_REGION, BRAZIL_NETWORK_MODE, CLOUD_VM_SINK_IP, CLOUD_VM_SINK_PUBLIC_IP.
+# Outputs:
+#   Writes a private or public sink address to stdout.
+#######################################
 resolve_sink_host() {
     if [ "${COMPUTE_REGION:-primary}" = "brazil" ]; then
         if [ "${BRAZIL_NETWORK_MODE:-private}" = "private" ]; then
@@ -196,10 +265,24 @@ resolve_sink_host() {
     fi
 }
 
+#######################################
+# Sanitizes a string so it can be embedded in a Kafka topic name.
+# Arguments:
+#   $1 - Raw strategy, scenario, or run identifier component.
+# Outputs:
+#   Lowercase alphanumeric/underscore/dash-safe topic component.
+#######################################
 sanitize_topic_part() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_'
 }
 
+#######################################
+# Builds a unique Kafka topic name for the current run.
+# Globals:
+#   STRATEGY, SCENARIO, RUN_ID, RUN_TOPIC.
+# Side effects:
+#   Updates RUN_TOPIC with a timestamped isolated topic name.
+#######################################
 set_run_topic() {
     local strategy_part scenario_part run_part
     strategy_part=$(sanitize_topic_part "$STRATEGY")
@@ -214,10 +297,34 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+#######################################
+# Prints an informational run-level message.
+# Arguments:
+#   $* - Message text.
+#######################################
 log()   { echo -e "${GREEN}[run]${NC} $*"; }
+
+#######################################
+# Prints a non-fatal run-level warning.
+# Arguments:
+#   $* - Warning text.
+#######################################
 warn()  { echo -e "${YELLOW}[run]${NC} $*"; }
+
+#######################################
+# Prints a run-level error message.
+# Arguments:
+#   $* - Error text.
+#######################################
 error() { echo -e "${RED}[run]${NC} $*"; }
 
+#######################################
+# Sets generator defaults for a known benchmark scenario.
+# Arguments:
+#   $1 - Scenario name.
+# Globals:
+#   GENERATOR_DEFAULT_RATE, GENERATOR_DEFAULT_PAYLOAD, GENERATOR_DEFAULT_SCHEMA.
+#######################################
 set_generator_defaults() {
     local scenario="$1"
     case "$scenario" in
@@ -255,6 +362,13 @@ set_generator_defaults() {
     esac
 }
 
+#######################################
+# Creates the isolated Kafka topic for the current run.
+# Globals:
+#   MODE, RUN_TOPIC, CLOUD_VM_BROKER_PUBLIC_IP.
+# Side effects:
+#   Creates a 12-partition Kafka topic locally or remotely.
+#######################################
 prepare_run_topic() {
     log "Preparando topic Kafka aislado para la corrida: ${RUN_TOPIC}"
     if [ "$MODE" = "distributed" ]; then
@@ -266,6 +380,15 @@ prepare_run_topic() {
     fi
 }
 
+#######################################
+# Starts the Python event generator container for a scenario.
+# Arguments:
+#   $1 - Scenario name.
+# Globals:
+#   MODE, RUN_TOPIC, RUN_ID, STRATEGY, RUN_DURATION_SECONDS, LOAD_PROFILE.
+# Side effects:
+#   Starts/recreates the generator container locally or on the producer VM.
+#######################################
 start_generator_for_scenario() {
     local scenario="$1"
     set_generator_defaults "$scenario"
@@ -312,6 +435,13 @@ start_generator_for_scenario() {
     )
 }
 
+#######################################
+# Copies the global generator summary into a per-run result directory.
+# Arguments:
+#   $1 - Destination run directory.
+# Globals:
+#   GENERATOR_SUMMARY_GLOBAL.
+#######################################
 copy_generator_summary_to_run() {
     local run_dir="$1"
     if [ -f "$GENERATOR_SUMMARY_GLOBAL" ]; then
@@ -321,6 +451,13 @@ copy_generator_summary_to_run() {
     fi
 }
 
+#######################################
+# Stops the generator container if it is still running.
+# Globals:
+#   MODE, CLOUD_VM_PRODUCER_PUBLIC_IP.
+# Side effects:
+#   Best-effort container stop locally or remotely.
+#######################################
 stop_generator_if_running() {
     if [ "$MODE" = "distributed" ]; then
         local producer_ip="${CLOUD_VM_PRODUCER_PUBLIC_IP:-}"
@@ -330,6 +467,15 @@ stop_generator_if_running() {
     fi
 }
 
+#######################################
+# Waits until the generator container exits or disappears.
+# Arguments:
+#   $1 - Optional timeout in seconds; defaults to 90.
+# Globals:
+#   MODE, CLOUD_VM_PRODUCER_PUBLIC_IP.
+# Returns:
+#   0 when exited/missing, 1 on timeout.
+#######################################
 wait_for_generator_exit() {
     local timeout_seconds="${1:-90}"
     local elapsed=0
@@ -354,6 +500,16 @@ wait_for_generator_exit() {
     return 1
 }
 
+#######################################
+# Verifies that a run produced generator_summary.json.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Returns:
+#   0 if summary exists, 1 otherwise.
+#######################################
 require_generator_summary() {
     local run_dir="$1"
     local strategy="$2"
@@ -366,6 +522,15 @@ require_generator_summary() {
     fi
 }
 
+#######################################
+# Recreates a Spark checkpoint directory for an isolated micro-batch run.
+# Arguments:
+#   $1 - Checkpoint subdirectory under /opt/spark/checkpoints.
+# Globals:
+#   MODE, CLOUD_VM_COMPUTE_PUBLIC_IP.
+# Side effects:
+#   Deletes and recreates the checkpoint subdirectory.
+#######################################
 clear_checkpoint_dir() {
     local subdir="$1"
     if [ -z "$subdir" ]; then
@@ -381,30 +546,67 @@ clear_checkpoint_dir() {
     fi
 }
 
+#######################################
+# Records the wall-clock start timestamp for the current run.
+# Globals:
+#   RUN_START_TS.
+#######################################
 start_run_timer() {
     RUN_START_TS=$(date +%s)
 }
 
+#######################################
+# Records the wall-clock end timestamp for the current run.
+# Globals:
+#   RUN_END_TS.
+#######################################
 end_run_timer() {
     RUN_END_TS=$(date +%s)
 }
 
+#######################################
+# Records when event generation starts.
+# Globals:
+#   GENERATION_START_TS.
+#######################################
 mark_generation_start() {
     GENERATION_START_TS=$(date +%s)
 }
 
+#######################################
+# Records when event generation ends.
+# Globals:
+#   GENERATION_END_TS.
+#######################################
 mark_generation_end() {
     GENERATION_END_TS=$(date +%s)
 }
 
+#######################################
+# Records when processing starts for the selected strategy.
+# Globals:
+#   PROCESSING_START_TS.
+#######################################
 mark_processing_start() {
     PROCESSING_START_TS=$(date +%s)
 }
 
+#######################################
+# Records when processing ends for the selected strategy.
+# Globals:
+#   PROCESSING_END_TS.
+#######################################
 mark_processing_end() {
     PROCESSING_END_TS=$(date +%s)
 }
 
+#######################################
+# Fills missing timing markers using conservative fallback values.
+# Globals:
+#   RUN_START_TS, RUN_END_TS, RUN_DURATION_SECONDS, generation/processing markers.
+# Side effects:
+#   Updates unset marker globals before metadata export.
+#######################################
 ensure_run_markers() {
     if [ "$GENERATION_START_TS" -le 0 ]; then
         GENERATION_START_TS=$RUN_START_TS
@@ -423,14 +625,34 @@ ensure_run_markers() {
     fi
 }
 
+#######################################
+# Reads the current git commit hash for reproducibility metadata.
+# Outputs:
+#   Writes the commit hash or "unknown" to stdout.
+#######################################
 get_git_commit() {
     git rev-parse HEAD 2>/dev/null || echo "unknown"
 }
 
+#######################################
+# Reads the current git branch name for reproducibility metadata.
+# Outputs:
+#   Writes the branch name or "unknown" to stdout.
+#######################################
 get_git_branch() {
     git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown"
 }
 
+#######################################
+# Writes run_metadata.json for one benchmark run.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Writes timing, topology, git, and workload metadata as JSON.
+#######################################
 write_run_metadata() {
     local run_dir="$1"
     local strategy="$2"
@@ -481,6 +703,16 @@ with open("${metadata_file}", "w", encoding="utf-8") as handle:
 PY
 }
 
+#######################################
+# Counts rows in a latency CSV for a specific strategy/scenario/run_id.
+# Arguments:
+#   $1 - latency_samples.csv path.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Outputs:
+#   Writes the matching row count to stdout.
+#######################################
 count_visible_events_csv() {
     local latency_file="$1"
     local strategy="$2"
@@ -507,6 +739,17 @@ print(count)
 PY
 }
 
+#######################################
+# Counts visible sink rows for a run directly from PostgreSQL.
+# Arguments:
+#   $1 - Strategy name.
+#   $2 - Scenario name.
+#   $3 - Run identifier.
+# Globals:
+#   MODE, PostgreSQL credentials, cloud sink IPs.
+# Outputs:
+#   Writes the database count to stdout.
+#######################################
 db_count_visible_events() {
     local strategy="$1"
     local scenario="$2"
@@ -522,6 +765,13 @@ db_count_visible_events() {
     fi
 }
 
+#######################################
+# Checks whether PostgreSQL is accepting SQL queries.
+# Globals:
+#   MODE, PostgreSQL credentials, cloud sink IPs.
+# Returns:
+#   0 when SELECT 1 succeeds, non-zero otherwise.
+#######################################
 postgres_accepts_queries() {
     local query="SELECT 1;"
     if [ "$MODE" = "distributed" ]; then
@@ -533,6 +783,14 @@ postgres_accepts_queries() {
     fi
 }
 
+#######################################
+# Waits for PostgreSQL to become query-ready.
+# Arguments:
+#   $1 - Optional max wait seconds; defaults to 300.
+#   $2 - Optional poll interval seconds; defaults to 5.
+# Returns:
+#   0 when ready, 1 on timeout.
+#######################################
 wait_for_postgres_ready() {
     local max_wait="${1:-300}"
     local poll_seconds="${2:-5}"
@@ -550,6 +808,13 @@ wait_for_postgres_ready() {
     return 1
 }
 
+#######################################
+# Truncates the sink events table before an isolated run.
+# Globals:
+#   MODE, PostgreSQL credentials, cloud sink IPs.
+# Side effects:
+#   Deletes all rows from events and restarts identity counters.
+#######################################
 truncate_events_table() {
     wait_for_postgres_ready 300 5 || exit 1
     if [ "$MODE" = "distributed" ]; then
@@ -562,6 +827,16 @@ truncate_events_table() {
     wait_for_postgres_ready 60 2 || exit 1
 }
 
+#######################################
+# Exports latency samples for a run from PostgreSQL to CSV.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Writes latency_samples.csv in the run directory.
+#######################################
 export_latency_samples_from_db() {
     local run_dir="$1"
     local strategy="$2"
@@ -592,6 +867,18 @@ ORDER BY visible_at ASC, event_id ASC
     fi
 }
 
+#######################################
+# Waits until the visible event count stops changing.
+# Arguments:
+#   $1 - Strategy name.
+#   $2 - Scenario name.
+#   $3 - Run identifier.
+#   $4 - Optional stable poll count; defaults to 3.
+#   $5 - Optional poll seconds; defaults to 2.
+#   $6 - Optional max wait seconds; defaults to 120.
+# Returns:
+#   Always returns 0 after stability or timeout.
+#######################################
 wait_for_visible_events_quiescence() {
     local strategy="$1"
     local scenario="$2"
@@ -622,6 +909,15 @@ wait_for_visible_events_quiescence() {
     return 0
 }
 
+#######################################
+# Extracts a numeric field from a JSON file with a fallback.
+# Arguments:
+#   $1 - JSON file path.
+#   $2 - Key to read.
+#   $3 - Optional fallback value; defaults to 0.
+# Outputs:
+#   Writes the parsed value or fallback to stdout.
+#######################################
 json_get_number() {
     local json_file="$1"
     local key="$2"
@@ -645,6 +941,13 @@ except Exception:
 PY
 }
 
+#######################################
+# Updates generation timing markers from generator_summary.json.
+# Arguments:
+#   $1 - generator_summary.json path.
+# Globals:
+#   GENERATION_START_TS, GENERATION_END_TS.
+#######################################
 apply_generation_markers_from_summary() {
     local summary_file="$1"
     if [ ! -f "$summary_file" ]; then
@@ -661,6 +964,16 @@ apply_generation_markers_from_summary() {
     fi
 }
 
+#######################################
+# Builds run_summary.json from generator, sink, and metric artifacts.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Writes run_summary.json in the run directory.
+#######################################
 build_run_summary() {
     local run_dir="$1"
     local strategy="$2"
@@ -732,6 +1045,14 @@ with open("${run_summary_file}", "w", encoding="utf-8") as handle:
 PY
 }
 
+#######################################
+# Reads a metric value from prometheus_snapshot.csv.
+# Arguments:
+#   $1 - CSV file path.
+#   $2 - Metric name.
+# Outputs:
+#   Writes the metric value or 0 to stdout.
+#######################################
 csv_metric_value() {
     local csv_file="$1"
     local metric_name="$2"
@@ -757,6 +1078,16 @@ print(value)
 PY
 }
 
+#######################################
+# Creates one-row lag/resource time series from a Prometheus snapshot.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Writes kafka_lag_timeseries.csv and resources_timeseries.csv.
+#######################################
 create_timeseries_from_snapshot() {
     local run_dir="$1"
     local strategy="$2"
@@ -791,6 +1122,13 @@ create_timeseries_from_snapshot() {
     printf '%s,%s,%s,%s,%s,%s\n' "$ts" "$strategy" "$scenario" "$run_id" "$cpu" "$mem" >>"$resources_file"
 }
 
+#######################################
+# Resets the probe latency CSV for a fresh run.
+# Globals:
+#   MODE, RESULTS_BASE, PROBE_GLOBAL, PROBE_HEADER, run labels.
+# Side effects:
+#   Recreates/restarts the probe container and rewrites CSV header.
+#######################################
 reset_probe_csv() {
     mkdir -p "$RESULTS_BASE"
     rm -f "$GENERATOR_SUMMARY_GLOBAL" 2>/dev/null || true
@@ -841,6 +1179,16 @@ reset_probe_csv() {
 # acumulativo del probe. Antes se copiaba el CSV completo, lo que contaminaba
 # los resultados de cada run con datos de todos los runs anteriores.
 # ─────────────────────────────────────────────────────────────────────────────
+#######################################
+# Copies only the current run rows from the global probe CSV.
+# Arguments:
+#   $1 - Destination directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+# Side effects:
+#   Writes filtered latency_samples.csv in the destination directory.
+#######################################
 copy_probe_csv_to_run() {
     local dest="$1"
     local strategy="$2"
@@ -856,6 +1204,14 @@ copy_probe_csv_to_run() {
     fi
 }
 
+#######################################
+# Calculates a latency quantile from latency_samples.csv.
+# Arguments:
+#   $1 - CSV file path.
+#   $2 - Quantile between 0 and 1.
+# Outputs:
+#   Writes the quantile value or NaN to stdout.
+#######################################
 calc_latency_quantile_from_csv() {
     local file="$1"
     local quantile="$2"
@@ -911,6 +1267,13 @@ if [ -z "$PYTHON_BIN" ]; then
     PYTHON_BIN=python3
 fi
 
+#######################################
+# Verifies that required benchmark services are running.
+# Globals:
+#   MODE and cloud VM IP variables.
+# Returns:
+#   Exits non-zero if required local or distributed services are unavailable.
+#######################################
 ensure_services() {
     log "Verificando servicios..."
     if [ "${MODE:-local}" = "distributed" ]; then
@@ -982,6 +1345,20 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 # PROMETHEUS SNAPSHOT
 # ═══════════════════════════════════════════════════════════════════
+#######################################
+# Collects a Prometheus metric snapshot for one completed run.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+#   $5 - Optional run start epoch seconds.
+#   $6 - Optional run end epoch seconds.
+# Globals:
+#   PROMETHEUS_URL, PROMETHEUS_SSH_HOST, RUN_TOPIC, RUN_DURATION_SECONDS.
+# Side effects:
+#   Writes prometheus_snapshot.csv with throughput, lag, latency, CPU, and memory metrics.
+#######################################
 collect_prometheus_snapshot() {
     local run_dir="$1"
     local strategy="$2"
@@ -1165,6 +1542,20 @@ PY
     log "Snapshot guardado: $(wc -l <"$out_file") metricas en $out_file"
 }
 
+#######################################
+# Collects AWS CloudWatch host metrics for distributed runs.
+# Arguments:
+#   $1 - Run directory.
+#   $2 - Strategy name.
+#   $3 - Scenario name.
+#   $4 - Run identifier.
+#   $5 - Run start epoch seconds.
+#   $6 - Run end epoch seconds.
+# Globals:
+#   CLOUD_VM_*_INSTANCE_ID, CLOUD_VM_PRODUCER_PUBLIC_IP, AWS_REGION.
+# Side effects:
+#   Writes cloudwatch_snapshot.csv when CloudWatch identifiers are available.
+#######################################
 collect_cloudwatch_snapshot() {
     local run_dir="$1"
     local strategy="$2"
@@ -1260,6 +1651,14 @@ collect_cloudwatch_snapshot() {
 # ═══════════════════════════════════════════════════════════════════
 # RUN BATCH
 # ═══════════════════════════════════════════════════════════════════
+#######################################
+# Executes one isolated Spark Batch benchmark run.
+# Globals:
+#   MODE, SCENARIO, RUN_ID, RUN_DURATION_SECONDS, RESULTS_BASE, Kafka/PostgreSQL settings.
+# Side effects:
+#   Truncates sink table, creates a run topic, runs generator then Spark Batch,
+#   exports latency/metrics/metadata, and archives results in distributed mode.
+#######################################
 run_batch() {
     ensure_services
     set_run_topic
@@ -1358,6 +1757,14 @@ run_batch() {
 # ═══════════════════════════════════════════════════════════════════
 # RUN MICROBATCH
 # ═══════════════════════════════════════════════════════════════════
+#######################################
+# Executes one isolated Spark Structured Streaming micro-batch run.
+# Globals:
+#   MODE, SCENARIO, RUN_ID, TRIGGER_INTERVAL, RUN_DURATION_SECONDS, RESULTS_BASE.
+# Side effects:
+#   Truncates sink table, clears Spark checkpoint state, starts generator and
+#   Spark streaming query, waits for drain/quiescence, exports artifacts.
+#######################################
 run_microbatch() {
     ensure_services
     set_run_topic
@@ -1368,6 +1775,7 @@ run_microbatch() {
     local sink_ip="${CLOUD_VM_SINK_PUBLIC_IP:-}"
 
     log "Ejecutando MICROBATCH: scenario=$SCENARIO run_id=$RUN_ID trigger=$TRIGGER_INTERVAL"
+    local microbatch_drain_timeout_seconds="${MICROBATCH_DRAIN_TIMEOUT_SECONDS:-600}"
 
     # Limpiar antes
     log "Limpiando entorno y deteniendo jobs previos..."
@@ -1396,7 +1804,7 @@ run_microbatch() {
 
     if [ "$MODE" = "distributed" ]; then
         remote_compose "$compute_ip" "infra/docker/compose/compute.yml" \
-            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=$(resolve_broker_host):$(resolve_broker_port) --kafka.topic=${RUN_TOPIC} --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))"
+            "exec -T spark-master /opt/spark/bin/spark-submit --class org.tesis.microbatch.SparkStructuredJob --master spark://spark-master:${MASTER_PORT} /opt/spark/jobs/microbatch/microbatch-job.jar --scenario=${SCENARIO} --run.id=${RUN_ID} --trigger.interval=\"${TRIGGER_INTERVAL}\" --kafka.bootstrap.servers=$(resolve_broker_host):$(resolve_broker_port) --kafka.topic=${RUN_TOPIC} --checkpoint.location=/opt/spark/checkpoints/microbatch --postgres.url=jdbc:postgresql://$(resolve_sink_host):5432/${POSTGRES_DB_NAME} --postgres.user=${POSTGRES_USER_NAME} --postgres.password=${POSTGRES_PASSWORD_VALUE} --official.duration.seconds=${RUN_DURATION_SECONDS} --drain.timeout.seconds=${microbatch_drain_timeout_seconds} --run.duration.seconds=$((RUN_DURATION_SECONDS + microbatch_drain_timeout_seconds))"
     else
         MSYS_NO_PATHCONV=1 docker compose exec spark-master /opt/spark/bin/spark-submit \
         --class org.tesis.microbatch.SparkStructuredJob \
@@ -1411,7 +1819,9 @@ run_microbatch() {
         --postgres.url=jdbc:postgresql://postgres:5432/${POSTGRES_DB_NAME} \
         --postgres.user=${POSTGRES_USER_NAME} \
         --postgres.password=${POSTGRES_PASSWORD_VALUE} \
-        --run.duration.seconds=$((RUN_DURATION_SECONDS + 20))
+        --official.duration.seconds=${RUN_DURATION_SECONDS} \
+        --drain.timeout.seconds=${microbatch_drain_timeout_seconds} \
+        --run.duration.seconds=$((RUN_DURATION_SECONDS + microbatch_drain_timeout_seconds))
     fi
 
     mark_processing_end
@@ -1427,7 +1837,7 @@ run_microbatch() {
     copy_generator_summary_to_run "$RUN_DIR"
     require_generator_summary "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     apply_generation_markers_from_summary "$RUN_DIR/generator_summary.json"
-    wait_for_visible_events_quiescence "microbatch" "$SCENARIO" "$RUN_ID" 4 2 90
+    wait_for_visible_events_quiescence "microbatch" "$SCENARIO" "$RUN_ID" 4 2 "$microbatch_drain_timeout_seconds"
     export_latency_samples_from_db "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
     collect_prometheus_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID" "$RUN_START_TS" "$RUN_END_TS"
     create_timeseries_from_snapshot "$RUN_DIR" "microbatch" "$SCENARIO" "$RUN_ID"
@@ -1444,6 +1854,14 @@ run_microbatch() {
 # ═══════════════════════════════════════════════════════════════════
 # RUN STREAMING
 # ═══════════════════════════════════════════════════════════════════
+#######################################
+# Executes one isolated Apache Flink streaming benchmark run.
+# Globals:
+#   MODE, SCENARIO, RUN_ID, RUN_DURATION_SECONDS, RESULTS_BASE, FLINK_PARALLELISM_VALUE.
+# Side effects:
+#   Truncates sink table, restarts Flink, starts generator and Flink job,
+#   exports latency/metrics/metadata, and archives results in distributed mode.
+#######################################
 run_streaming() {
     ensure_services
     set_run_topic
