@@ -40,18 +40,44 @@ WARMUP=30
 COOLDOWN=30
 TRIGGER="5 seconds"
 
+#######################################
+# Prints an informational thesis workflow message.
+# Arguments:
+#   $* - Message text.
+# Outputs:
+#   Writes colored text to stdout.
+#######################################
 log() {
     echo -e "${GREEN}[thesis]${NC} $*"
 }
 
+#######################################
+# Prints a non-fatal thesis workflow warning.
+# Arguments:
+#   $* - Warning text.
+# Outputs:
+#   Writes colored text to stdout.
+#######################################
 warn() {
     echo -e "${YELLOW}[thesis]${NC} $*"
 }
 
+#######################################
+# Prints a fatal/error thesis workflow message.
+# Arguments:
+#   $* - Error text.
+# Outputs:
+#   Writes colored text to stderr.
+#######################################
 err() {
     echo -e "${RED}[thesis]${NC} $*" >&2
 }
 
+#######################################
+# Shows the public thesis workflow CLI help.
+# Outputs:
+#   Writes usage examples and options to stdout.
+#######################################
 usage() {
     cat <<'EOF'
 Uso:
@@ -114,6 +140,13 @@ Ejemplos:
 EOF
 }
 
+#######################################
+# Ensures local Docker/Python configuration exists.
+# Side effects:
+#   Creates .env from .env.example when missing.
+# Returns:
+#   Exits non-zero if no template exists.
+#######################################
 ensure_env_file() {
     if [[ ! -f ".env" ]]; then
         if [[ -f ".env.example" ]]; then
@@ -126,6 +159,11 @@ ensure_env_file() {
     fi
 }
 
+#######################################
+# Ensures the editable Python benchmark package is installed locally.
+# Side effects:
+#   Creates .venv and installs src/python when .venv is absent.
+#######################################
 ensure_python_env() {
     if [[ ! -d ".venv" ]]; then
         log "Creando entorno virtual Python"
@@ -135,6 +173,11 @@ ensure_python_env() {
     fi
 }
 
+#######################################
+# Builds Java Spark/Flink benchmark job artifacts.
+# Side effects:
+#   Runs Gradle buildJobs using the wrapper when available.
+#######################################
 compile_jobs() {
     log "Compilando jobs Java"
     if [[ -f "./gradlew" ]]; then
@@ -144,11 +187,23 @@ compile_jobs() {
     fi
 }
 
+#######################################
+# Builds local generator and probe Docker images.
+# Globals:
+#   DC - Docker Compose command array.
+#######################################
 build_local_images() {
     log "Construyendo imágenes locales necesarias"
     "${DC[@]}" build generator probe
 }
 
+#######################################
+# Ensures the local results directory is writable by the host user.
+# Side effects:
+#   Creates results/ and may use an Alpine container to repair ownership.
+# Returns:
+#   Exits non-zero if permissions cannot be repaired.
+#######################################
 ensure_local_results_permissions() {
     mkdir -p results
     if [[ -w results ]]; then
@@ -167,6 +222,13 @@ ensure_local_results_permissions() {
     fi
 }
 
+#######################################
+# Starts the local Docker Compose benchmark stack.
+# Globals:
+#   RESULTS_DIR, DC, ROOT_DIR.
+# Side effects:
+#   Creates the result directory and launches containers.
+#######################################
 start_local_stack() {
     log "Levantando stack local"
     local results_host
@@ -177,11 +239,25 @@ start_local_stack() {
     RESULTS_VOLUME_HOST="$results_host" "${DC[@]}" up -d
 }
 
+#######################################
+# Stops the local Docker Compose benchmark stack.
+# Globals:
+#   DC - Docker Compose command array.
+#######################################
 stop_local_stack() {
     log "Bajando stack local"
     "${DC[@]}" down
 }
 
+#######################################
+# Loads Terraform outputs for distributed operations.
+# Globals:
+#   MODE.
+# Side effects:
+#   Sources infra/terraform/outputs.env in distributed mode.
+# Returns:
+#   Exits non-zero if distributed outputs are missing.
+#######################################
 require_outputs_env() {
     if [[ "$MODE" != "distributed" ]]; then
         return 0
@@ -194,6 +270,13 @@ require_outputs_env() {
     source "infra/terraform/outputs.env"
 }
 
+#######################################
+# Performs all setup needed before local experiments.
+# Globals:
+#   MODE, SKIP_SETUP.
+# Side effects:
+#   May create .env/.venv, compile jobs, build images, and start containers.
+#######################################
 setup_local_stack() {
     if [[ "$MODE" != "local" ]]; then
         return 0
@@ -210,6 +293,13 @@ setup_local_stack() {
     start_local_stack
 }
 
+#######################################
+# Provisions distributed AWS infrastructure with Terraform.
+# Globals:
+#   MODE, COMPUTE_REGION.
+# Returns:
+#   Exits non-zero if called outside distributed mode.
+#######################################
 run_provision() {
     if [[ "$MODE" != "distributed" ]]; then
         err "provision solo aplica a modo distributed"
@@ -224,6 +314,13 @@ run_provision() {
     fi
 }
 
+#######################################
+# Deploys distributed benchmark services with Ansible.
+# Globals:
+#   MODE, DO_PROVISION, COMPUTE_REGION.
+# Side effects:
+#   May run Terraform first, then executes the appropriate Ansible playbook.
+#######################################
 run_deploy() {
     if [[ "$MODE" != "distributed" ]]; then
         err "deploy solo aplica a modo distributed"
@@ -246,6 +343,13 @@ run_deploy() {
     )
 }
 
+#######################################
+# Runs the experiment phase for local or distributed mode.
+# Globals:
+#   MODE, SCOPE, LOAD_PROFILE, COMPUTE_REGION, RESULTS_DIR, strategies and timing options.
+# Side effects:
+#   Delegates to scripts/experiment.sh and may provision/deploy first.
+#######################################
 run_experiment() {
     if [[ "$MODE" == "local" ]]; then
         setup_local_stack
@@ -275,6 +379,13 @@ run_experiment() {
         --trigger "$TRIGGER"
 }
 
+#######################################
+# Collects distributed results from the sink node.
+# Globals:
+#   MODE, RESULTS_DIR.
+# Side effects:
+#   Delegates to scripts/collect-results.sh, which replaces local destination contents.
+#######################################
 run_collect() {
     if [[ "$MODE" != "distributed" ]]; then
         warn "collect no aplica a modo local"
@@ -285,10 +396,22 @@ run_collect() {
     RESULTS_BASE="$RESULTS_DIR" bash scripts/collect-results.sh
 }
 
+#######################################
+# Prints the resolved result root for downstream commands.
+# Outputs:
+#   Writes RESULTS_DIR to stdout.
+#######################################
 results_dir() {
     printf '%s\n' "$RESULTS_DIR"
 }
 
+#######################################
+# Runs the Python analysis/figure generation pipeline.
+# Globals:
+#   MODE, SCOPE, RESULTS_DIR.
+# Side effects:
+#   Writes figures and summary CSV files under the result directory.
+#######################################
 run_analyze() {
     local rdir
     local analyzer_scope
@@ -304,6 +427,13 @@ run_analyze() {
     .venv/bin/python -m benchmark.analysis.analyzer --results-dir "$rdir" --output "$rdir/figures" --scope "$analyzer_scope" --validate
 }
 
+#######################################
+# Runs the Python result validation pipeline.
+# Globals:
+#   MODE, RESULTS_DIR.
+# Returns:
+#   Non-zero if validation reports errors.
+#######################################
 run_validate() {
     local rdir
     rdir=$(results_dir)
@@ -314,6 +444,13 @@ run_validate() {
     .venv/bin/python -m benchmark.validation.validator --results-dir "$rdir"
 }
 
+#######################################
+# Runs experiment, collection, analysis, and validation as a convenience flow.
+# Globals:
+#   SKIP_COLLECT, SKIP_ANALYZE, SKIP_VALIDATE.
+# Side effects:
+#   Performs every non-skipped workflow phase in order.
+#######################################
 run_full() {
     run_experiment
     if [[ "$SKIP_COLLECT" == false ]]; then
@@ -327,6 +464,13 @@ run_full() {
     fi
 }
 
+#######################################
+# Tears down local containers or distributed Terraform infrastructure.
+# Globals:
+#   MODE.
+# Side effects:
+#   Stops local stack or destroys cloud infrastructure.
+#######################################
 run_destroy() {
     if [[ "$MODE" == "local" ]]; then
         log "Bajando stack local"

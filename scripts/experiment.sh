@@ -102,8 +102,7 @@ export COMPUTE_REGION
 export RESULTS_BASE
 export SCOPE
 
-# Guardrail: en ejecuciones oficiales solo permitir escenarios oficiales
-OFFICIAL_SCENARIOS="low-load medium-load high-load"
+# Guardrail: en ejecuciones oficiales solo permitir escenarios oficiales.
 for SCN in $SCENARIOS; do
     case "$SCN" in
         low-load|medium-load|high-load) ;;
