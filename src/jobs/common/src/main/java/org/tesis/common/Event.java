@@ -37,6 +37,16 @@ public class Event implements Serializable {
     private final String scenario;
     private final String runId;
 
+    /**
+     * Creates an immutable event value used by streaming jobs and JDBC writers.
+     *
+     * @param eventId unique event identifier.
+     * @param producedAt producer timestamp in epoch milliseconds.
+     * @param payload synthetic payload body.
+     * @param strategy ingestion strategy label.
+     * @param scenario workload scenario label.
+     * @param runId benchmark run identifier.
+     */
     public Event(UUID eventId, long producedAt, String payload, String strategy, String scenario, String runId) {
         this.eventId = eventId;
         this.producedAt = producedAt;
@@ -86,26 +96,44 @@ public class Event implements Serializable {
         }
     }
 
+    /**
+     * @return unique event identifier.
+     */
     public UUID getEventId() {
         return eventId;
     }
 
+    /**
+     * @return producer timestamp in epoch milliseconds.
+     */
     public long getProducedAt() {
         return producedAt;
     }
 
+    /**
+     * @return synthetic payload body.
+     */
     public String getPayload() {
         return payload;
     }
 
+    /**
+     * @return ingestion strategy label.
+     */
     public String getStrategy() {
         return strategy;
     }
 
+    /**
+     * @return workload scenario label.
+     */
     public String getScenario() {
         return scenario;
     }
 
+    /**
+     * @return benchmark run identifier.
+     */
     public String getRunId() {
         return runId;
     }

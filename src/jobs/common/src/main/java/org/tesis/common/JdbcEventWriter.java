@@ -15,6 +15,9 @@ import java.util.Properties;
  * a consistent measurement point across all ingestion strategies.
  */
 public final class JdbcEventWriter {
+    /**
+     * Prevents instantiation of this utility class.
+     */
     private JdbcEventWriter() {
     }
 
@@ -26,6 +29,17 @@ public final class JdbcEventWriter {
             ON CONFLICT (event_id) DO NOTHING
             """;
 
+    /**
+     * Writes events to PostgreSQL using bounded JDBC batches.
+     *
+     * <p>The INSERT intentionally omits {@code visible_at}; PostgreSQL assigns that value at
+     * insert time so all strategies share the same visibility reference point.
+     *
+     * @param url PostgreSQL JDBC URL.
+     * @param properties JDBC authentication and driver properties.
+     * @param events events to persist; empty lists are ignored.
+     * @throws RuntimeException if a SQL error prevents the batch from being written.
+     */
     public static void writeBatch(String url, Properties properties, List<Event> events) {
         if (events.isEmpty()) {
             return;

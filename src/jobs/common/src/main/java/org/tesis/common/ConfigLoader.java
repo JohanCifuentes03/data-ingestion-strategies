@@ -10,9 +10,22 @@ import java.util.Properties;
  * and by Flink's {@code flink run} (uses space-separated tokens).
  */
 public final class ConfigLoader {
+    /**
+     * Prevents instantiation of this utility class.
+     */
     private ConfigLoader() {
     }
 
+    /**
+     * Parses command-line options into a configuration map.
+     *
+     * <p>Both {@code --key=value} and {@code --key value} formats are accepted because Spark
+     * submissions and Flink submissions pass arguments differently. Boolean flags without a
+     * following value are stored as {@code "true"}.
+     *
+     * @param args raw command-line arguments.
+     * @return parsed option map without leading {@code --} prefixes.
+     */
     public static Map<String, String> parseArgs(String[] args) {
         Map<String, String> map = new HashMap<>();
         for (int i = 0; i < args.length; i++) {
@@ -35,6 +48,13 @@ public final class ConfigLoader {
         return map;
     }
 
+    /**
+     * Builds PostgreSQL JDBC properties shared by Spark and Flink jobs.
+     *
+     * @param user database username.
+     * @param password database password.
+     * @return JDBC properties including driver and PostgreSQL string type behavior.
+     */
     public static Properties jdbcProperties(String user, String password) {
         Properties properties = new Properties();
         properties.setProperty("user", user);
