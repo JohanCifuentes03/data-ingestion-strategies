@@ -46,28 +46,49 @@ SERIES_COLORS = {
     "secondary_light": "#d9d9d9",
     "secondary_dark": "#595959",
 }
+LATENCY_CHUNK_ROWS = 250_000
+LATENCY_SAMPLE_PER_RUN = 20_000
+
+
+@dataclass
+class LatencyArtifacts:
+    """Groups latency-derived artifacts produced by chunked loading.
+    
+    Attributes:
+        sample: Bounded latency sample used for figures and statistical tests.
+        run_stats: Exact per-run counts and latency quantiles.
+        scenario_stats: Exact per-strategy/per-scenario latency summary.
+    """
+    sample: pd.DataFrame
+    run_stats: pd.DataFrame
+    scenario_stats: pd.DataFrame
 
 
 @dataclass
 class ValidationState:
+    """Tracks analyzer validation outcomes and prints status lines."""
     ok: int = 0
     warn: int = 0
     err: int = 0
 
     def report_ok(self, msg: str):
+        """Records and prints a successful validation message."""
         self.ok += 1
         print(f"[OK] {msg}")
 
     def report_warn(self, msg: str):
+        """Records and prints a warning validation message."""
         self.warn += 1
         print(f"[WARN] {msg}")
 
     def report_err(self, msg: str):
+        """Records and prints an error validation message."""
         self.err += 1
         print(f"[ERROR] {msg}")
 
 
 def _sort_by_known(values: list[str], known: list[str]) -> list[str]:
+    """Sorts values using a preferred order and appends unknown values alphabetically."""
     present = set(values)
     ordered = [v for v in known if v in present]
     tail = sorted(v for v in values if v not in known)
@@ -75,6 +96,7 @@ def _sort_by_known(values: list[str], known: list[str]) -> list[str]:
 
 
 def _save_figure(fig, out_dir: Path, basename: str):
+    """Saves a Matplotlib figure in all publication formats and closes it."""
     for ext in SAVE_FORMATS:
         fig.savefig(out_dir / f"{basename}.{ext}", bbox_inches="tight", dpi=300 if ext == "png" else None)
     plt.close(fig)
@@ -82,6 +104,10 @@ def _save_figure(fig, out_dir: Path, basename: str):
 
 
 def _load_json_records(results_dir: Path, filename: str) -> pd.DataFrame:
+    """Loads per-run JSON records from a distributed results tree.
+    
+    Missing strategy, scenario, or run_id fields are inferred from the directory layout.
+    """
     rows = []
     for path in results_dir.rglob(filename):
         rel = path.relative_to(results_dir).parts
@@ -103,33 +129,126 @@ def _load_json_records(results_dir: Path, filename: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_latency(results_dir: Path) -> pd.DataFrame:
-    frames = []
-    for csv_path in results_dir.rglob("latency_samples.csv"):
+def _iter_latency_paths(results_dir: Path, scope: str):
+    """Yields latency CSV paths with labels inferred from their result tree location."""
+    for csv_path in sorted(results_dir.rglob("latency_samples.csv")):
         rel = csv_path.relative_to(results_dir).parts
         if len(rel) < 4:
             continue
         strategy, scenario, run_id = rel[0], rel[1], rel[2]
-        df = pd.read_csv(csv_path, on_bad_lines="skip")
-        if df.empty:
+        if scope == "official" and scenario not in SCENARIO_ORDER:
             continue
-        for key, val in [("strategy", strategy), ("scenario", scenario), ("run_id", run_id)]:
-            if key not in df.columns:
-                df[key] = val
-        frames.append(df)
-    if not frames:
-        return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True)
-    if "latency_ms" in df.columns:
-        df["latency_ms"] = pd.to_numeric(df["latency_ms"], errors="coerce")
-        df = df.dropna(subset=["latency_ms"])
-    for col in ["produced_at", "visible_at"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+        yield csv_path, strategy, scenario, run_id
+
+
+def _bounded_sample(df: pd.DataFrame, sample_size: int, seed: int) -> pd.DataFrame:
+    """Returns a deterministic bounded sample without mutating the input frame."""
+    if len(df) <= sample_size:
+        return df.copy()
+    return df.sample(n=sample_size, random_state=seed).copy()
+
+
+def load_latency_artifacts(results_dir: Path, scope: str) -> LatencyArtifacts:
+    """Loads latency CSV files in chunks and computes exact run/scenario summaries.
+    
+    Large latency files are sampled for plotting while counts, min/max, and quantiles are computed from all rows.
+    """
+    sample_frames: list[pd.DataFrame] = []
+    run_rows: list[dict] = []
+    scenario_acc: dict[tuple[str, str], list[np.ndarray]] = {}
+
+    for path_idx, (csv_path, strategy, scenario, run_id) in enumerate(_iter_latency_paths(results_dir, scope)):
+        lat_arrays: list[np.ndarray] = []
+        sample_parts: list[pd.DataFrame] = []
+        visible_count = 0
+        last_visible_at_ms = np.nan
+        positive_count = 0
+        non_positive_count = 0
+
+        try:
+            chunks = pd.read_csv(csv_path, on_bad_lines="skip", chunksize=LATENCY_CHUNK_ROWS)
+            for chunk_idx, chunk in enumerate(chunks):
+                if chunk.empty or "latency_ms" not in chunk.columns:
+                    continue
+                chunk = chunk.copy()
+                chunk["latency_ms"] = pd.to_numeric(chunk["latency_ms"], errors="coerce")
+                chunk = chunk.dropna(subset=["latency_ms"])
+                if chunk.empty:
+                    continue
+                for col in ["produced_at", "visible_at"]:
+                    if col in chunk.columns:
+                        chunk[col] = pd.to_numeric(chunk[col], errors="coerce")
+                for key, value in [("strategy", strategy), ("scenario", scenario), ("run_id", run_id)]:
+                    chunk[key] = value
+
+                lat_values = chunk["latency_ms"].to_numpy(dtype=float)
+                lat_arrays.append(lat_values)
+                positive_count += int((lat_values > 0).sum())
+                non_positive_count += int((lat_values <= 0).sum())
+
+                if "visible_at" in chunk.columns:
+                    visible = chunk["visible_at"].dropna()
+                    visible_count += int(len(visible))
+                    if not visible.empty:
+                        visible_max = float(visible.max())
+                        if pd.isna(last_visible_at_ms) or visible_max > last_visible_at_ms:
+                            last_visible_at_ms = visible_max
+                else:
+                    visible_count += int(len(chunk))
+
+                keep_cols = [col for col in ["strategy", "scenario", "run_id", "latency_ms", "produced_at", "visible_at"] if col in chunk.columns]
+                per_chunk_sample = max(1, LATENCY_SAMPLE_PER_RUN // 8)
+                sample_parts.append(_bounded_sample(chunk[keep_cols], per_chunk_sample, seed=(path_idx + 1) * 10_000 + chunk_idx))
+        except pd.errors.EmptyDataError:
+            continue
+
+        if not lat_arrays:
+            continue
+
+        run_latencies = np.concatenate(lat_arrays)
+        scenario_acc.setdefault((strategy, scenario), []).append(run_latencies)
+        run_rows.append(
+            {
+                "strategy": strategy,
+                "scenario": scenario,
+                "run_id": run_id,
+                "latency_rows": int(len(run_latencies)),
+                "visible_events_final_latency": int(visible_count),
+                "last_visible_at_ms": last_visible_at_ms,
+                "latency_positive_count": int(positive_count),
+                "latency_non_positive_count": int(non_positive_count),
+                "latency_p50_ms": float(np.quantile(run_latencies, 0.50)),
+                "latency_p95_ms": float(np.quantile(run_latencies, 0.95)),
+                "latency_p99_ms": float(np.quantile(run_latencies, 0.99)),
+                "latency_min_ms": float(np.min(run_latencies)),
+                "latency_max_ms": float(np.max(run_latencies)),
+            }
+        )
+        if sample_parts:
+            sample_frames.append(_bounded_sample(pd.concat(sample_parts, ignore_index=True), LATENCY_SAMPLE_PER_RUN, seed=path_idx + 42))
+
+    scenario_rows: list[dict] = []
+    for (strategy, scenario), arrays in scenario_acc.items():
+        values = np.concatenate(arrays)
+        scenario_rows.append(
+            {
+                "strategy": strategy,
+                "scenario": scenario,
+                "latency_rows": int(len(values)),
+                "latency_p50_ms": float(np.quantile(values, 0.50)),
+                "latency_p95_ms": float(np.quantile(values, 0.95)),
+                "latency_p99_ms": float(np.quantile(values, 0.99)),
+                "latency_min_ms": float(np.min(values)),
+                "latency_max_ms": float(np.max(values)),
+            }
+        )
+
+    sample = pd.concat(sample_frames, ignore_index=True) if sample_frames else pd.DataFrame()
+    return LatencyArtifacts(sample=sample, run_stats=pd.DataFrame(run_rows), scenario_stats=pd.DataFrame(scenario_rows))
 
 
 def load_prometheus_snapshot(results_dir: Path) -> pd.DataFrame:
+    """Loads Prometheus snapshot CSV files and attaches run labels from paths."""
     frames = []
     for csv_path in results_dir.rglob("prometheus_snapshot.csv"):
         rel = csv_path.relative_to(results_dir).parts
@@ -152,18 +271,22 @@ def load_prometheus_snapshot(results_dir: Path) -> pd.DataFrame:
 
 
 def load_run_metadata(results_dir: Path) -> pd.DataFrame:
+    """Loads all run_metadata.json files into one DataFrame."""
     return _load_json_records(results_dir, "run_metadata.json")
 
 
 def load_run_summaries(results_dir: Path) -> pd.DataFrame:
+    """Loads all run_summary.json files into one DataFrame."""
     return _load_json_records(results_dir, "run_summary.json")
 
 
 def load_generator_summaries(results_dir: Path) -> pd.DataFrame:
+    """Loads all generator_summary.json files into one DataFrame."""
     return _load_json_records(results_dir, "generator_summary.json")
 
 
 def load_kafka_lag_timeseries(results_dir: Path) -> pd.DataFrame:
+    """Loads Kafka lag time-series CSV files and normalizes lag metadata."""
     frames = []
     for csv_path in results_dir.rglob("kafka_lag_timeseries.csv"):
         rel = csv_path.relative_to(results_dir).parts
@@ -185,6 +308,7 @@ def load_kafka_lag_timeseries(results_dir: Path) -> pd.DataFrame:
 
 
 def _lag_coverage_by_strategy(lag_ts: pd.DataFrame) -> dict[str, bool]:
+    """Reports whether each strategy has real Prometheus Kafka lag coverage."""
     coverage = {strategy: False for strategy in STRATEGY_ORDER}
     if lag_ts.empty or "lag_source" not in lag_ts.columns:
         return coverage
@@ -195,6 +319,7 @@ def _lag_coverage_by_strategy(lag_ts: pd.DataFrame) -> dict[str, bool]:
 
 
 def load_resources_timeseries(results_dir: Path) -> pd.DataFrame:
+    """Loads resource time-series CSV files and normalizes CPU/memory values."""
     frames = []
     for csv_path in results_dir.rglob("resources_timeseries.csv"):
         rel = csv_path.relative_to(results_dir).parts
@@ -215,12 +340,14 @@ def load_resources_timeseries(results_dir: Path) -> pd.DataFrame:
 
 
 def apply_scope_filter(df: pd.DataFrame, scope: str) -> pd.DataFrame:
+    """Filters a DataFrame to official scenarios when official scope is requested."""
     if df.empty or scope != "official" or "scenario" not in df.columns:
         return df
     return df[df["scenario"].isin(SCENARIO_ORDER)].copy()
 
 
 def build_run_inventory(results_dir: Path, scope: str) -> pd.DataFrame:
+    """Builds the set of runs that contain latency sample files."""
     rows = []
     for lat_path in results_dir.rglob("latency_samples.csv"):
         rel = lat_path.relative_to(results_dir).parts
@@ -237,11 +364,13 @@ def run_validations(
     results_dir: Path,
     scope: str,
     latency: pd.DataFrame,
+    latency_run_stats: pd.DataFrame,
     run_metadata: pd.DataFrame,
     run_summary: pd.DataFrame,
     generator_summary: pd.DataFrame,
     lag_ts: pd.DataFrame,
 ) -> ValidationState:
+    """Runs cross-artifact consistency checks before analysis output is trusted."""
     state = ValidationState()
     runs = build_run_inventory(results_dir, scope)
     required = ["latency_samples.csv", "run_metadata.json", "run_summary.json", "generator_summary.json"]
@@ -270,12 +399,8 @@ def run_validations(
         else:
             state.report_err("Delivery ratio fuera de rango [0,100]")
 
-        if not latency.empty:
-            lat_counts = (
-                latency.groupby(["strategy", "scenario", "run_id"], observed=True)
-                .size()
-                .reset_index(name="latency_rows")
-            )
+        if not latency_run_stats.empty:
+            lat_counts = latency_run_stats[["strategy", "scenario", "run_id", "latency_rows"]].copy()
             merged = run_summary.merge(lat_counts, on=["strategy", "scenario", "run_id"], how="left")
             vis_vals = pd.to_numeric(merged.get("visible_events", 0), errors="coerce").fillna(0)
             lat_vals = pd.to_numeric(merged.get("latency_rows", 0), errors="coerce").fillna(0)
@@ -335,8 +460,9 @@ def run_validations(
             "Kafka lag real incompleto; sin cobertura para: " + ", ".join(missing_real)
         )
 
-    if not latency.empty and "latency_ms" in latency.columns:
-        if bool((latency["latency_ms"] <= 0).any()):
+    if not latency_run_stats.empty and "latency_non_positive_count" in latency_run_stats.columns:
+        non_positive = pd.to_numeric(latency_run_stats["latency_non_positive_count"], errors="coerce").fillna(0)
+        if bool((non_positive > 0).any()):
             state.report_err("Se detectaron latencias no positivas")
         else:
             state.report_ok("latency_ms positivo en todas las muestras")
@@ -365,32 +491,38 @@ def run_validations(
 
 
 def _ordered_scenarios_from_df(df: pd.DataFrame) -> list[str]:
+    """Returns scenarios from a DataFrame in thesis-preferred order."""
     if df.empty or "scenario" not in df.columns:
         return []
     return _sort_by_known(df["scenario"].dropna().astype(str).unique().tolist(), SCENARIO_ORDER)
 
 
 def _ordered_strategies_from_df(df: pd.DataFrame) -> list[str]:
+    """Returns strategies from a DataFrame in thesis-preferred order."""
     if df.empty or "strategy" not in df.columns:
         return []
     return [strategy for strategy in STRATEGY_ORDER if strategy in set(df["strategy"].dropna().astype(str))]
 
 
 def _format_strategy(value: str) -> str:
+    """Returns the display label for a strategy identifier."""
     return STRATEGY_LABELS.get(value, value)
 
 
 def _format_scenario(value: str) -> str:
+    """Returns the display label for a scenario identifier."""
     return SCENARIO_LABELS.get(value, value)
 
 
 def _light_axis_style(ax):
+    """Applies the shared light grid style to a Matplotlib axis."""
     ax.grid(axis="y", color="#d9d9d9", linewidth=0.8)
     ax.grid(axis="x", visible=False)
     ax.set_axisbelow(True)
 
 
 def _add_box_stats(ax, x_pos: float, values: np.ndarray):
+    """Annotates a boxplot with min, quartile, median, and max statistics."""
     if len(values) == 0:
         return
     vals = pd.Series(values).dropna()
@@ -417,6 +549,7 @@ def _add_box_stats(ax, x_pos: float, values: np.ndarray):
 
 
 def _add_box_min_q2_max(ax, x_pos: float, values: np.ndarray):
+    """Annotates a boxplot with min, median, and max statistics."""
     vals = pd.Series(values).dropna()
     if vals.empty:
         return
@@ -439,6 +572,7 @@ def _add_box_min_q2_max(ax, x_pos: float, values: np.ndarray):
 
 
 def _label_bars(ax, bars, values, formatter, offset_ratio: float = 0.01):
+    """Adds formatted numeric labels above bar chart bars."""
     ymax = ax.get_ylim()[1]
     offset = ymax * offset_ratio if ymax > 0 else 0.1
     for bar, value in zip(bars, values):
@@ -448,8 +582,46 @@ def _label_bars(ax, bars, values, formatter, offset_ratio: float = 0.01):
         ax.text(bar.get_x() + bar.get_width() / 2, y, formatter(value), ha="center", va="bottom", fontsize=8)
 
 
+def compute_visible_cutoff_counts(results_dir: Path, scope: str, cutoff_base: pd.DataFrame) -> pd.DataFrame:
+    """Counts events visible before the official generation cutoff for each run."""
+    key_cols = ["strategy", "scenario", "run_id"]
+    if cutoff_base.empty or "generation_end_ms" not in cutoff_base.columns:
+        return pd.DataFrame(columns=key_cols + ["visible_events_cutoff"])
+
+    cutoff_lookup = {
+        (str(row.strategy), str(row.scenario), str(row.run_id)): float(row.generation_end_ms)
+        for row in cutoff_base.dropna(subset=["generation_end_ms"]).itertuples(index=False)
+    }
+    rows: list[dict] = []
+    for csv_path, strategy, scenario, run_id in _iter_latency_paths(results_dir, scope):
+        generation_end_ms = cutoff_lookup.get((strategy, scenario, run_id))
+        if generation_end_ms is None:
+            continue
+        cutoff_count = 0
+        try:
+            for chunk in pd.read_csv(csv_path, usecols=lambda col: col == "visible_at", on_bad_lines="skip", chunksize=LATENCY_CHUNK_ROWS):
+                if chunk.empty or "visible_at" not in chunk.columns:
+                    continue
+                visible_at = pd.to_numeric(chunk["visible_at"], errors="coerce").dropna()
+                cutoff_count += int((visible_at <= generation_end_ms).sum())
+        except (ValueError, pd.errors.EmptyDataError):
+            continue
+        rows.append(
+            {
+                "strategy": strategy,
+                "scenario": scenario,
+                "run_id": run_id,
+                "visible_events_cutoff": cutoff_count,
+            }
+        )
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=key_cols + ["visible_events_cutoff"])
+
+
 def build_official_metrics(
     latency: pd.DataFrame,
+    latency_run_stats: pd.DataFrame,
+    results_dir: Path,
+    scope: str,
     run_metadata: pd.DataFrame,
     run_summary: pd.DataFrame,
     generator_summary: pd.DataFrame,
@@ -457,9 +629,10 @@ def build_official_metrics(
     resources_ts: pd.DataFrame,
     out_dir: Path,
 ) -> pd.DataFrame:
+    """Combines all per-run artifacts into the official metrics summary table."""
     key_cols = ["strategy", "scenario", "run_id"]
 
-    frames = [df[key_cols] for df in [run_metadata, run_summary, generator_summary, latency, lag_ts, resources_ts] if not df.empty]
+    frames = [df[key_cols] for df in [run_metadata, run_summary, generator_summary, latency_run_stats, lag_ts, resources_ts] if not df.empty]
     if not frames:
         metrics = pd.DataFrame(columns=[
             "strategy",
@@ -541,37 +714,17 @@ def build_official_metrics(
 
     metrics["generated_events"] = metrics["generated_events_rs"].combine_first(metrics["generated_events_gs"])
 
-    if not latency.empty:
-        lat = latency[key_cols + [col for col in ["visible_at", "latency_ms"] if col in latency.columns]].copy()
-        if "visible_at" in lat.columns:
-            lat["visible_at"] = pd.to_numeric(lat["visible_at"], errors="coerce")
-        if "latency_ms" in lat.columns:
-            lat["latency_ms"] = pd.to_numeric(lat["latency_ms"], errors="coerce")
-
+    if not latency_run_stats.empty:
         cutoff_base = metrics[key_cols + ["generation_end_ts"]].copy()
         cutoff_base["generation_end_ms"] = pd.to_numeric(cutoff_base["generation_end_ts"], errors="coerce") * 1000.0
+        visible_cutoff = compute_visible_cutoff_counts(results_dir, scope, cutoff_base)
 
-        cutoff_lat = lat.merge(cutoff_base[key_cols + ["generation_end_ms"]], on=key_cols, how="inner")
-        cutoff_lat = cutoff_lat.dropna(subset=["visible_at", "generation_end_ms"])
-        cutoff = cutoff_lat[cutoff_lat["visible_at"] <= cutoff_lat["generation_end_ms"]]
-        visible_cutoff = cutoff.groupby(key_cols, observed=True).size().reset_index(name="visible_events_cutoff")
-
-        visible_last = (
-            lat.dropna(subset=["visible_at"])
-            .groupby(key_cols, observed=True)
-            .agg(visible_events_final_latency=("visible_at", "size"), last_visible_at_ms=("visible_at", "max"))
-            .reset_index()
-        )
-        latency_stats = (
-            lat.dropna(subset=["latency_ms"])
-            .groupby(key_cols, observed=True)["latency_ms"]
-            .agg(
-                latency_p50_ms=lambda s: float(s.quantile(0.50)),
-                latency_p95_ms=lambda s: float(s.quantile(0.95)),
-                latency_p99_ms=lambda s: float(s.quantile(0.99)),
-            )
-            .reset_index()
-        )
+        visible_last = latency_run_stats[
+            key_cols + ["visible_events_final_latency", "last_visible_at_ms"]
+        ].copy()
+        latency_stats = latency_run_stats[
+            key_cols + ["latency_p50_ms", "latency_p95_ms", "latency_p99_ms"]
+        ].copy()
 
         metrics = metrics.merge(visible_cutoff, on=key_cols, how="left")
         metrics = metrics.merge(visible_last, on=key_cols, how="left")
@@ -702,25 +855,25 @@ def build_official_metrics(
     return metrics
 
 
-def export_latency_summary_table(latency: pd.DataFrame, out_dir: Path):
-    if latency.empty or "latency_ms" not in latency.columns:
+def export_latency_summary_table(latency_summary: pd.DataFrame, out_dir: Path):
+    """Exports the thesis latency summary table from exact scenario statistics."""
+    if latency_summary.empty:
         print("[WARN] Sin datos de latencia para latency_summary_table.csv")
         return
     rows = []
-    for (strategy, scenario), grp in latency.groupby(["strategy", "scenario"], observed=True):
-        lat_vals = pd.to_numeric(grp["latency_ms"], errors="coerce").dropna()
-        if lat_vals.empty:
-            continue
+    for row in latency_summary.itertuples(index=False):
+        strategy = str(row.strategy)
+        scenario = str(row.scenario)
         rows.append(
             {
                 "Estrategia": _format_strategy(strategy),
                 "Escenario": _format_scenario(scenario),
-                "Eventos visibles": int(len(lat_vals)),
-                "p50 (ms)": round(float(lat_vals.quantile(0.50)), 2),
-                "p95 (ms)": round(float(lat_vals.quantile(0.95)), 2),
-                "p99 (ms)": round(float(lat_vals.quantile(0.99)), 2),
-                "Mín. (ms)": round(float(lat_vals.min()), 2),
-                "Máx. (ms)": round(float(lat_vals.max()), 2),
+                "Eventos visibles": int(row.latency_rows),
+                "p50 (ms)": round(float(row.latency_p50_ms), 2),
+                "p95 (ms)": round(float(row.latency_p95_ms), 2),
+                "p99 (ms)": round(float(row.latency_p99_ms), 2),
+                "Mín. (ms)": round(float(row.latency_min_ms), 2),
+                "Máx. (ms)": round(float(row.latency_max_ms), 2),
                 "_scenario": scenario,
                 "_strategy": strategy,
             }
@@ -728,12 +881,18 @@ def export_latency_summary_table(latency: pd.DataFrame, out_dir: Path):
     if not rows:
         print("[WARN] Sin filas para latency_summary_table.csv")
         return
-    table = pd.DataFrame(rows).sort_values(["_scenario", "_strategy"]).drop(columns=["_scenario", "_strategy"])
+    table = pd.DataFrame(rows)
+    table["_scenario_order"] = pd.Categorical(table["_scenario"], categories=SCENARIO_ORDER, ordered=True)
+    table["_strategy_order"] = pd.Categorical(table["_strategy"], categories=STRATEGY_ORDER, ordered=True)
+    table = table.sort_values(["_scenario_order", "_strategy_order"]).drop(
+        columns=["_scenario", "_strategy", "_scenario_order", "_strategy_order"]
+    )
     table.to_csv(out_dir / "latency_summary_table.csv", index=False)
     print("[OK] latency_summary_table.csv")
 
 
 def fig_11_1_latency_distribution(latency: pd.DataFrame, out_dir: Path):
+    """Generates the official latency distribution boxplot figure."""
     if latency.empty or "latency_ms" not in latency.columns:
         print("[WARN] Sin datos para fig_11_1_latency_distribution")
         return
@@ -762,21 +921,20 @@ def fig_11_1_latency_distribution(latency: pd.DataFrame, out_dir: Path):
                 whisker.set_color("#555555")
             for cap in bp["caps"]:
                 cap.set_color("#555555")
-            for pos, values in enumerate(data, start=1):
-                _add_box_stats(ax, float(pos), values)
             ax.set_title(_format_scenario(scenario))
             ax.set_xticks(range(1, len(order) + 1))
             ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
             ax.set_yscale("log")
             _light_axis_style(ax)
             if idx == 0:
-                ax.set_ylabel("Latencia de disponibilidad (ms, escala logarítmica)")
-        fig.suptitle("Distribución de la latencia de disponibilidad por estrategia y escenario")
+                ax.set_ylabel("Latencia (ms, escala log10)")
+        fig.suptitle("Distribución de latencia")
         fig.tight_layout(rect=[0, 0, 1, 0.94])
         _save_figure(fig, out_dir, "fig_11_1_latency_distribution")
 
 
 def _aggregate_metrics(metrics: pd.DataFrame, aggregations: dict[str, str]) -> pd.DataFrame:
+    """Aggregates metric columns by strategy and scenario using supplied reductions."""
     if metrics.empty:
         return pd.DataFrame()
     agg = metrics.groupby(["strategy", "scenario"], observed=True).agg(aggregations).reset_index()
@@ -785,17 +943,35 @@ def _aggregate_metrics(metrics: pd.DataFrame, aggregations: dict[str, str]) -> p
     return agg.sort_values(["scenario", "strategy"]).reset_index(drop=True)
 
 
+def _aggregate_mean_sem(metrics: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
+    """Computes mean and standard error by strategy/scenario for selected metrics."""
+    if metrics.empty:
+        return pd.DataFrame()
+    rows = []
+    for (strategy, scenario), grp in metrics.groupby(["strategy", "scenario"], observed=True):
+        row = {"strategy": strategy, "scenario": scenario}
+        for col in value_cols:
+            vals = pd.to_numeric(grp.get(col, np.nan), errors="coerce").dropna()
+            row[f"{col}_mean"] = float(vals.mean()) if not vals.empty else np.nan
+            row[f"{col}_sem"] = float(vals.sem()) if len(vals) > 1 else 0.0
+        rows.append(row)
+    agg = pd.DataFrame(rows)
+    if agg.empty:
+        return agg
+    agg["strategy"] = pd.Categorical(agg["strategy"], categories=STRATEGY_ORDER, ordered=True)
+    agg["scenario"] = pd.Categorical(agg["scenario"], categories=SCENARIO_ORDER, ordered=True)
+    return agg.sort_values(["scenario", "strategy"]).reset_index(drop=True)
+
+
 def fig_11_2_official_window_throughput(metrics: pd.DataFrame, out_dir: Path):
-    agg = _aggregate_metrics(
-        metrics,
-        {"generated_eps_real": "mean", "visible_eps_cutoff": "mean", "delivery_ratio_cutoff_pct": "mean"},
-    )
+    """Generates generated-vs-visible throughput bars for the official window."""
+    agg = _aggregate_mean_sem(metrics, ["generated_eps_real", "visible_eps_cutoff", "delivery_ratio_cutoff_pct"])
     if agg.empty:
         print("[WARN] Sin datos para fig_11_2_official_window_throughput")
         return
     scenarios = _ordered_scenarios_from_df(agg)
     with plt.style.context("seaborn-v0_8-whitegrid"):
-        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(8.5, 5.2 * len(scenarios)), 5.4), sharey=True, squeeze=False)
+        fig, axes = plt.subplots(1, len(scenarios), figsize=(max(8.5, 5.2 * len(scenarios)), 5.4), sharey=False, squeeze=False)
         axes = axes[0]
         all_rates = []
         for idx, scenario in enumerate(scenarios):
@@ -804,35 +980,38 @@ def fig_11_2_official_window_throughput(metrics: pd.DataFrame, out_dir: Path):
             order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
             x = np.arange(len(order))
             width = 0.34
-            produced = [float(sub.at[strategy, "generated_eps_real"]) for strategy in order]
-            visible = [float(sub.at[strategy, "visible_eps_cutoff"]) for strategy in order]
+            produced = [float(sub.at[strategy, "generated_eps_real_mean"]) for strategy in order]
+            produced_err = [float(sub.at[strategy, "generated_eps_real_sem"]) for strategy in order]
+            visible = [float(sub.at[strategy, "visible_eps_cutoff_mean"]) for strategy in order]
+            visible_err = [float(sub.at[strategy, "visible_eps_cutoff_sem"]) for strategy in order]
             all_rates.extend(produced)
             all_rates.extend(visible)
-            ratios = [float(sub.at[strategy, "delivery_ratio_cutoff_pct"]) for strategy in order]
-            ax.bar(x - width / 2, produced, width=width, color=SERIES_COLORS["primary_light"], edgecolor="#333333", linewidth=0.4, label="Producido real" if idx == 0 else None)
-            visible_bars = ax.bar(x + width / 2, visible, width=width, color=SERIES_COLORS["primary_dark"], edgecolor="#333333", linewidth=0.4, label="Visible en PostgreSQL al corte oficial" if idx == 0 else None)
+            ratios = [float(sub.at[strategy, "delivery_ratio_cutoff_pct_mean"]) for strategy in order]
+            ax.bar(x - width / 2, produced, width=width, yerr=produced_err, capsize=3, color=SERIES_COLORS["primary_light"], edgecolor="#333333", linewidth=0.4, label="Generado" if idx == 0 else None)
+            visible_bars = ax.bar(x + width / 2, visible, width=width, yerr=visible_err, capsize=3, color=SERIES_COLORS["primary_dark"], edgecolor="#333333", linewidth=0.4, label="Visible al corte" if idx == 0 else None)
+            target = SCENARIO_TARGET_EPS.get(str(scenario))
+            if target:
+                ax.axhline(target, color="#111111", linewidth=0.9, linestyle=":", alpha=0.85)
+                ax.text(0.02, target * 1.02, "Objetivo", transform=ax.get_yaxis_transform(), fontsize=7.5, color="#333333")
             ax.set_title(_format_scenario(scenario))
             ax.set_xticks(x)
             ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
             _light_axis_style(ax)
             if idx == 0:
-                ax.set_ylabel("Eventos por segundo")
-            _label_bars(ax, visible_bars, ratios, lambda v: f"V/G {v:.1f}%", offset_ratio=0.018)
-        y_max = max(all_rates) * 1.18 if all_rates else 1
-        for ax in axes:
+                ax.set_ylabel("Eventos/s")
+            y_max = max([*produced, *visible, float(target or 0)]) * 1.22 if order else 1
             ax.set_ylim(0, y_max)
+            _label_bars(ax, visible_bars, ratios, lambda v: f"Visible {v:.1f}%", offset_ratio=0.018)
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.suptitle("Tasa producida y tasa visible en PostgreSQL durante la ventana oficial", y=0.985)
+        fig.suptitle("Rendimiento oficial", y=0.985)
         fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
         fig.tight_layout(rect=[0, 0, 1, 0.80])
         _save_figure(fig, out_dir, "fig_11_2_official_window_throughput")
 
 
 def fig_11_3_delivery_ratio_cutoff_vs_drain(metrics: pd.DataFrame, out_dir: Path):
-    agg = _aggregate_metrics(
-        metrics,
-        {"delivery_ratio_cutoff_pct": "mean", "delivery_ratio_final_pct": "mean"},
-    )
+    """Generates delivery ratio comparison at cutoff and after drain."""
+    agg = _aggregate_mean_sem(metrics, ["delivery_ratio_cutoff_pct", "delivery_ratio_final_pct"])
     if agg.empty:
         print("[WARN] Sin datos para fig_11_3_delivery_ratio_cutoff_vs_drain")
         return
@@ -846,28 +1025,32 @@ def fig_11_3_delivery_ratio_cutoff_vs_drain(metrics: pd.DataFrame, out_dir: Path
             order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
             x = np.arange(len(order))
             width = 0.34
-            cutoff_vals = [float(sub.at[strategy, "delivery_ratio_cutoff_pct"]) for strategy in order]
-            drain_vals = [float(sub.at[strategy, "delivery_ratio_final_pct"]) for strategy in order]
-            bars_cutoff = ax.bar(x - width / 2, cutoff_vals, width=width, color=SERIES_COLORS["secondary_light"], edgecolor="#333333", linewidth=0.4, label="Al corte oficial" if idx == 0 else None)
-            bars_drain = ax.bar(x + width / 2, drain_vals, width=width, color=SERIES_COLORS["secondary_dark"], edgecolor="#333333", linewidth=0.4, label="Después del drenaje" if idx == 0 else None)
+            cutoff_vals = [float(sub.at[strategy, "delivery_ratio_cutoff_pct_mean"]) for strategy in order]
+            cutoff_err = [float(sub.at[strategy, "delivery_ratio_cutoff_pct_sem"]) for strategy in order]
+            drain_vals = [float(sub.at[strategy, "delivery_ratio_final_pct_mean"]) for strategy in order]
+            drain_err = [float(sub.at[strategy, "delivery_ratio_final_pct_sem"]) for strategy in order]
+            bars_cutoff = ax.bar(x - width / 2, cutoff_vals, width=width, yerr=cutoff_err, capsize=3, color=SERIES_COLORS["secondary_light"], edgecolor="#333333", linewidth=0.4, hatch="//", label="Corte" if idx == 0 else None)
+            bars_drain = ax.bar(x + width / 2, drain_vals, width=width, yerr=drain_err, capsize=3, color=SERIES_COLORS["secondary_dark"], edgecolor="#333333", linewidth=0.4, label="Drenaje" if idx == 0 else None)
+            ax.axhline(100, color="#111111", linewidth=0.9, linestyle=":", alpha=0.85)
             ax.set_title(_format_scenario(scenario))
             ax.set_xticks(x)
             ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
-            ax.set_ylim(0, 105)
+            ax.set_ylim(0, 112)
             _light_axis_style(ax)
             if idx == 0:
-                ax.set_ylabel("Eventos visibles / eventos producidos (%)")
+                ax.set_ylabel("Visibles / producidos (%)")
             _label_bars(ax, bars_cutoff, cutoff_vals, lambda v: f"{v:.1f}%")
             _label_bars(ax, bars_drain, drain_vals, lambda v: f"{v:.1f}%")
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.suptitle("Proporción de eventos visibles al corte oficial y después del drenaje", y=0.985)
+        fig.suptitle("Entrega visible", y=0.985)
         fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
         fig.tight_layout(rect=[0, 0, 1, 0.80])
         _save_figure(fig, out_dir, "fig_11_3_delivery_ratio_cutoff_vs_drain")
 
 
 def fig_11_4_pending_visibility_backlog(metrics: pd.DataFrame, out_dir: Path):
-    agg = _aggregate_metrics(metrics, {"pending_visibility_events": "mean"})
+    """Generates estimated pending visibility backlog bars."""
+    agg = _aggregate_mean_sem(metrics, ["pending_visibility_events"])
     if agg.empty:
         print("[WARN] Sin datos para fig_11_4_pending_visibility_backlog")
         return
@@ -881,25 +1064,26 @@ def fig_11_4_pending_visibility_backlog(metrics: pd.DataFrame, out_dir: Path):
             sub = agg[agg["scenario"] == scenario].set_index("strategy")
             order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
             x = np.arange(len(order))
-            vals = [float(sub.at[strategy, "pending_visibility_events"]) for strategy in order]
+            vals = [float(sub.at[strategy, "pending_visibility_events_mean"]) / 1_000_000.0 for strategy in order]
+            errs = [float(sub.at[strategy, "pending_visibility_events_sem"]) / 1_000_000.0 for strategy in order]
             all_vals.extend(vals)
-            bars = ax.bar(x, vals, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
+            bars = ax.bar(x, vals, yerr=errs, capsize=3, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
             ax.set_title(_format_scenario(scenario))
             ax.set_xticks(x)
             ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
             _light_axis_style(ax)
             if idx == 0:
-                ax.set_ylabel("Eventos pendientes de visibilidad")
-            _label_bars(ax, bars, vals, lambda v: f"{v:,.0f}")
-        y_max = max(all_vals) * 1.15 if all_vals else 1
-        for ax in axes:
-            ax.set_ylim(0, y_max)
-        fig.suptitle("Acumulación estimada de eventos pendientes de visibilidad al corte oficial")
+                ax.set_ylabel("Eventos pendientes (millones)")
+            _label_bars(ax, bars, vals, lambda v: f"{v:.2f}M")
+            local_max = max(vals) * 1.18 if vals else 1
+            ax.set_ylim(0, local_max if local_max > 0 else 1)
+        fig.suptitle("Backlog al corte")
         fig.tight_layout(rect=[0, 0, 1, 0.94])
         _save_figure(fig, out_dir, "fig_11_4_pending_visibility_backlog")
 
 
 def fig_11_4b_kafka_consumer_lag_real(metrics: pd.DataFrame, out_dir: Path):
+    """Generates Kafka consumer lag bars when real lag coverage is complete."""
     if metrics.empty:
         return
     lag_data = metrics.dropna(subset=["kafka_lag_max"]).copy()
@@ -937,7 +1121,8 @@ def fig_11_4b_kafka_consumer_lag_real(metrics: pd.DataFrame, out_dir: Path):
 
 
 def fig_11_5_drain_time(metrics: pd.DataFrame, out_dir: Path):
-    agg = _aggregate_metrics(metrics, {"time_to_drain_s": "mean"})
+    """Generates post-generation drain time bars."""
+    agg = _aggregate_mean_sem(metrics, ["time_to_drain_s"])
     if agg.empty:
         print("[WARN] Sin datos para fig_11_5_drain_time")
         return
@@ -951,26 +1136,27 @@ def fig_11_5_drain_time(metrics: pd.DataFrame, out_dir: Path):
             sub = agg[agg["scenario"] == scenario].set_index("strategy")
             order = [strategy for strategy in STRATEGY_ORDER if strategy in sub.index]
             x = np.arange(len(order))
-            vals = [float(sub.at[strategy, "time_to_drain_s"]) for strategy in order]
+            vals = [float(sub.at[strategy, "time_to_drain_s_mean"]) for strategy in order]
+            errs = [float(sub.at[strategy, "time_to_drain_s_sem"]) for strategy in order]
             all_vals.extend(vals)
-            bars = ax.bar(x, vals, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
+            bars = ax.bar(x, vals, yerr=errs, capsize=3, width=0.58, color=[STRATEGY_COLORS[strategy] for strategy in order])
             ax.set_title(_format_scenario(scenario))
             ax.set_xticks(x)
             ax.set_xticklabels([_format_strategy(strategy) for strategy in order])
             _light_axis_style(ax)
             if idx == 0:
-                ax.set_ylabel("Tiempo de drenaje (s)")
+                ax.set_ylabel("Drenaje post-generación (s)")
             _label_bars(ax, bars, vals, lambda v: f"{v:.1f}")
-        y_max = max(all_vals) * 1.15 if all_vals else 1
-        for ax in axes:
-            ax.set_ylim(0, y_max)
-        fig.suptitle("Tiempo de drenaje posterior a la finalización de la generación")
+            local_max = max(vals) * 1.18 if vals else 1
+            ax.set_ylim(0, local_max if local_max > 0 else 1)
+        fig.suptitle("Tiempo de drenaje")
         fig.tight_layout(rect=[0, 0, 1, 0.94])
         _save_figure(fig, out_dir, "fig_11_5_drain_time")
 
 
 def fig_11_6_compute_resource_usage(metrics: pd.DataFrame, out_dir: Path):
-    agg = _aggregate_metrics(metrics, {"cpu_avg_cores": "mean", "memory_rss_avg_mb": "mean"})
+    """Generates CPU and memory usage summary bars."""
+    agg = _aggregate_mean_sem(metrics, ["cpu_avg_cores", "memory_rss_avg_mb"])
     if agg.empty:
         print("[WARN] Sin datos para fig_11_6_compute_resource_usage")
         return
@@ -982,28 +1168,31 @@ def fig_11_6_compute_resource_usage(metrics: pd.DataFrame, out_dir: Path):
         axes = axes[0]
         for idx, strategy in enumerate(STRATEGY_ORDER):
             sub = agg[agg["strategy"] == strategy].set_index("scenario")
-            cpu_vals = [float(sub.at[scenario, "cpu_avg_cores"]) if scenario in sub.index else 0.0 for scenario in scenarios]
-            mem_vals = [float(sub.at[scenario, "memory_rss_avg_mb"]) if scenario in sub.index else 0.0 for scenario in scenarios]
+            cpu_vals = [float(sub.at[scenario, "cpu_avg_cores_mean"]) if scenario in sub.index else 0.0 for scenario in scenarios]
+            cpu_errs = [float(sub.at[scenario, "cpu_avg_cores_sem"]) if scenario in sub.index else 0.0 for scenario in scenarios]
+            mem_vals = [float(sub.at[scenario, "memory_rss_avg_mb_mean"]) / 1024.0 if scenario in sub.index else 0.0 for scenario in scenarios]
+            mem_errs = [float(sub.at[scenario, "memory_rss_avg_mb_sem"]) / 1024.0 if scenario in sub.index else 0.0 for scenario in scenarios]
             positions = x + (idx - 1) * width
-            axes[0].bar(positions, cpu_vals, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
-            axes[1].bar(positions, mem_vals, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
-        axes[0].set_title("CPU promedio (cores)")
-        axes[1].set_title("Memoria RSS promedio (MB)")
+            axes[0].bar(positions, cpu_vals, yerr=cpu_errs, capsize=2.5, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
+            axes[1].bar(positions, mem_vals, yerr=mem_errs, capsize=2.5, width=width, color=STRATEGY_COLORS[strategy], label=_format_strategy(strategy))
+        axes[0].set_title("CPU promedio")
+        axes[1].set_title("Memoria RSS promedio")
         for ax in axes:
             ax.set_xticks(x)
             ax.set_xticklabels([_format_scenario(scenario) for scenario in scenarios])
             ax.set_ylim(bottom=0)
             _light_axis_style(ax)
-        axes[0].set_ylabel("CPU promedio (cores)")
-        axes[1].set_ylabel("Memoria RSS promedio (MB)")
+        axes[0].set_ylabel("CPU (vCPU)")
+        axes[1].set_ylabel("Memoria (GB)")
         handles, labels = axes[0].get_legend_handles_labels()
-        fig.suptitle("Uso promedio de CPU y memoria en el nodo de cómputo", y=0.985)
+        fig.suptitle("Uso de recursos", y=0.985)
         fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.90), fontsize=10)
         fig.tight_layout(rect=[0, 0, 1, 0.80])
         _save_figure(fig, out_dir, "fig_11_6_compute_resource_usage")
 
 
 def export_statistical_tests(latency: pd.DataFrame, out_dir: Path):
+    """Exports Kruskal-Wallis and pairwise Mann-Whitney latency tests."""
     if latency.empty or "latency_ms" not in latency.columns:
         print("[WARN] Sin datos de latencia para pruebas estadisticas")
         return
@@ -1046,6 +1235,7 @@ def export_statistical_tests(latency: pd.DataFrame, out_dir: Path):
 
 
 def parse_args() -> argparse.Namespace:
+    """Parses analyzer CLI arguments."""
     parser = argparse.ArgumentParser(description="Official thesis analyzer")
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--output", default=None)
@@ -1067,6 +1257,7 @@ CYCLIC_CYCLE_SECONDS = 150
 
 
 def _cyclic_target_rate(elapsed_s: float) -> int:
+    """Returns the target rate for elapsed time in the cyclic advanced profile."""
     cycle_elapsed = elapsed_s % CYCLIC_CYCLE_SECONDS
     for start_s, end_s, rate in CYCLIC_SEGMENTS:
         if start_s <= cycle_elapsed < end_s:
@@ -1075,6 +1266,7 @@ def _cyclic_target_rate(elapsed_s: float) -> int:
 
 
 def _advanced_keys(metrics: pd.DataFrame) -> pd.DataFrame:
+    """Extracts strategy/scenario/run keys for advanced cyclic or bursty runs."""
     if metrics.empty:
         return pd.DataFrame(columns=["strategy", "scenario", "run_id"])
     mask = metrics["scenario"].astype(str).str.contains("cyclic|bursty", regex=True, na=False)
@@ -1087,6 +1279,7 @@ def build_advanced_timeseries(
     generator_summary: pd.DataFrame,
     out_dir: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Builds advanced produced, visible, latency, and backlog time series."""
     keys = _advanced_keys(metrics)
     if keys.empty:
         empty = pd.DataFrame()
@@ -1205,6 +1398,7 @@ def build_advanced_timeseries(
 
 
 def _aggregate_rate_window(df: pd.DataFrame, value_cols: list[str], window_s: int = 5) -> pd.DataFrame:
+    """Averages rate-like time-series values into fixed-width windows."""
     if df.empty:
         return df
     tmp = df.copy()
@@ -1214,6 +1408,7 @@ def _aggregate_rate_window(df: pd.DataFrame, value_cols: list[str], window_s: in
 
 
 def fig_a1_cyclic_response_timeseries(produced: pd.DataFrame, visible: pd.DataFrame, out_dir: Path):
+    """Generates advanced cyclic produced-vs-visible response time series."""
     if produced.empty or visible.empty:
         print("[WARN] Sin series temporales para fig_a1_cyclic_response_timeseries")
         return
@@ -1241,6 +1436,7 @@ def fig_a1_cyclic_response_timeseries(produced: pd.DataFrame, visible: pd.DataFr
 
 
 def fig_a2_observable_backlog_timeseries(backlog: pd.DataFrame, out_dir: Path):
+    """Generates advanced observable backlog time series."""
     if backlog.empty:
         print("[WARN] Sin backlog temporal para fig_a2_observable_backlog_timeseries")
         return
@@ -1267,6 +1463,7 @@ def fig_a2_observable_backlog_timeseries(backlog: pd.DataFrame, out_dir: Path):
     _save_figure(fig, out_dir, "fig_a2_observable_backlog_timeseries")
 
 def fig_a3_latency_percentiles_timeseries(latency_ts: pd.DataFrame, out_dir: Path):
+    """Generates advanced latency percentile time series by strategy."""
     if latency_ts.empty:
         print("[WARN] Sin latencia temporal para fig_a3_latency_percentiles_timeseries")
         return
@@ -1290,6 +1487,7 @@ def fig_a3_latency_percentiles_timeseries(latency_ts: pd.DataFrame, out_dir: Pat
 
 
 def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFrame, out_dir: Path):
+    """Generates advanced cyclic latency distribution boxplot."""
     adv_scenarios = metrics["scenario"].astype(str).unique()
     adv_latency = latency[latency["scenario"].astype(str).isin(adv_scenarios)]
     if adv_latency.empty:
@@ -1338,12 +1536,16 @@ def fig_a4_latency_distribution_cyclic(latency: pd.DataFrame, metrics: pd.DataFr
         _save_figure(fig, out_dir, "fig_a4_latency_distribution_cyclic")
 
 def main():
+    """Runs the official analyzer CLI from raw result artifacts to figures and summary CSVs."""
     args = parse_args()
     results_dir = Path(args.results_dir).resolve()
     out_dir = Path(args.output).resolve() if args.output else results_dir / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    latency = apply_scope_filter(load_latency(results_dir), args.scope)
+    latency_artifacts = load_latency_artifacts(results_dir, args.scope)
+    latency = latency_artifacts.sample
+    latency_run_stats = latency_artifacts.run_stats
+    latency_scenario_stats = latency_artifacts.scenario_stats
     _ = apply_scope_filter(load_prometheus_snapshot(results_dir), args.scope)
     run_metadata = apply_scope_filter(load_run_metadata(results_dir), args.scope)
     run_summary = apply_scope_filter(load_run_summaries(results_dir), args.scope)
@@ -1355,13 +1557,24 @@ def main():
         print("[ERROR] No benchmark data found")
         sys.exit(1)
 
-    val_state = run_validations(results_dir, args.scope, latency, run_metadata, run_summary, generator_summary, lag_ts)
+    val_state = run_validations(results_dir, args.scope, latency, latency_run_stats, run_metadata, run_summary, generator_summary, lag_ts)
     if args.validate and val_state.err > 0:
         sys.exit(1)
 
-    metrics = build_official_metrics(latency, run_metadata, run_summary, generator_summary, lag_ts, resources_ts, out_dir)
+    metrics = build_official_metrics(
+        latency,
+        latency_run_stats,
+        results_dir,
+        args.scope,
+        run_metadata,
+        run_summary,
+        generator_summary,
+        lag_ts,
+        resources_ts,
+        out_dir,
+    )
 
-    export_latency_summary_table(latency, out_dir)
+    export_latency_summary_table(latency_scenario_stats, out_dir)
 
     official_metrics = metrics[metrics["scenario"].isin(SCENARIO_ORDER)].copy()
     official_latency = latency[latency["scenario"].isin(SCENARIO_ORDER)].copy()
