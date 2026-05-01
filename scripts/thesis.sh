@@ -34,8 +34,8 @@ DESTROY_INFRA=false
 
 STRATEGIES="batch microbatch streaming"
 SCENARIOS="low-load medium-load high-load"
-REPS=5
-DURATION=300
+REPS=4
+DURATION=200
 WARMUP=30
 COOLDOWN=30
 TRIGGER="5 seconds"

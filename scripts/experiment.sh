@@ -29,10 +29,10 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 RESULTS_BASE="${RESULTS_BASE:-$ROOT_DIR/results}"
 
 # ── Defaults (override via arguments) ──────────────────────────────
-# Standard thesis experiment: 5 reps × 3 scenarios × 3 strategies = 45 runs
+# Standard thesis experiment: 4 reps × 3 scenarios × 3 strategies = 36 runs
 STRATEGIES=${STRATEGIES:-"batch microbatch streaming"}
 SCENARIOS=${SCENARIOS:-"low-load medium-load high-load"}
-REPETITIONS=${REPETITIONS:-5}
+REPETITIONS=${REPETITIONS:-4}
 TRIGGER_INTERVAL=${TRIGGER_INTERVAL:-"5 seconds"}
 COOLDOWN_SECONDS=${COOLDOWN_SECONDS:-30}   # >= Flink checkpoint interval + margin
 EXPORT_METRICS=${EXPORT_METRICS:-true}
@@ -41,7 +41,7 @@ EVENT_SCHEMA=${EVENT_SCHEMA:-""}
 SCOPE=${SCOPE:-official}
 LOAD_PROFILE=${LOAD_PROFILE:-constant}
 COMPUTE_REGION=${COMPUTE_REGION:-primary}
-export RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
+export RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-200}
 WARMUP_SECONDS=${WARMUP_SECONDS:-30}    # 30 s per protocol spec (JVM JIT warm-up)
 
 # ── Quick mode presets ─────────────────────────────────────────────

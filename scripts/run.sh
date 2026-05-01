@@ -659,7 +659,7 @@ write_run_metadata() {
     local scenario="$3"
     local run_id="$4"
     local metadata_file="$run_dir/run_metadata.json"
-    local official_duration="${RUN_DURATION_SECONDS:-300}"
+    local official_duration="${RUN_DURATION_SECONDS:-200}"
     local git_commit
     local git_branch
     git_commit=$(get_git_commit)
@@ -983,7 +983,7 @@ build_run_summary() {
     local prom_file="$run_dir/prometheus_snapshot.csv"
     local generator_summary_file="$run_dir/generator_summary.json"
     local run_summary_file="$run_dir/run_summary.json"
-    local official_duration="${RUN_DURATION_SECONDS:-300}"
+    local official_duration="${RUN_DURATION_SECONDS:-200}"
 
     local generated_events
     generated_events=$(json_get_number "$generator_summary_file" "generated_events" "0")
@@ -1316,7 +1316,7 @@ MASTER_PORT=${SPARK_MASTER_PORT:-7077}
 POSTGRES_DB_NAME=${POSTGRES_DB:-benchmark}
 POSTGRES_USER_NAME=${POSTGRES_USER:-benchmark}
 POSTGRES_PASSWORD_VALUE=${POSTGRES_PASSWORD:-benchmark}
-RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-300}
+RUN_DURATION_SECONDS=${RUN_DURATION_SECONDS:-200}
 FLINK_PARALLELISM_VALUE=${FLINK_PARALLELISM:-4}
 FLINK_DETACHED=${FLINK_DETACHED:-false}
 
