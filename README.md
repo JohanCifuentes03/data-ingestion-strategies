@@ -115,7 +115,7 @@ bash scripts/thesis.sh deploy --mode distributed
 
 ### 2. Execution
 
-Official full run (45 runs: 3 strategies × 3 scenarios × 5 reps):
+Official full run (36 runs: 3 strategies × 3 scenarios × 4 reps; 200s run, 30s warmup, 30s cooldown by default):
 
 ```bash
 bash scripts/thesis.sh run \
@@ -303,17 +303,17 @@ Probe outputs are written to `latency_samples.csv` and are the primary source fo
 
 Official thesis scenario profile used by this repository (`high-load = 30,000 ev/s`):
 
-| Escenario | Tasa objetivo | Payload base | Schema | Eventos estimados por run (300s) |
+| Escenario | Tasa objetivo | Payload base | Schema | Eventos estimados por run (200s) |
 |----------|---------------:|-------------:|--------|----------------------------------:|
-| low-load | 2,000 ev/s | 1,500 B | `iot_sensor` | 600,000 |
-| medium-load | 10,000 ev/s | 1,500 B | `financial_tick` | 3,000,000 |
-| high-load | 30,000 ev/s | 1,500 B | `health_monitor` | 9,000,000 |
+| low-load | 2,000 ev/s | 1,500 B | `iot_sensor` | 400,000 |
+| medium-load | 10,000 ev/s | 1,500 B | `financial_tick` | 2,000,000 |
+| high-load | 30,000 ev/s | 1,500 B | `health_monitor` | 6,000,000 |
 
-Approximate generated volume (JSON over Kafka) for a 300s run:
+Approximate generated volume (JSON over Kafka) for a 200s run:
 
-- **low-load**: ~0.95-1.1 GB
-- **medium-load**: ~4.8-5.6 GB
-- **high-load**: ~14.4-16.8 GB
+- **low-load**: ~0.64-0.76 GB
+- **medium-load**: ~3.2-3.8 GB
+- **high-load**: ~9.6-11.4 GB
 
 For full defense-oriented details (protocols, ports, data types, formulas, and per-experiment totals), see:
 - `docs/architecture.md`
@@ -437,7 +437,7 @@ Advanced cyclic outputs:
 ## Notes
 
 1. **Local Mode**: Requires 16GB+ RAM for concurrent strategies
-2. **Distributed Mode**: A full 45-run distributed experiment can take around 5 hours and should be executed in sessions
+2. **Distributed Mode**: A full 36-run distributed experiment can take several hours and should be executed in sessions
 3. **Official Scope**: the official thesis benchmark uses only `low-load`, `medium-load`, and `high-load`
 4. **Cost**: AWS distributed tests cost roughly a few USD per full benchmark session, depending on instance uptime
 

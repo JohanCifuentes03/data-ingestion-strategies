@@ -244,9 +244,9 @@ These values match the official generator defaults and are the baseline for thes
 
 | Scenario | Event rate | Payload base | Schema | Run duration (typical) |
 |---------|------------:|-------------:|--------|-----------------------:|
-| `low-load` | 2,000 ev/s | 1,500 B | `iot_sensor` | 300 s |
-| `medium-load` | 10,000 ev/s | 1,500 B | `financial_tick` | 300 s |
-| `high-load` | 30,000 ev/s | 1,500 B | `health_monitor` | 300 s |
+| `low-load` | 2,000 ev/s | 1,500 B | `iot_sensor` | 200 s |
+| `medium-load` | 10,000 ev/s | 1,500 B | `financial_tick` | 200 s |
+| `high-load` | 30,000 ev/s | 1,500 B | `health_monitor` | 200 s |
 
 Advanced profiles currently include `bursty-load`, `bursty-load-br-compute`, and `cyclic-load-br-compute`. They are useful for appendix analysis and operational stress testing, but the official thesis matrix remains the three constant-load scenarios above.
 
@@ -256,13 +256,13 @@ Assumptions for quick planning:
 - JSON event envelope overhead (metadata + keys + structure): ~200-300 B/event
 - Effective event bytes at Kafka ingress for 1,500 B minimum payload profile: ~1,600-1,900 B/event
 
-Estimated generated volume per 300 s run:
+Estimated generated volume per 200 s run:
 
 | Scenario | Events/run | Approx bytes/event | Approx total volume/run |
 |---------|-----------:|-------------------:|-------------------------:|
-| `low-load` | 600,000 | 1,600-1,900 B | ~0.95-1.1 GB |
-| `medium-load` | 3,000,000 | 1,600-1,900 B | ~4.8-5.6 GB |
-| `high-load` | 9,000,000 | 1,600-1,900 B | ~14.4-16.8 GB |
+| `low-load` | 400,000 | 1,600-1,900 B | ~0.64-0.76 GB |
+| `medium-load` | 2,000,000 | 1,600-1,900 B | ~3.2-3.8 GB |
+| `high-load` | 6,000,000 | 1,600-1,900 B | ~9.6-11.4 GB |
 
 These are generated-stream estimates (producer side). Sink-visible totals can be lower depending on strategy, runtime limits, and backpressure.
 
