@@ -4,8 +4,9 @@
 # INSTRUCCIONES:
 #   1. Copia este archivo como `terraform.tfvars`.
 #      $ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
-#   2. Completa cada valor con los datos reales de tu cuenta AWS
+#   2. Completa cada valor con los datos reales de tu cuenta AWS.
 #   3. NO subas `terraform.tfvars` al repositorio (ya está en .gitignore).
+#   4. Si una credencial real se filtra, rótala en AWS IAM antes de continuar.
 #
 # COMO OBTENER CREDENCIALES AWS:
 #   - aws_access_key:   AWS Console → Nombre → Security credentials → Access keys → Create

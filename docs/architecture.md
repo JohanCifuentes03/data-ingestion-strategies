@@ -22,6 +22,7 @@ This benchmark quantifies the trade-offs between these approaches using a contro
 - Resource efficiency (CPU, memory, network)
 - Distributed execution across the official low, medium, and high load profiles
 - Optional advanced appendix/stress runs using bursty or cyclic profiles
+- Operational validity checks such as NTP synchronization, sink readiness, result isolation, and drain observation
 
 **Official baseline**:
 - Scenarios: `low-load`, `medium-load`, `high-load`
@@ -41,7 +42,7 @@ This benchmark quantifies the trade-offs between these approaches using a contro
 - Security and authentication mechanisms
 - Cost optimization strategies
 
-The advanced Brazil workflow is an appendix/stress configuration, not the official thesis baseline. It is used to test behavior under cyclic load and interregional compute placement while keeping official results isolated.
+The advanced Brazil workflow is an appendix/stress configuration, not the official thesis baseline. It is used to test behavior under cyclic load and interregional compute placement while keeping official results isolated. Operational checks protect measurement validity, but they are not a fault-injection or recovery benchmark.
 
 ## 2. Reference Architecture
 
@@ -449,7 +450,7 @@ All strategies use `ON CONFLICT (event_id) DO NOTHING` at the sink to avoid dupl
 - **Partitions**: 12 (allows parallelism up to 12 consumers)
 - **Replication Factor**: 1 (local), 3 (distributed)
 - **Retention**: 7 days
-- **Compression**: None (to measure raw throughput)
+- **Producer Compression**: `lz4` in the Python generator to reduce network pressure while keeping the same configuration across strategies
 
 **Metrics Exposed**:
 - `kafka_server_brokertopicmetrics_messagesinpersec`

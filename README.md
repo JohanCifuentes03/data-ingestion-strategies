@@ -11,15 +11,15 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 1. **RQ1**: How does ingestion strategy affect end-to-end latency under varying workloads?
 2. **RQ2**: What is the throughput-latency trade-off for each strategy?
 3. **RQ3**: How resource-efficient is each strategy in terms of CPU, memory, and cost?
-4. **RQ4**: How do strategies handle failures and recovery?
+4. **RQ4**: What operational safeguards are needed to keep latency measurements valid?
 
 ## Key Findings
 
-| Strategy | Latency (p50) | Throughput | Recovery Time | Best Use Case |
-|----------|---------------|------------|---------------|---------------|
-| **Batch** | ~2 minutes | Very High | N/A (scheduled) | Historical analytics, ETL |
-| **Micro-batch** | ~5 seconds | High | < 30s | Near real-time dashboards |
-| **Stream** | ~200ms | Medium-High | < 10s | Real-time monitoring, IoT |
+| Strategy | Latency (p50) | Throughput | Operational Notes | Best Use Case |
+|----------|---------------|------------|-------------------|---------------|
+| **Batch** | ~2 minutes | Very High | Scheduled execution after accumulation | Historical analytics, ETL |
+| **Micro-batch** | ~5 seconds | High | Trigger/checkpoint driven; drains after generation | Near real-time dashboards |
+| **Stream** | ~200ms | Medium-High | Continuous execution with checkpointing and bounded run time | Real-time monitoring, IoT |
 
 *Results from distributed deployment (4-VM AWS topology, medium load)*
 
@@ -31,6 +31,10 @@ A comprehensive benchmark comparing three data ingestion architectures: **Batch 
 - **Java** 17 for Spark/Flink job builds
 - 16GB RAM, 4 CPU cores for local debugging
 - AWS credentials and Terraform/Ansible for distributed execution
+
+### Credential and state safety
+
+Distributed execution requires local AWS credentials in `infra/terraform/terraform.tfvars`, created from `infra/terraform/terraform.tfvars.example`. Never commit real `terraform.tfvars`, Terraform state files, generated inventories, `.env`, or `outputs.env`; these files can contain account metadata, IP addresses, keys, or infrastructure state. If any real credential is accidentally exposed, rotate it before running new experiments.
 
 The public entrypoint is:
 
@@ -394,6 +398,7 @@ bash scripts/thesis.sh destroy --mode distributed
 
 ### Secondary Metrics
 - **Consumer Lag**: diagnostic-only, only when real exporter coverage exists
+- **Operational validity checks**: NTP clock synchronization, sink readiness, result isolation, and post-generation drain behavior. Fault injection and recovery benchmarking are intentionally outside the official thesis baseline.
 
 Figures are exported in publication-ready formats:
 - **PNG**: Quick preview for notebooks/slides
@@ -424,6 +429,7 @@ Advanced cyclic outputs:
 - Do not delete `results-distributed/` or `results-advanced/` while an experiment is running or when resuming partial results.
 - `scripts/run.sh` truncates the PostgreSQL `events` table before each run; this is expected for isolated runs but means it should not be used casually during active experiments.
 - `scripts/collect-results.sh` replaces the local destination directory before copying from the sink node. Run it only when you are ready to sync remote results locally.
+- Do not commit `infra/terraform/terraform.tfvars`, `terraform.tfstate*`, `infra/terraform/outputs.env`, `infra/ansible/inventory.ini`, or `.env`. They are generated or secret-bearing local files.
 - If PostgreSQL reports `database system is in recovery mode`, check disk space on the sink VM and redeploy after freeing space.
 - Distributed runs enforce NTP checks through `scripts/check-clock-sync.sh`; clock skew above the threshold invalidates latency measurements.
 - `destroy` tears down local or distributed infrastructure. Do not run it while preserving active experiments.
@@ -441,9 +447,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/username/data-ingestion-strategies/issues)
+- **Issues**: repository issue tracker pending publication
 - **Documentation**: [docs/](docs/)
-- **Thesis**: [Link to published thesis]
+- **Thesis**: publication link pending
 
 ---
 
